@@ -29,6 +29,7 @@ cp "$binary" "$app/usr/bin/mario-kart-7"
 ln -s usr/bin/mario-kart-7 "$app/AppRun"
 cp "$here/zakuro.desktop" "$here/zakuro.png" "$app/"
 cp "$here/../recomplauncher.json" "$app/"
+test -f "$app/recomplauncher.json"
 
 # the update information has AppImage updaters, Gear Lever's say, follow the
 # releases

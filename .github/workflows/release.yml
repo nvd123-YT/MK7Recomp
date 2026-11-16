@@ -57,14 +57,19 @@ jobs:
       - name: Package for Windows
         if: runner.os == 'Windows'
         run: |
-          Compress-Archive -Path target/release/mario-kart-7.exe, README.md, LICENSE -DestinationPath ${{ matrix.archive }}
+          Get-Content recomplauncher.json -Raw | ConvertFrom-Json | Out-Null
+          Compress-Archive -Path target/release/mario-kart-7.exe, README.md, LICENSE, recomplauncher.json -DestinationPath ${{ matrix.archive }}
+          Expand-Archive -Path ${{ matrix.archive }} -DestinationPath package-check -Force
+          if (!(Test-Path package-check/recomplauncher.json)) { throw "recomplauncher.json is missing from the Windows package" }
           $env:RUST_LOG = 'info'
           target/release/mario-kart-7.exe --test-pattern --headless 1 --mute
 
       - name: Package for Linux
         if: runner.os == 'Linux'
         run: |
-          tar czf ${{ matrix.archive }} README.md LICENSE -C target/release mario-kart-7
+          python3 -m json.tool recomplauncher.json > /dev/null
+          tar czf ${{ matrix.archive }} README.md LICENSE recomplauncher.json -C target/release mario-kart-7
+          tar -tzf ${{ matrix.archive }} | grep -Fx recomplauncher.json
           packaging/appimage.sh target/release/mario-kart-7 MarioKart7-x86_64.AppImage
           APPIMAGE_EXTRACT_AND_RUN=1 RUST_LOG=info ./MarioKart7-x86_64.AppImage --test-pattern --headless 1 --mute
 
@@ -75,6 +80,8 @@ jobs:
         run: |
           packaging/macos-app.sh target/release/mario-kart-7 "${VERSION#v}" ${{ matrix.archive }}
           ditto -x -k ${{ matrix.archive }} unpacked
+          test -f unpacked/recomplauncher.json
+          test -f "unpacked/Mario Kart 7 Recompiled.app/Contents/Resources/recomplauncher.json"
           RUST_LOG=info "unpacked/Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7" --test-pattern --headless 1 --mute ${{ matrix.try }}
 
       - uses: actions/upload-artifact@v7

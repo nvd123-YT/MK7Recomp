@@ -19,6 +19,13 @@ This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other ga
 
 The application expects a legally obtained, decrypted dump of the game. It does not include the ROM, game code, textures, music, or other game assets.
 
+## Version 1.0.2 changes
+
+- Adds RecompLauncher setup and direct game launching on Windows, Linux and macOS, with the manifest shipped in every release package.
+- Adds `--game <path>` while keeping positional game paths, plus windowless `--prepare` and borderless `--fullscreen` support.
+- Adds launcher-editable graphics, display, emulation and sound settings, with Big Picture mode starting fullscreen.
+- Declares game save archives, extra data, system saves, save states, cheats and launcher settings for RecompLauncher backups and cloud saves.
+
 ## Version 1.0.1 changes
 
 - Adds a 3GX startup loader with checked plugin parsing, title and compatibility checks, plugin executable/heap mapping, ARM bootloader handoff, and cleanup when the game exits.
@@ -49,11 +56,17 @@ The CTGP-7 plugin has not yet been run end-to-end in this build. Its launcher fl
 
 1. Download the package for your operating system from [Releases](https://github.com/nvd123-YT/MK7Recomp/releases).
 2. Extract the download and start Mario Kart 7 Recompiled.
-3. Choose the folder containing your decrypted Mario Kart 7 dump.
+3. Choose the folder containing your decrypted Mario Kart 7 dump. RecompLauncher can instead set up from the dump file directly.
 4. Select the game and press **Recompile**. The ARM code is recompiled locally on your computer. This is a one-time step for each game dump/build; recompile again when the runtime reports the installed code is outdated.
 5. Start the game. The application uses the local recompiled code where available and falls back to its interpreter for code that is not covered.
 
 The title-specific recompiled output stays on the user's computer. It is not included in this repository, CI artifacts, or GitHub Releases.
+
+## RecompLauncher
+
+Mario Kart 7 Recompiled is listed on [RecompLauncher](https://recomplauncher.com/game/mk7recomp). It accepts your decrypted `.3ds`, `.cci`, `.cxi` or `.cia` dump, runs the local preparation step, and launches the game without opening the normal library window. The launcher exposes supported graphics, display, emulation and audio settings. It also backs up the game's save archives, extra data, system save data, save states, cheats and settings. RecompLauncher keeps the newest ten local backups and offers cloud saves to signed-in players; individual files larger than 64 MB are not backed up by its save service.
+
+The launcher starts in fullscreen automatically in Big Picture mode. The normal desktop default remains windowed; choose Fullscreen in the launcher's Window mode setting to change it.
 
 ## Included runtime features
 
@@ -89,7 +102,7 @@ cargo test --release --workspace
 The desktop binary is written to target/release/mario-kart-7 (or .exe on Windows). The macOS package script bundles MoltenVK into the app:
 
 ~~~
-packaging/macos-app.sh target/release/mario-kart-7 1.0.1 mario-kart-7-macos-arm64.zip
+packaging/macos-app.sh target/release/mario-kart-7 1.0.2 mario-kart-7-macos-arm64.zip
 ~~~
 
 For a normal user, the prebuilt packages on the Releases page are the easiest option.
@@ -100,14 +113,14 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 - **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs when a version tag is created or pushed. Once every platform build succeeds, it attaches the packages to the GitHub Release and publishes it. If you created a draft release on GitHub first, the workflow fills that draft with the packages and publishes it after the builds finish.
 - To test a branch without publishing, open **Actions → Mario Kart 7 Recompiled Release → Run workflow**, enter the branch name (such as `main`) in `tag`, and set `publish` to `false`. The packages remain temporary Actions artifacts.
 
-### Creating version 1.0.1 on GitHub
+### Creating version 1.0.2 on GitHub
 
 1. Open the repository and select **Releases → Draft a new release**.
 2. In **Choose a tag**, type `v1.0.1`, then select **Create new tag: v1.0.1**.
-3. Set **Target** to `main` so the release tag points to the merged 1.0.1 implementation.
+3. Set **Target** to `main` so the release tag points to the merged 1.0.2 implementation.
 4. Select **Save draft**. Creating the tag on the Releases page triggers the release build. The workflow will attach all four platform packages and publish the draft when they are ready.
 
-The Rust workspace version is `1.0.1`. The matching release tag is `v1.0.1`; keep the existing `v1.0.0` tag unchanged.
+The Rust workspace version is `1.0.2`. The matching release tag is `v1.0.2`; keep the existing `v1.0.0` and `v1.0.1` tags unchanged.
 
 ## Attribution and legal notes
 

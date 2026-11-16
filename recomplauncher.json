@@ -1,31 +1,656 @@
 {
-    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
-    "format": 1,
-    "name": "Mario Kart 7 Recompiled",
-    "repo": "nvd123-YT/MK7Recomp",
-    "game": {
-        "kind": "iso",
-        "label": "Your decrypted Mario Kart 7 dump (.3ds, .cci, .cxi or .cia). Japan, Europe, USA, Korea, Taiwan and China releases work."
-    },
-    "start": {
-        "program": [
-            "mario-kart-7.exe",
-            "mario-kart-7"
-        ],
-        "args": [
-            "{game}"
-        ]
-    },
-    "prepare": {
-        "program": [
-            "mario-kart-7.exe",
-            "mario-kart-7"
-        ],
-        "args": [
-            "--prepare",
-            "{game}"
-        ],
-        "label": "Recompiling the game's code on your PC",
-        "timeout": 3600
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Mario Kart 7 Recompiled",
+  "repo": "nvd123-YT/MK7Recomp",
+  "game": {
+    "kind": "iso",
+    "label": "Your own decrypted Mario Kart 7 dump (.3ds, .cci, .cxi or .cia). Japan, Europe, USA, Korea, Taiwan and China releases are supported."
+  },
+  "start": {
+    "program": [
+      "mario-kart-7.exe",
+      "MarioKart7-x86_64.AppImage",
+      "mario-kart-7",
+      "Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7"
+    ],
+    "args": [
+      "--game",
+      "{game}"
+    ],
+    "env": {
+      "MARIO_KART_7_SETTINGS_PATH": "{local}/mario-kart-7/settings.toml"
     }
+  },
+  "prepare": {
+    "program": [
+      "mario-kart-7.exe",
+      "MarioKart7-x86_64.AppImage",
+      "mario-kart-7",
+      "Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7"
+    ],
+    "args": [
+      "--prepare",
+      "--game",
+      "{game}"
+    ],
+    "label": "Recompiling Mario Kart 7's code on your PC",
+    "timeout": 3600
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "toml",
+      "file": [
+        {
+          "path": "{local}/mario-kart-7/settings.toml"
+        }
+      ],
+      "new": {
+        "language": "\"english\"",
+        "renderer": "\"vulkan\"",
+        "hardware_rasterizer": "true",
+        "resolution": "3",
+        "texture_packs": "true",
+        "frame_interpolation": "false",
+        "recompiled": "true",
+        "scale": "2",
+        "layout": "\"stacked\"",
+        "orientation": "\"north\"",
+        "filter": "\"smooth\"",
+        "integer_scale": "false",
+        "stereo": "\"off\"",
+        "depth_3d": "50",
+        "swap_eyes": "false",
+        "volume": "1.0",
+        "mute": "false",
+        "show_fps": "false"
+      }
+    }
+  ],
+  "saves": [
+    "{config}/mario-kart-7/user/savedata",
+    "{config}/mario-kart-7/user/extdata",
+    "{config}/mario-kart-7/user/nand/system-save",
+    "{config}/mario-kart-7/states",
+    "{config}/mario-kart-7/cheats",
+    "{local}/mario-kart-7/user/savedata",
+    "{local}/mario-kart-7/user/extdata",
+    "{local}/mario-kart-7/user/nand/system-save",
+    "{local}/mario-kart-7/states",
+    "{local}/mario-kart-7/cheats",
+    "{home}/Library/Application Support/mario-kart-7/user/savedata",
+    "{home}/Library/Application Support/mario-kart-7/user/extdata",
+    "{home}/Library/Application Support/mario-kart-7/user/nand/system-save",
+    "{home}/Library/Application Support/mario-kart-7/states",
+    "{home}/Library/Application Support/mario-kart-7/cheats",
+    "{local}/mario-kart-7/settings.toml"
+  ],
+  "folders": {
+    "saves": [
+      {
+        "path": "{config}/mario-kart-7/user/savedata",
+        "if": "{config}/mario-kart-7/user/savedata"
+      },
+      {
+        "path": "{local}/mario-kart-7/user/savedata",
+        "if": "{local}/mario-kart-7/user/savedata"
+      },
+      {
+        "path": "{home}/Library/Application Support/mario-kart-7/user/savedata"
+      }
+    ],
+    "logs": [
+      {
+        "path": "{config}/mario-kart-7",
+        "if": "{config}/mario-kart-7"
+      },
+      {
+        "path": "{local}/mario-kart-7",
+        "if": "{local}/mario-kart-7"
+      },
+      {
+        "path": "{home}/Library/Application Support/mario-kart-7"
+      }
+    ]
+  },
+  "actions": [
+    {
+      "id": "open_saves",
+      "label": "Open save data",
+      "help": "Your Mario Kart 7 save archives and game state saves.",
+      "open": "saves"
+    },
+    {
+      "id": "open_logs",
+      "label": "Open logs",
+      "help": "The current and previous runtime logs for troubleshooting.",
+      "open": "logs"
+    }
+  ],
+  "settings": [
+    {
+      "id": "window_mode",
+      "label": "Window mode",
+      "group": "Display",
+      "in": "args",
+      "help": "Fullscreen fills your display. Windowed keeps the desktop visible.",
+      "choices": [
+        {
+          "label": "Windowed",
+          "args": []
+        },
+        {
+          "label": "Fullscreen",
+          "args": [
+            "--fullscreen"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "renderer",
+      "label": "Graphics backend",
+      "group": "Graphics",
+      "help": "Vulkan is the default. OpenGL can help on systems where Vulkan does not work.",
+      "choices": [
+        {
+          "label": "Vulkan",
+          "set": {
+            "renderer": "\"vulkan\""
+          }
+        },
+        {
+          "label": "OpenGL",
+          "set": {
+            "renderer": "\"opengl\""
+          }
+        }
+      ],
+      "defaults": {
+        "renderer": "\"vulkan\""
+      }
+    },
+    {
+      "id": "hardware_rasterizer",
+      "label": "3D rendering",
+      "group": "Graphics",
+      "help": "Use the GPU for 3D rendering, or the slower software renderer.",
+      "choices": [
+        {
+          "label": "Hardware",
+          "set": {
+            "hardware_rasterizer": "true"
+          }
+        },
+        {
+          "label": "Software",
+          "set": {
+            "hardware_rasterizer": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "hardware_rasterizer": "true"
+      }
+    },
+    {
+      "id": "resolution",
+      "label": "3D resolution",
+      "group": "Graphics",
+      "help": "Higher values make 3D edges smoother and use more GPU power.",
+      "slider": {
+        "key": "resolution",
+        "min": 1,
+        "max": 8,
+        "step": 1,
+        "format": "%d"
+      },
+      "defaults": {
+        "resolution": "3"
+      }
+    },
+    {
+      "id": "texture_packs",
+      "label": "Texture packs",
+      "group": "Graphics",
+      "help": "Load compatible texture packs from the game's mods folder.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "texture_packs": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "texture_packs": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "texture_packs": "true"
+      }
+    },
+    {
+      "id": "frame_interpolation",
+      "label": "Frame interpolation",
+      "group": "Graphics",
+      "help": "Generate an intermediate frame between rendered frames. Requires Vulkan and hardware 3D rendering.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "frame_interpolation": "false"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "frame_interpolation": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "frame_interpolation": "false"
+      },
+      "when": {
+        "renderer": "\"vulkan\"",
+        "hardware_rasterizer": "true"
+      }
+    },
+    {
+      "id": "scale",
+      "label": "Window scale",
+      "group": "Display",
+      "help": "Choose how large the combined 3DS screens appear in a window.",
+      "slider": {
+        "key": "scale",
+        "min": 1,
+        "max": 6,
+        "step": 1,
+        "format": "%d"
+      },
+      "defaults": {
+        "scale": "2"
+      }
+    },
+    {
+      "id": "layout",
+      "label": "Screen layout",
+      "group": "Display",
+      "help": "Arrange both 3DS screens or show just one.",
+      "choices": [
+        {
+          "label": "Stacked",
+          "set": {
+            "layout": "\"stacked\""
+          }
+        },
+        {
+          "label": "Side by side",
+          "set": {
+            "layout": "\"side_by_side\""
+          }
+        },
+        {
+          "label": "Large top screen",
+          "set": {
+            "layout": "\"large_top\""
+          }
+        },
+        {
+          "label": "Top only",
+          "set": {
+            "layout": "\"top_only\""
+          }
+        },
+        {
+          "label": "Bottom only",
+          "set": {
+            "layout": "\"bottom_only\""
+          }
+        }
+      ],
+      "defaults": {
+        "layout": "\"stacked\""
+      }
+    },
+    {
+      "id": "orientation",
+      "label": "Screen rotation",
+      "group": "Display",
+      "help": "Rotate the screens to fit your display.",
+      "choices": [
+        {
+          "label": "0°",
+          "set": {
+            "orientation": "\"north\""
+          }
+        },
+        {
+          "label": "90°",
+          "set": {
+            "orientation": "\"east\""
+          }
+        },
+        {
+          "label": "180°",
+          "set": {
+            "orientation": "\"south\""
+          }
+        },
+        {
+          "label": "270°",
+          "set": {
+            "orientation": "\"west\""
+          }
+        }
+      ],
+      "defaults": {
+        "orientation": "\"north\""
+      }
+    },
+    {
+      "id": "filter",
+      "label": "Screen filter",
+      "group": "Display",
+      "help": "Choose smooth, sharp or pixel-perfect scaling.",
+      "choices": [
+        {
+          "label": "Smooth",
+          "set": {
+            "filter": "\"smooth\""
+          }
+        },
+        {
+          "label": "Sharp",
+          "set": {
+            "filter": "\"sharp\""
+          }
+        },
+        {
+          "label": "Pixels",
+          "set": {
+            "filter": "\"pixels\""
+          }
+        }
+      ],
+      "defaults": {
+        "filter": "\"smooth\""
+      }
+    },
+    {
+      "id": "integer_scale",
+      "label": "Integer scaling",
+      "group": "Display",
+      "help": "Keep every source pixel the same size, leaving borders when needed.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "integer_scale": "false"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "integer_scale": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "integer_scale": "false"
+      }
+    },
+    {
+      "id": "stereo",
+      "label": "3D display",
+      "group": "Display",
+      "help": "Choose how the top screen's stereoscopic image is shown.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "stereo": "\"off\""
+          }
+        },
+        {
+          "label": "Red and cyan",
+          "set": {
+            "stereo": "\"anaglyph\""
+          }
+        },
+        {
+          "label": "Side by side",
+          "set": {
+            "stereo": "\"side_by_side\""
+          }
+        },
+        {
+          "label": "Half side by side",
+          "set": {
+            "stereo": "\"half_side_by_side\""
+          }
+        },
+        {
+          "label": "Interlaced",
+          "set": {
+            "stereo": "\"interlaced\""
+          }
+        }
+      ],
+      "defaults": {
+        "stereo": "\"off\""
+      }
+    },
+    {
+      "id": "depth_3d",
+      "label": "3D depth",
+      "group": "Display",
+      "help": "Set the simulated Nintendo 3DS depth slider.",
+      "slider": {
+        "key": "depth_3d",
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "format": "%d"
+      },
+      "defaults": {
+        "depth_3d": "50"
+      }
+    },
+    {
+      "id": "swap_eyes",
+      "label": "Swap 3D eyes",
+      "group": "Display",
+      "help": "Swap left and right images for cross-eyed viewing or reversed glasses.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "swap_eyes": "false"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "swap_eyes": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "swap_eyes": "false"
+      }
+    },
+    {
+      "id": "language",
+      "label": "System language",
+      "group": "Emulation",
+      "help": "Choose the language games read from the emulated 3DS system.",
+      "choices": [
+        {
+          "label": "Japanese",
+          "set": {
+            "language": "\"japanese\""
+          }
+        },
+        {
+          "label": "English",
+          "set": {
+            "language": "\"english\""
+          }
+        },
+        {
+          "label": "French",
+          "set": {
+            "language": "\"french\""
+          }
+        },
+        {
+          "label": "German",
+          "set": {
+            "language": "\"german\""
+          }
+        },
+        {
+          "label": "Italian",
+          "set": {
+            "language": "\"italian\""
+          }
+        },
+        {
+          "label": "Spanish",
+          "set": {
+            "language": "\"spanish\""
+          }
+        },
+        {
+          "label": "Chinese (Simplified)",
+          "set": {
+            "language": "\"chinese_simplified\""
+          }
+        },
+        {
+          "label": "Korean",
+          "set": {
+            "language": "\"korean\""
+          }
+        },
+        {
+          "label": "Dutch",
+          "set": {
+            "language": "\"dutch\""
+          }
+        },
+        {
+          "label": "Portuguese",
+          "set": {
+            "language": "\"portuguese\""
+          }
+        },
+        {
+          "label": "Russian",
+          "set": {
+            "language": "\"russian\""
+          }
+        },
+        {
+          "label": "Chinese (Traditional)",
+          "set": {
+            "language": "\"chinese_traditional\""
+          }
+        }
+      ],
+      "defaults": {
+        "language": "\"english\""
+      }
+    },
+    {
+      "id": "recompiled",
+      "label": "Code execution",
+      "group": "Emulation",
+      "help": "Use locally recompiled native code where available, or interpret all code.",
+      "choices": [
+        {
+          "label": "Recompiled code",
+          "set": {
+            "recompiled": "true"
+          }
+        },
+        {
+          "label": "Interpreter only",
+          "set": {
+            "recompiled": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "recompiled": "true"
+      }
+    },
+    {
+      "id": "volume",
+      "label": "Volume",
+      "group": "Sound",
+      "help": "Set the game's audio volume.",
+      "slider": {
+        "key": "volume",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "format": "%.2f"
+      },
+      "defaults": {
+        "volume": "1.0"
+      }
+    },
+    {
+      "id": "mute",
+      "label": "Mute",
+      "group": "Sound",
+      "help": "Turn all game audio off.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "mute": "false"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "mute": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "mute": "false"
+      }
+    },
+    {
+      "id": "show_fps",
+      "label": "Show FPS",
+      "group": "Interface",
+      "help": "Show the runtime's frame-rate counter.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "show_fps": "false"
+          }
+        },
+        {
+          "label": "On",
+          "set": {
+            "show_fps": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "show_fps": "false"
+      }
+    }
+  ]
 }

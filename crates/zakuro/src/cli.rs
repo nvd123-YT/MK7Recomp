@@ -59,7 +59,7 @@ options:
   --mute                           play no sound
   --prepare                        recompile the game given, without a window, printing
                                    progress lines, then exit (0 when it is ready)
-  --data <dir>                     where settings and saves live (default:
+  --data <dir>                     where game saves, logs and local tools live (default:
                                    ~/.local/share/mario-kart-7,
                                    ~/Library/Application Support/mario-kart-7
                                    or %APPDATA%\\mario-kart-7)

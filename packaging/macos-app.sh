@@ -24,6 +24,7 @@ mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Frameworks"
 cp "$binary" "$contents/MacOS/mario-kart-7"
 cp "$work/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$contents/Frameworks/"
 cp "$work/MoltenVK/LICENSE" "$contents/Resources/MoltenVK-LICENSE"
+cp "$here/../recomplauncher.json" "$contents/Resources/recomplauncher.json"
 cp "$here/Info.plist" "$contents/Info.plist"
 /usr/libexec/PlistBuddy \
     -c "Set :CFBundleShortVersionString $version" \
@@ -43,4 +44,12 @@ iconutil -c icns "$icons" -o "$contents/Resources/zakuro.icns"
 
 # signed for no one, which is what lets it run on Apple silicon at all
 codesign --force --deep --sign - "$work/Mario Kart 7 Recompiled.app"
-ditto -c -k --keepParent "$work/Mario Kart 7 Recompiled.app" "$output"
+
+# Include the manifest at the archive root and inside the app bundle.
+package="$work/package"
+mkdir "$package"
+cp -R "$work/Mario Kart 7 Recompiled.app" "$package/"
+cp "$here/../recomplauncher.json" "$package/recomplauncher.json"
+test -f "$package/recomplauncher.json"
+test -f "$package/Mario Kart 7 Recompiled.app/Contents/Resources/recomplauncher.json"
+(cd "$package" && /usr/bin/zip -qry "$output" .)
