@@ -70,7 +70,10 @@ jobs:
           python3 -m json.tool recomplauncher.json > /dev/null
           tar czf ${{ matrix.archive }} README.md LICENSE recomplauncher.json -C target/release mario-kart-7
           tar -tzf ${{ matrix.archive }} | grep -Fx recomplauncher.json
-          packaging/appimage.sh target/release/mario-kart-7 mario-kart-7-linux-x86_64.AppImage
+          sh packaging/appimage.sh target/release/mario-kart-7 mario-kart-7-linux-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 ./mario-kart-7-linux-x86_64.AppImage --appimage-extract >/dev/null
+          test -f squashfs-root/recomplauncher.json
+          rm -rf squashfs-root
           APPIMAGE_EXTRACT_AND_RUN=1 RUST_LOG=info ./mario-kart-7-linux-x86_64.AppImage --test-pattern --headless 1 --mute
 
       - name: Package for macOS
@@ -78,7 +81,7 @@ jobs:
         env:
           VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
-          packaging/macos-app.sh target/release/mario-kart-7 "${VERSION#v}" ${{ matrix.archive }}
+          sh packaging/macos-app.sh target/release/mario-kart-7 "${VERSION#v}" ${{ matrix.archive }}
           ditto -x -k ${{ matrix.archive }} unpacked
           test -f unpacked/recomplauncher.json
           test -f "unpacked/Mario Kart 7 Recompiled.app/Contents/Resources/recomplauncher.json"
