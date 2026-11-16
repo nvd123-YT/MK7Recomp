@@ -653,5 +653,11 @@
         "show_fps": "false"
       }
     }
+  ],
+  "requires": [
+    "settings.toml",
+    "settings.choices",
+    "settings.slider",
+    "settings.args"
   ]
 }
