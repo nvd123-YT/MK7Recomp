@@ -185,6 +185,56 @@ fn recompile(
     build::build(rom, &options, events)
 }
 
+/// recompiles the game at rom without a window, as the library's Recompile
+/// button does, printing "progress 0.4 text" lines as it goes. Ok when the
+/// game's code is installed.
+pub fn prepare(rom: &Path, data_dir: Option<&Path>) -> Result<(), String> {
+    use std::io::Write;
+    let program_id = zakuro_fs::Title::load(rom)
+        .map_err(|error| format!("could not open {}, {error}", rom.display()))?
+        .program_id();
+    if !crate::library::supports_game(program_id) {
+        return Err(format!("{} is not a Mario Kart 7 game dump", rom.display()));
+    }
+    let update = crate::library::addons_beside(rom).and_then(|(update, _, _)| update).map(|update| update.path);
+    let tools = crate::zig::tools_dir(data_dir);
+    let toolchain = match recomp3ds::compile::check(None) {
+        Ok(compiler) => Toolchain::Ready(compiler),
+        Err(error) => match tools {
+            Some(tools) => match crate::zig::installed(&tools) {
+                Some(compiler) => Toolchain::Ready(compiler),
+                None if crate::zig::download_size().is_some() && crate::zig::can_download() => Toolchain::Download(tools),
+                None => return Err(format!("recompiling needs a C compiler: {error}")),
+            },
+            None => return Err(format!("recompiling needs a C compiler: {error}")),
+        },
+    };
+    let name = rom.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let job = Job::start(rom, update.as_deref(), program_id, &name, data_dir, toolchain);
+    let mut last = String::new();
+    loop {
+        let stage = job.stage();
+        let text = match &stage {
+            Stage::Downloading(_) => "Downloading the compiler".to_owned(),
+            Stage::Generating => "Reading the game's code".to_owned(),
+            Stage::Compiling { done, total } => format!("Compiling the game's code ({done} of {total})"),
+            Stage::Installing => "Installing the recompiled code".to_owned(),
+            Stage::Done => "Ready".to_owned(),
+            Stage::Failed(error) => return Err(error.replace('\n', " ")),
+        };
+        let line = format!("progress {:.2} {text}", stage.fraction());
+        if line != last {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+            last = line;
+        }
+        if stage.finished() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// what a game's mods change in what gets recompiled.
 struct Changes {
     /// the code, decompressed, when they change it.

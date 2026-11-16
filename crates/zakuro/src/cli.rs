@@ -28,6 +28,8 @@ pub struct Options {
     pub interpreter: bool,
     /// play no sound.
     pub mute: bool,
+    /// recompile the game without a window, then exit.
+    pub prepare: bool,
 }
 
 const USAGE: &str = "\
@@ -50,6 +52,8 @@ options:
   --recompiled <path>              run locally recompiled code for this title
   --interpreter                    interpret everything
   --mute                           play no sound
+  --prepare                        recompile the game given, without a window, printing
+                                   progress lines, then exit (0 when it is ready)
   --data <dir>                     where settings and saves live (default:
                                    ~/.local/share/mario-kart-7,
                                    ~/Library/Application Support/mario-kart-7
@@ -72,6 +76,7 @@ pub fn parse() -> Result<Options, String> {
         data: None,
         interpreter: false,
         mute: false,
+        prepare: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -116,6 +121,7 @@ pub fn parse() -> Result<Options, String> {
             }
             "--interpreter" => options.interpreter = true,
             "--mute" => options.mute = true,
+            "--prepare" => options.prepare = true,
             "--profile" => options.profile = true,
             "--test-pattern" => options.test_pattern = true,
             // macOS hands an app it hasn't run before a process number
@@ -131,6 +137,9 @@ pub fn parse() -> Result<Options, String> {
     if options.headless.is_some() && options.rom.is_none() && !options.test_pattern {
         print!("{USAGE}");
         return Err("--headless needs a game".to_owned());
+    }
+    if options.prepare && options.rom.is_none() {
+        return Err("--prepare needs a game".to_owned());
     }
     Ok(options)
 }

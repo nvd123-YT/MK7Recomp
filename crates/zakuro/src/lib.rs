@@ -79,6 +79,18 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
             std::process::exit(2);
         }
     };
+    // --prepare recompiles the game as the library's Recompile button does,
+    // without a window
+    if options.prepare {
+        let rom = options.rom.as_deref().map(Path::new).unwrap_or(Path::new(""));
+        match recompile::prepare(rom, options.data.as_deref().map(Path::new)) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("Mario Kart 7: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     let mut settings = Settings::load();
     // the console's own number, made the first time and kept, which tells
     // it apart from others over local wireless

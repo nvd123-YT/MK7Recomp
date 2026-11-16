@@ -1,5 +1,7 @@
 # Mario Kart 7 Recompiled
 
+<a href="https://recomplauncher.com/game/mk7recomp"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 A game-specific desktop build based on [Zakuro](https://github.com/fearkov/zakuro), a high-level-emulation Nintendo 3DS runtime, and [3dsrecomp](https://github.com/fearkov/3dsrecomp), its ahead-of-time ARM code recompiler.
 
 This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other games are hidden from the library and cannot be launched through the application.

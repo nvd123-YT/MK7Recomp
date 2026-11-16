@@ -1,0 +1,31 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "name": "Mario Kart 7 Recompiled",
+    "repo": "nvd123-YT/MK7Recomp",
+    "game": {
+        "kind": "iso",
+        "label": "Your decrypted Mario Kart 7 dump (.3ds, .cci, .cxi or .cia). Japan, Europe, USA, Korea, Taiwan and China releases work."
+    },
+    "start": {
+        "program": [
+            "mario-kart-7.exe",
+            "mario-kart-7"
+        ],
+        "args": [
+            "{game}"
+        ]
+    },
+    "prepare": {
+        "program": [
+            "mario-kart-7.exe",
+            "mario-kart-7"
+        ],
+        "args": [
+            "--prepare",
+            "{game}"
+        ],
+        "label": "Recompiling the game's code on your PC",
+        "timeout": 3600
+    }
+}
