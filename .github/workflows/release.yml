@@ -70,8 +70,8 @@ jobs:
           python3 -m json.tool recomplauncher.json > /dev/null
           tar czf ${{ matrix.archive }} README.md LICENSE recomplauncher.json -C target/release mario-kart-7
           tar -tzf ${{ matrix.archive }} | grep -Fx recomplauncher.json
-          packaging/appimage.sh target/release/mario-kart-7 MarioKart7-x86_64.AppImage
-          APPIMAGE_EXTRACT_AND_RUN=1 RUST_LOG=info ./MarioKart7-x86_64.AppImage --test-pattern --headless 1 --mute
+          packaging/appimage.sh target/release/mario-kart-7 mario-kart-7-linux-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 RUST_LOG=info ./mario-kart-7-linux-x86_64.AppImage --test-pattern --headless 1 --mute
 
       - name: Package for macOS
         if: runner.os == 'macOS'
@@ -89,7 +89,7 @@ jobs:
           name: ${{ matrix.archive }}
           path: |
             ${{ matrix.archive }}
-            MarioKart7-x86_64.AppImage*
+            mario-kart-7-linux-x86_64.AppImage*
 
   release:
     needs: build
@@ -118,7 +118,7 @@ jobs:
           Windows: extract mario-kart-7-windows-x86_64.zip and run mario-kart-7.exe.
           macOS Apple silicon: extract mario-kart-7-macos-arm64.zip and open Mario Kart 7 Recompiled.app.
           macOS Intel: extract mario-kart-7-macos-x86_64.zip and open Mario Kart 7 Recompiled.app.
-          Linux: run MarioKart7-x86_64.AppImage, or extract mario-kart-7-linux-x86_64.tar.gz and run ./mario-kart-7.
+          Linux: run mario-kart-7-linux-x86_64.AppImage, or extract mario-kart-7-linux-x86_64.tar.gz and run ./mario-kart-7.
 
           The macOS app is not notarized. On first launch, allow it in System Settings > Privacy & Security > Open Anyway.
           NOTES

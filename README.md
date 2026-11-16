@@ -86,7 +86,7 @@ Features inherited from the runtime remain subject to the support and behaviour 
 - **Windows:** unzip mario-kart-7-windows-x86_64.zip and run mario-kart-7.exe.
 - **macOS Apple silicon:** unzip mario-kart-7-macos-arm64.zip and open Mario Kart 7 Recompiled.app.
 - **macOS Intel:** unzip mario-kart-7-macos-x86_64.zip and open Mario Kart 7 Recompiled.app.
-- **Linux:** use MarioKart7-x86_64.AppImage, or extract mario-kart-7-linux-x86_64.tar.gz and run ./mario-kart-7.
+- **Linux:** use mario-kart-7-linux-x86_64.AppImage, or extract mario-kart-7-linux-x86_64.tar.gz and run ./mario-kart-7.
 
 The macOS app is not notarized. On first launch, macOS may block it; allow it through **System Settings → Privacy & Security → Open Anyway**. The Linux AppImage needs the host system's ALSA sound library.
 

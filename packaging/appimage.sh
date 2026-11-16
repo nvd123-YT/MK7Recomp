@@ -35,5 +35,5 @@ test -f "$app/recomplauncher.json"
 # releases
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 "$work/appimagetool" \
     --runtime-file "$work/runtime" \
-    --updateinformation "gh-releases-zsync|nvd123-YT|MK7Recomp|latest|MarioKart7-x86_64.AppImage.zsync" \
+    --updateinformation "gh-releases-zsync|nvd123-YT|MK7Recomp|latest|mario-kart-7-linux-x86_64.AppImage.zsync" \
     "$app" "$output"

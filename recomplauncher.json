@@ -10,7 +10,7 @@
   "start": {
     "program": [
       "mario-kart-7.exe",
-      "MarioKart7-x86_64.AppImage",
+      "AppRun",
       "mario-kart-7",
       "Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7"
     ],
@@ -25,7 +25,7 @@
   "prepare": {
     "program": [
       "mario-kart-7.exe",
-      "MarioKart7-x86_64.AppImage",
+      "AppRun",
       "mario-kart-7",
       "Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7"
     ],
