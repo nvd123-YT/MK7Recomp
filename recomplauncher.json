@@ -103,14 +103,15 @@
     "logs": [
       {
         "path": "{config}/mario-kart-7",
-        "if": "{config}/mario-kart-7"
+        "if": "{config}/mario-kart-7/zakuro.log"
       },
       {
         "path": "{local}/mario-kart-7",
-        "if": "{local}/mario-kart-7"
+        "if": "{local}/mario-kart-7/zakuro.log"
       },
       {
-        "path": "{home}/Library/Application Support/mario-kart-7"
+        "path": "{home}/Library/Application Support/mario-kart-7",
+        "if": "{home}/Library/Application Support/mario-kart-7/zakuro.log"
       }
     ]
   },
