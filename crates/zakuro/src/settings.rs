@@ -742,14 +742,35 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
 /// the system's place for a program's settings.
 fn path() -> Option<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
-    let dir = if cfg!(windows) {
-        var("APPDATA")
-    } else if cfg!(target_os = "macos") {
-        var("HOME").map(|home| home.join("Library/Application Support"))
-    } else {
-        var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))
+    let default = || {
+        let dir = if cfg!(windows) {
+            var("APPDATA")
+        } else if cfg!(target_os = "macos") {
+            var("HOME").map(|home| home.join("Library/Application Support"))
+        } else {
+            var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))
+        };
+        dir.map(|dir| dir.join("mario-kart-7").join("settings.toml"))
     };
-    dir.map(|dir| dir.join("mario-kart-7").join("settings.toml"))
+
+    // RecompLauncher edits this same TOML before starting the game. Keep the
+    // usual per-platform path for everyone else, and migrate an existing
+    // settings file the first time a launcher-selected path is used.
+    if let Some(path) = var("MARIO_KART_7_SETTINGS_PATH") {
+        if !path.exists() {
+            if let Some(legacy) = default().filter(|legacy| legacy != &path && legacy.is_file()) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(error) = std::fs::copy(&legacy, &path) {
+                    log::warn!("could not migrate settings from {} to {}, {error}", legacy.display(), path.display());
+                }
+            }
+        }
+        return Some(path);
+    }
+
+    default()
 }
 
 #[cfg(test)]

@@ -83,7 +83,10 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
     // without a window
     if options.prepare {
         let rom = options.rom.as_deref().map(Path::new).unwrap_or(Path::new(""));
-        match recompile::prepare(rom, options.data.as_deref().map(Path::new)) {
+        // Use the same persistent application-data directory as a normal
+        // launch, including the downloaded compiler and prepared code.
+        let data_dir = options.data.clone().map(PathBuf::from).or_else(default_data_dir);
+        match recompile::prepare(rom, data_dir.as_deref()) {
             Ok(()) => std::process::exit(0),
             Err(error) => {
                 eprintln!("Mario Kart 7: {error}");
@@ -563,6 +566,10 @@ impl ApplicationHandler for App {
                 backend.set_top_width(self.active.top_shape.width());
                 backend.set_scaling(self.active.filter.screens(), self.active.integer_scale);
                 backend.set_stereo(self.active.stereo());
+                let big_picture = std::env::var("RECOMPLAUNCHER_MODE").is_ok_and(|mode| mode == "bigpicture");
+                if self.options.fullscreen || big_picture {
+                    window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                }
                 self.gui = Some(Gui::new(&window));
                 self.window = Some(window);
                 self.backend = Some(backend);

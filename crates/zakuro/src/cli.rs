@@ -30,18 +30,23 @@ pub struct Options {
     pub mute: bool,
     /// recompile the game without a window, then exit.
     pub prepare: bool,
+    /// start in borderless fullscreen.
+    pub fullscreen: bool,
 }
 
 const USAGE: &str = "\
 mario-kart-7 - Mario Kart 7 for desktop
 
 usage: mario-kart-7 [rom.3ds|.cci|.cxi|.cia] [options]
+       mario-kart-7 --game <rom.3ds|.cci|.cxi|.cia> [options]
 
 This build only opens the Japan, Europe, USA, Korea, Taiwan and China releases of Mario Kart 7.
 Without a game it opens a library folder and lists matching game dumps only.
 The game dump must be decrypted. Recompile it locally from the library.
 
 options:
+  --game <path>                    game dump to open (also accepts the positional path)
+  --fullscreen                     start in borderless fullscreen
   --renderer <vulkan|gl|software>  presentation backend
   --rasterizer <hardware|software> where the 3D is drawn
   --scale <n>                      window scale factor (default: 2)
@@ -77,6 +82,7 @@ pub fn parse() -> Result<Options, String> {
         interpreter: false,
         mute: false,
         prepare: false,
+        fullscreen: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -104,6 +110,22 @@ pub fn parse() -> Result<Options, String> {
                         .map_err(|_| format!("'{value}' is not a frame count"))?,
                 );
             }
+            "--game" => {
+                let value = args.next().ok_or("--game needs a path")?;
+                if rom.replace(value).is_some() {
+                    return Err("only one game path may be given".to_owned());
+                }
+            }
+            value if value.starts_with("--game=") => {
+                let path = &value["--game=".len()..];
+                if path.is_empty() {
+                    return Err("--game needs a path".to_owned());
+                }
+                if rom.replace(path.to_owned()).is_some() {
+                    return Err("only one game path may be given".to_owned());
+                }
+            }
+            "--fullscreen" => options.fullscreen = true,
             "--new3ds" => options.new3ds = true,
             "--rasterizer" => {
                 let value = args.next().ok_or("--rasterizer needs a value")?;
@@ -129,7 +151,11 @@ pub fn parse() -> Result<Options, String> {
             other if other.starts_with('-') => {
                 return Err(format!("unknown option '{other}'"));
             }
-            path => rom = Some(path.to_owned()),
+            path => {
+                if rom.replace(path.to_owned()).is_some() {
+                    return Err("only one game path may be given".to_owned());
+                }
+            }
         }
     }
 
