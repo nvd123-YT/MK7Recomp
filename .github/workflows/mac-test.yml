@@ -1,0 +1,40 @@
+# Builds the Apple-silicon macOS release package as a temporary Actions artifact.
+name: Mario Kart 7 Recompiled macOS Test Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build desktop runtime
+        run: cargo build --release --locked -p zakuro
+
+      - name: Package and smoke-test macOS app
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="$VERSION"
+          if [ "$version" = "main" ]; then
+            version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          fi
+          sh packaging/macos-app.sh target/release/mario-kart-7 "$version" mario-kart-7-macos-arm64.zip
+          ditto -x -k mario-kart-7-macos-arm64.zip unpacked
+          test -f unpacked/recomplauncher.json
+          test -f "unpacked/Mario Kart 7 Recompiled.app/Contents/Resources/recomplauncher.json"
+          RUST_LOG=info "unpacked/Mario Kart 7 Recompiled.app/Contents/MacOS/mario-kart-7" --test-pattern --headless 1 --mute
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mario-kart-7-macos-arm64-test
+          path: mario-kart-7-macos-arm64.zip
+          if-no-files-found: error
+          retention-days: 14
