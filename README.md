@@ -21,6 +21,8 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Version 1.0.4 changes
 
+- Routes NCCH ExeFS requests for an installed update to that update's own `.code` content, while NCCH Code continues to expose the runtime-mapped update and modded executable image.
+
 - Returns decompressed executable bytes for NCCH Code archive requests, matching the image mapped into game memory and avoiding checksum mismatches on compressed `.code` files.
 - Disables speculative vertex-shading look-ahead by default on macOS, preventing stale prefetches when a draw reads vertex data produced by an earlier GPU draw. Set `ZAKURO_SHADE_AHEAD=1` to opt back in; the Vulkan rasterizer remains enabled.
 

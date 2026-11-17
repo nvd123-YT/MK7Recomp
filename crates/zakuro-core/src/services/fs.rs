@@ -1025,7 +1025,7 @@ fn open_file(
                 MEDIA_NAND => open_system_archive(system, archive_path),
                 MEDIA_GAMECARD => {
                     let kind = system.memory.read32(path_ptr + 8);
-                    open_ncch_kind(system, kind)
+                    open_ncch_kind(system, kind, false)
                 }
                 MEDIA_SDMC => {
                     let content_index = system.memory.read32(path_ptr + 4) as u16;
@@ -1064,7 +1064,7 @@ fn open_self_ncch(
         SELF_NCCH_ROMFS
     };
 
-    open_ncch_kind(system, kind)
+    open_ncch_kind(system, kind, false)
 }
 
 /// opens one of the system's shared data archives on NAND.
@@ -1111,37 +1111,54 @@ fn executable_code_file(
     })
 }
 
-fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
-    let title = system.title.as_ref()?;
+/// builds the file view for an NCCH part. `title` is always the running
+/// base title, so SELF_NCCH_CODE follows its attached update and applies
+/// title-level code mods; `selected` is the actual base or update NCCH for
+/// raw ExeFS and RomFS reads.
+fn ncch_kind_file(
+    title: &zakuro_fs::Title,
+    selected: &zakuro_fs::Title,
+    kind: u32,
+    update: bool,
+    data_dir: Option<&std::path::Path>,
+) -> Option<OpenFile> {
     match kind {
-        // the update's RomFS, which a game opens besides its own, its own
-        // when there is no update
         SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
-            let update = title.update().filter(|_| kind == SELF_NCCH_UPDATE_ROMFS);
-            let (backing, path) = match update {
-                Some(update) => (romfs_backing(&update.title)?, "patch:/"),
-                None => (romfs_backing(title)?, "romfs:/"),
-            };
-            log::debug!("fs: opened {path}, {} MiB", backing.size() / (1024 * 1024));
-            Some(system.services.fs.add_file(OpenFile { path: path.into(), backing }))
+            let backing = romfs_backing(selected)?;
+            let path = if update || kind == SELF_NCCH_UPDATE_ROMFS { "patch:/" } else { "romfs:/" };
+            Some(OpenFile { path: path.into(), backing })
         }
-        SELF_NCCH_CODE => {
-            let file = executable_code_file(title, system.config.data_dir.as_deref())?;
-            log::debug!("fs: opened the decompressed executable code, {} bytes", file.backing.size());
-            Some(system.services.fs.add_file(file))
-        }
+        SELF_NCCH_CODE => executable_code_file(title, data_dir),
         SELF_NCCH_EXEFS => {
-            let data = title.exefs_file(".code")?.to_vec();
-            Some(system.services.fs.add_file(OpenFile {
+            let data = selected.exefs_file(".code")?.to_vec();
+            Some(OpenFile {
                 path: "exefs:/.code".into(),
                 backing: FileBacking::Memory(data),
-            }))
+            })
         }
         other => {
             log::warn!("fs: SelfNCCH path type {other} is not implemented");
             None
         }
     }
+}
+
+fn open_ncch_kind(system: &mut System, kind: u32, use_update: bool) -> Option<u32> {
+    let data_dir = system.config.data_dir.clone();
+    let title = system.title.as_ref()?;
+    let update = use_update || kind == SELF_NCCH_UPDATE_ROMFS;
+    let selected = if update { &title.update()?.title } else { title };
+    let file = ncch_kind_file(title, selected, kind, update, data_dir.as_deref())?;
+    match kind {
+        SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
+            log::debug!("fs: opened {}, {} MiB", file.path, file.backing.size() / (1024 * 1024));
+        }
+        SELF_NCCH_CODE => {
+            log::debug!("fs: opened the executable code image, {} bytes", file.backing.size());
+        }
+        _ => {}
+    }
+    Some(system.services.fs.add_file(file))
 }
 
 /// what a title's RomFS reads through, with its mods over it when it has
@@ -1159,12 +1176,18 @@ fn romfs_backing(title: &zakuro_fs::Title) -> Option<FileBacking> {
 /// opens a title on the SD card through the NCCH archive, the game itself
 /// installed from a CIA, its update, or the content of an index of its DLC.
 fn open_sd_title(system: &mut System, title_id: u64, content_index: u16, kind: u32) -> Option<u32> {
-    let title = system.title.as_ref()?;
-    if title_id == title.program_id() {
-        return open_ncch_kind(system, kind);
+    let (is_base_title, is_update_title) = {
+        let title = system.title.as_ref()?;
+        (
+            title_id == title.program_id(),
+            title.update().is_some_and(|update| update.title_id == title_id),
+        )
+    };
+    if is_base_title {
+        return open_ncch_kind(system, kind, false);
     }
-    if title.update().is_some_and(|update| update.title_id == title_id) {
-        return open_ncch_kind(system, if kind == SELF_NCCH_ROMFS { SELF_NCCH_UPDATE_ROMFS } else { kind });
+    if is_update_title {
+        return open_ncch_kind(system, kind, true);
     }
     let Some(dlc) = system.dlc.iter().find(|dlc| dlc.title_id == title_id) else {
         log::warn!("fs: {title_id:016X} is not on the SD card");
@@ -1307,5 +1330,51 @@ mod executable_code_tests {
 
         std::fs::remove_dir_all(data_dir).unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn update_ncch_requests_use_the_update_exefs_and_runtime_code() {
+        use zakuro_fs::testing::{cia, ncch, write};
+
+        const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
+        const UPDATE_ID: u64 = PROGRAM_ID & 0xFFFF_FFFF | 0x0004_000E_0000_0000;
+        let base_code = [0x11; 16];
+        let update_code = [0x22; 24];
+        let game_path = write("fs-update-code", "game.cxi", &ncch(PROGRAM_ID, Some(&base_code), &[]));
+        let update_ncch = ncch(UPDATE_ID, Some(&update_code), &[]);
+        let update_path = write(
+            "fs-update-code",
+            "update.cia",
+            &cia(UPDATE_ID, 0x0410, &[(0, Some(&update_ncch))]),
+        );
+
+        let mut title = zakuro_fs::Title::load(&game_path).unwrap();
+        let update = zakuro_fs::Update::load(&update_path).unwrap();
+        title.attach_update(update);
+        let update_title = &title.update().unwrap().title;
+
+        let exefs = ncch_kind_file(&title, update_title, SELF_NCCH_EXEFS, true, None).unwrap();
+        let FileBacking::Memory(exefs_code) = exefs.backing else {
+            panic!("the update ExeFS code must be exposed as in-memory bytes");
+        };
+        assert_eq!(exefs_code, update_code);
+        assert_ne!(exefs_code, base_code);
+
+        let code = ncch_kind_file(&title, update_title, SELF_NCCH_CODE, true, None).unwrap();
+        let FileBacking::Memory(runtime_code) = code.backing else {
+            panic!("the runtime executable code must be exposed as in-memory bytes");
+        };
+        assert_eq!(runtime_code, update_code);
+        assert_eq!(runtime_code, title.code().unwrap());
+
+        // A base-title ExeFS request must continue to return the base .code.
+        let base_exefs = ncch_kind_file(&title, &title, SELF_NCCH_EXEFS, false, None).unwrap();
+        let FileBacking::Memory(base_exefs_code) = base_exefs.backing else {
+            panic!("the base ExeFS code must be exposed as in-memory bytes");
+        };
+        assert_eq!(base_exefs_code, base_code);
+
+        std::fs::remove_file(game_path).unwrap();
+        std::fs::remove_file(update_path).unwrap();
     }
 }
