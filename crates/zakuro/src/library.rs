@@ -278,11 +278,18 @@ fn read_or_list_unreadable(path: &Path, data_dir: Option<&Path>) -> Game {
 
 /// a file in the library that can't be played, and why.
 fn unplayable(path: &Path, problem: String) -> Game {
+    unplayable_with_id(path, problem, 0)
+}
+
+/// the same, preserving a game's id when its CIA header is readable but
+/// its executable or RomFS is not, so the library can still explain why it
+/// cannot be played without listing unrelated unsupported titles.
+fn unplayable_with_id(path: &Path, problem: String, program_id: u64) -> Game {
     Game {
         path: path.to_owned(),
         name: path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default(),
         publisher: String::new(),
-        program_id: 0,
+        program_id,
         icon: None,
         recompiled: false,
         outdated: false,
@@ -292,6 +299,18 @@ fn unplayable(path: &Path, problem: String) -> Game {
         dlc: Vec::new(),
         dlp_child: None,
     }
+}
+
+/// the title id survives CIA content encryption, because it is in the
+/// readable TMD. Keep it for rejected Mario Kart 7 dumps so the library can
+/// show the reason instead of silently dropping the file.
+fn cia_program_id(path: &Path) -> Option<u64> {
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("cia")) {
+        return None;
+    }
+    let image = zakuro_fs::RomImage::open(path).ok()?;
+    let cia = zakuro_fs::Cia::read(image.data()).ok()?;
+    (cia.kind() == zakuro_fs::TitleKind::Game).then_some(cia.title_id)
 }
 
 fn read_game(path: &Path, data_dir: Option<&Path>) -> Game {
@@ -306,7 +325,7 @@ fn read_game(path: &Path, data_dir: Option<&Path>) -> Game {
                 Some(error) => problem(&error),
                 None => "Empty, its download may not have finished".to_owned(),
             };
-            return unplayable(path, problem);
+            return unplayable_with_id(path, problem, cia_program_id(path).unwrap_or_default());
         }
     };
     let program_id = title.program_id();
@@ -427,6 +446,38 @@ mod tests {
             problem(&zakuro_fs::FsError::NotAGame("an update")),
             "An update cannot be opened by the Mario Kart 7 build"
         );
+    }
+
+    #[test]
+    fn encrypted_mario_kart_7_cia_is_listed_with_a_warning() {
+        use zakuro_fs::testing::{cia, ncch};
+
+        let folder = std::env::temp_dir().join(format!("zakuro-encrypted-cia-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+
+        let game = 0x0004_0000_0003_0800u64;
+        let encrypted_cia = |title_id| {
+            let mut data = cia(title_id, 0, &[(0, Some(&ncch(title_id, Some(&[1; 8]), &[])))]);
+            // The executable content record follows the TMD signature and
+            // header; mark its title-key encryption flag as the console does.
+            let record = 0x2040 + 0x140 + 0x9C4;
+            data[record + 6..record + 8].copy_from_slice(&1u16.to_be_bytes());
+            data
+        };
+        std::fs::write(folder.join("encrypted-mario-kart.cia"), encrypted_cia(game)).unwrap();
+        std::fs::write(folder.join("encrypted-unrelated-game.cia"), encrypted_cia(0x0004_0000_0005_5E00)).unwrap();
+
+        let (games, _) = scan(&folder, None);
+        assert_eq!(games.len(), 1, "unsupported titles stay hidden");
+        let rejected = &games[0];
+        assert_eq!(rejected.program_id, game);
+        assert_eq!(
+            rejected.problem.as_deref(),
+            Some("Encrypted, this build needs a decrypted Mario Kart 7 dump")
+        );
+
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
