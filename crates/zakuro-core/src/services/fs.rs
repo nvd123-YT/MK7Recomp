@@ -1097,14 +1097,17 @@ fn system_archive_data(path: NcchArchivePath, data_dir: Option<&std::path::Path>
     }
 }
 
-
 /// Opens the executable image exactly as it is mapped into the game's memory.
 /// ExeFS .code can be BLZ-compressed; returning its raw bytes here makes
 /// code-integrity checks disagree with the code the runtime actually runs.
-fn executable_code_file(title: &zakuro_fs::Title) -> Option<OpenFile> {
+fn executable_code_file(
+    title: &zakuro_fs::Title,
+    data_dir: Option<&std::path::Path>,
+) -> Option<OpenFile> {
+    let (code, _) = crate::mods::code(title, data_dir).ok()?;
     Some(OpenFile {
         path: "exefs:/.code".into(),
-        backing: FileBacking::Memory(title.code().ok()?),
+        backing: FileBacking::Memory(code),
     })
 }
 
@@ -1123,7 +1126,7 @@ fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
             Some(system.services.fs.add_file(OpenFile { path: path.into(), backing }))
         }
         SELF_NCCH_CODE => {
-            let file = executable_code_file(title)?;
+            let file = executable_code_file(title, system.config.data_dir.as_deref())?;
             log::debug!("fs: opened the decompressed executable code, {} bytes", file.backing.size());
             Some(system.services.fs.add_file(file))
         }
@@ -1269,7 +1272,6 @@ fn decode_path(system: &mut System, path_type: u32, path_size: u32, path_ptr: u3
 /// above, which build their descriptors by hand.
 pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
 
-
 #[cfg(test)]
 mod executable_code_tests {
     use super::*;
@@ -1279,16 +1281,31 @@ mod executable_code_tests {
         use zakuro_fs::testing::{ncch, write};
 
         const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
-        let expected = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let path = write("fs-code-image", "game.cxi", &ncch(PROGRAM_ID, Some(&expected), &[]));
+        let original = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let path = write("fs-code-image", "game.cxi", &ncch(PROGRAM_ID, Some(&original), &[]));
         let title = zakuro_fs::Title::load(&path).unwrap();
 
-        let file = executable_code_file(&title).unwrap();
+        let file = executable_code_file(&title, None).unwrap();
         let FileBacking::Memory(actual) = file.backing else {
             panic!("the executable code must be an in-memory file");
         };
-        assert_eq!(actual, expected);
+        assert_eq!(actual, original);
 
+        // The FS code view must include the same code.bin override that the
+        // runtime maps, rather than exposing a stale copy of the base image.
+        let data_dir = std::env::temp_dir().join(format!("zakuro-fs-code-image-{}", std::process::id()));
+        let mods_dir = crate::mods::dir(&data_dir, PROGRAM_ID);
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        let replacement = [0x99, 0xAA, 0xBB, 0xCC];
+        std::fs::write(mods_dir.join("code.bin"), replacement).unwrap();
+
+        let file = executable_code_file(&title, Some(&data_dir)).unwrap();
+        let FileBacking::Memory(actual) = file.backing else {
+            panic!("the executable code must be an in-memory file");
+        };
+        assert_eq!(actual, replacement);
+
+        std::fs::remove_dir_all(data_dir).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 }

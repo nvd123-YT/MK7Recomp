@@ -126,7 +126,7 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 
 1. Open the repository and select **Releases → Draft a new release**.
 2. In **Choose a tag**, type `v1.0.4`, then select **Create new tag: v1.0.4**.
-3. Set **Target** to `main` so the release tag points to the merged 1.0.2 implementation.
+3. Set **Target** to `main` so the release tag points to the 1.0.4 implementation.
 4. Select **Save draft**. Creating the tag on the Releases page triggers the release build. The workflow will attach all four platform packages and publish the draft when they are ready.
 
 The Rust workspace version is `1.0.4`. The matching release tag is `v1.0.4`; leave all previous version tags unchanged.
