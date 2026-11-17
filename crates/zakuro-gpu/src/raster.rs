@@ -859,12 +859,35 @@ pub(crate) fn same_bits(a: &[Vec4], b: &[Vec4]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits))
 }
 
-/// whether draws hand their vertex work to other threads, see Gpu::scout,
-/// unless ZAKURO_SHADE_AHEAD is 0.
+/// whether draws hand their vertex work to other threads, see Gpu::scout.
+/// The look-ahead pass cannot see buffers written by earlier GPU draws in
+/// the same command list, so it is opt-in on macOS. Set ZAKURO_SHADE_AHEAD=1
+/// to restore it there, or 0 to disable it on other systems too.
+#[cfg(feature = "vulkan")]
+fn shading_ahead_enabled(value: Option<&str>) -> bool {
+    value.map_or(!cfg!(target_os = "macos"), |value| value != "0")
+}
+
 #[cfg(feature = "vulkan")]
 fn shading_ahead() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ZAKURO_SHADE_AHEAD").map_or(true, |value| value != "0"))
+    *ENABLED.get_or_init(|| shading_ahead_enabled(std::env::var("ZAKURO_SHADE_AHEAD").ok().as_deref()))
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod shading_ahead_tests {
+    use super::shading_ahead_enabled;
+
+    #[test]
+    fn explicit_environment_setting_wins() {
+        assert!(!shading_ahead_enabled(Some("0")));
+        assert!(shading_ahead_enabled(Some("1")));
+    }
+
+    #[test]
+    fn lookahead_is_disabled_by_default_on_macos() {
+        assert_eq!(shading_ahead_enabled(None), !cfg!(target_os = "macos"));
+    }
 }
 
 /// the walk ahead of a command list's half of draw: what draw reads of

@@ -22,6 +22,7 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 ## Version 1.0.4 changes
 
 - Returns decompressed executable bytes for NCCH Code archive requests, matching the image mapped into game memory and avoiding checksum mismatches on compressed `.code` files.
+- Disables speculative vertex-shading look-ahead by default on macOS, preventing stale prefetches when a draw reads vertex data produced by an earlier GPU draw. Set `ZAKURO_SHADE_AHEAD=1` to opt back in; the Vulkan rasterizer remains enabled.
 
 ## Version 1.0.3 changes
 
@@ -119,7 +120,7 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 ## GitHub Actions and releases
 
 - **CI** runs on pushes and pull requests. It builds and tests the Rust workspace on Windows, macOS, and Linux. It also keeps a Windows executable as a temporary Actions artifact.
-- **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs when a version tag is created or pushed. Once every platform build succeeds, it attaches the packages to the GitHub Release and publishes it. If you created a draft release on GitHub first, the workflow fills that draft with the packages and publishes it after the builds finish.
+- **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs on pushes to `main` and when a version tag is created or pushed. A push to `main` uploads temporary Actions artifacts only; it never publishes a GitHub Release. Version tags publish after all platform builds succeed. Manual branch builds can also set `publish` to `false`.
 - To test a branch without publishing, open **Actions → Mario Kart 7 Recompiled Release → Run workflow**, enter the branch name (such as `main`) in `tag`, and set `publish` to `false`. The packages remain temporary Actions artifacts.
 
 ### Creating version 1.0.4 on GitHub
