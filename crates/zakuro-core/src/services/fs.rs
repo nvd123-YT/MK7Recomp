@@ -1130,7 +1130,11 @@ fn ncch_kind_file(
         }
         SELF_NCCH_CODE => executable_code_file(title, data_dir),
         SELF_NCCH_EXEFS => {
-            let data = selected.exefs_file(".code")?.to_vec();
+            // NCCHArchive::LoadSectionExeFS decompresses .code when the
+            // ExHeader marks it as BLZ-compressed. Returning the raw ExeFS
+            // entry here makes plugin integrity checks hash different bytes
+            // from the executable the game actually uses.
+            let data = selected.code().ok()?;
             Some(OpenFile {
                 path: "exefs:/.code".into(),
                 backing: FileBacking::Memory(data),
@@ -1155,6 +1159,15 @@ fn open_ncch_kind(system: &mut System, kind: u32, use_update: bool) -> Option<u3
         }
         SELF_NCCH_CODE => {
             log::debug!("fs: opened the executable code image, {} bytes", file.backing.size());
+        }
+        SELF_NCCH_EXEFS => {
+            log::info!(
+                "fs: opened ExeFS .code for title {:016X}, {} bytes (remaster {}, BLZ-compressed={})",
+                selected.program_id(),
+                file.backing.size(),
+                selected.exheader.remaster_version,
+                selected.exheader.compress_code
+            );
         }
         _ => {}
     }
