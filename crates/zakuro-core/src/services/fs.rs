@@ -1097,6 +1097,17 @@ fn system_archive_data(path: NcchArchivePath, data_dir: Option<&std::path::Path>
     }
 }
 
+
+/// Opens the executable image exactly as it is mapped into the game's memory.
+/// ExeFS .code can be BLZ-compressed; returning its raw bytes here makes
+/// code-integrity checks disagree with the code the runtime actually runs.
+fn executable_code_file(title: &zakuro_fs::Title) -> Option<OpenFile> {
+    Some(OpenFile {
+        path: "exefs:/.code".into(),
+        backing: FileBacking::Memory(title.code().ok()?),
+    })
+}
+
 fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
     let title = system.title.as_ref()?;
     match kind {
@@ -1111,7 +1122,12 @@ fn open_ncch_kind(system: &mut System, kind: u32) -> Option<u32> {
             log::debug!("fs: opened {path}, {} MiB", backing.size() / (1024 * 1024));
             Some(system.services.fs.add_file(OpenFile { path: path.into(), backing }))
         }
-        SELF_NCCH_CODE | SELF_NCCH_EXEFS => {
+        SELF_NCCH_CODE => {
+            let file = executable_code_file(title)?;
+            log::debug!("fs: opened the decompressed executable code, {} bytes", file.backing.size());
+            Some(system.services.fs.add_file(file))
+        }
+        SELF_NCCH_EXEFS => {
             let data = title.exefs_file(".code")?.to_vec();
             Some(system.services.fs.add_file(OpenFile {
                 path: "exefs:/.code".into(),
@@ -1252,3 +1268,27 @@ fn decode_path(system: &mut System, path_type: u32, path_size: u32, path_ptr: u3
 /// kept so the descriptor helper stays in scope for the mapped-buffer replies
 /// above, which build their descriptors by hand.
 pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
+
+
+#[cfg(test)]
+mod executable_code_tests {
+    use super::*;
+
+    #[test]
+    fn ncch_code_archive_exposes_the_runtime_executable_image() {
+        use zakuro_fs::testing::{ncch, write};
+
+        const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
+        let expected = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let path = write("fs-code-image", "game.cxi", &ncch(PROGRAM_ID, Some(&expected), &[]));
+        let title = zakuro_fs::Title::load(&path).unwrap();
+
+        let file = executable_code_file(&title).unwrap();
+        let FileBacking::Memory(actual) = file.backing else {
+            panic!("the executable code must be an in-memory file");
+        };
+        assert_eq!(actual, expected);
+
+        std::fs::remove_file(path).unwrap();
+    }
+}
