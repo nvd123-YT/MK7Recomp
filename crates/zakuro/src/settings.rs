@@ -605,7 +605,7 @@ impl Default for Settings {
             language: Language::English,
             renderer: Renderer::Vulkan,
             hardware_rasterizer: true,
-            resolution: 3,
+            resolution: 2,
             texture_packs: true,
             frame_interpolation: false,
             recompiled: true,
@@ -799,6 +799,7 @@ mod tests {
     fn missing_fields_take_their_defaults() {
         let settings: Settings = toml::from_str("show_fps = true\n[keys]\na = \"KeyK\"\n").unwrap();
         assert!(settings.show_fps);
+        assert_eq!(settings.resolution, 2);
         assert_eq!(settings.keys.a, KeyCode::KeyK);
         assert_eq!(settings.keys.b, Keys::default().b);
         assert_eq!(settings.scale, 2);

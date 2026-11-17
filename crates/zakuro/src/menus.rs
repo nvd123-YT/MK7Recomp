@@ -1262,9 +1262,9 @@ mod tests {
     fn ticking_a_row_gives_the_game_a_value_of_its_own() {
         let ctx = egui::Context::default();
         let mut value = None;
-        for expected in [Some(3), None] {
-            frame_of_a_row(&ctx, false, |ui| own(ui, &mut value, &3u32, resolution));
-            frame_of_a_row(&ctx, true, |ui| own(ui, &mut value, &3u32, resolution));
+        for expected in [Some(2), None] {
+            frame_of_a_row(&ctx, false, |ui| own(ui, &mut value, &2u32, resolution));
+            frame_of_a_row(&ctx, true, |ui| own(ui, &mut value, &2u32, resolution));
             assert_eq!(value, expected);
         }
     }

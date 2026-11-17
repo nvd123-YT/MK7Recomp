@@ -25,6 +25,7 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 - Adds `--game <path>` while keeping positional game paths, plus windowless `--prepare` and borderless `--fullscreen` support.
 - Adds launcher-editable graphics, display, emulation and sound settings, with Big Picture mode starting fullscreen.
 - Declares game save archives, extra data, system saves, save states, cheats and launcher settings for RecompLauncher backups and cloud saves.
+- Uses a lower 2× default 3D rendering resolution to reduce GPU load; higher resolutions remain available.
 
 ## Version 1.0.1 changes
 
