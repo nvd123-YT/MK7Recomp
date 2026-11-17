@@ -19,6 +19,10 @@ This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other ga
 
 The application expects a legally obtained, decrypted dump of the game. It does not include the ROM, game code, textures, music, or other game assets.
 
+## Version 1.0.3 changes
+
+- Keeps encrypted or damaged Mario Kart 7 CIA dumps visible in the library with an explanatory warning instead of silently hiding them.
+
 ## Version 1.0.2 changes
 
 - Adds RecompLauncher setup and direct game launching on Windows, Linux and macOS, with the manifest shipped in every release package.
@@ -103,7 +107,7 @@ cargo test --release --workspace
 The desktop binary is written to target/release/mario-kart-7 (or .exe on Windows). The macOS package script bundles MoltenVK into the app:
 
 ~~~
-packaging/macos-app.sh target/release/mario-kart-7 1.0.2 mario-kart-7-macos-arm64.zip
+packaging/macos-app.sh target/release/mario-kart-7 1.0.3 mario-kart-7-macos-arm64.zip
 ~~~
 
 For a normal user, the prebuilt packages on the Releases page are the easiest option.
@@ -114,14 +118,14 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 - **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs when a version tag is created or pushed. Once every platform build succeeds, it attaches the packages to the GitHub Release and publishes it. If you created a draft release on GitHub first, the workflow fills that draft with the packages and publishes it after the builds finish.
 - To test a branch without publishing, open **Actions → Mario Kart 7 Recompiled Release → Run workflow**, enter the branch name (such as `main`) in `tag`, and set `publish` to `false`. The packages remain temporary Actions artifacts.
 
-### Creating version 1.0.2 on GitHub
+### Creating version 1.0.3 on GitHub
 
 1. Open the repository and select **Releases → Draft a new release**.
-2. In **Choose a tag**, type `v1.0.1`, then select **Create new tag: v1.0.1**.
+2. In **Choose a tag**, type `v1.0.3`, then select **Create new tag: v1.0.3**.
 3. Set **Target** to `main` so the release tag points to the merged 1.0.2 implementation.
 4. Select **Save draft**. Creating the tag on the Releases page triggers the release build. The workflow will attach all four platform packages and publish the draft when they are ready.
 
-The Rust workspace version is `1.0.2`. The matching release tag is `v1.0.2`; keep the existing `v1.0.0` and `v1.0.1` tags unchanged.
+The Rust workspace version is `1.0.3`. The matching release tag is `v1.0.3`; leave all previous version tags unchanged.
 
 ## Attribution and legal notes
 
