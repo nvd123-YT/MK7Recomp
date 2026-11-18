@@ -1609,10 +1609,14 @@ mod tests {
     fn map_process_memory_ex_v1_and_v2_share_live_bytes_and_unmap_cleanly() {
         let mut system = System::new(crate::Config::default());
         let process_id = system.kernel.process_id;
+        let output = map_process_svc_output(&mut system);
+        system.cpu.regs[0] = output;
         system.cpu.regs[1] = process_id;
         dispatch(&mut system, 0x33);
         assert_eq!(system.cpu.regs[0], 0);
-        let handle = system.cpu.regs[1];
+        let mut handle_bytes = [0u8; 4];
+        system.memory.read_bytes(output, &mut handle_bytes);
+        let handle = u32::from_le_bytes(handle_bytes);
 
         let source = system
             .memory
