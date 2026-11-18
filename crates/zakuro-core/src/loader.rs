@@ -349,9 +349,70 @@ fn map_special_pages(system: &mut System, app_bytes: u32) {
     );
 }
 
+/// FNV-1a is used only to compare code images in diagnostics, not as a
+/// security or integrity check.
+fn code_fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xCBF2_9CE4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01B3)
+    })
+}
+
+/// Records the exact code image selected before it is mapped into guest memory.
+fn log_code_images(title: &Title, runtime_code: &[u8]) {
+    match title.ncch_code() {
+        Ok(code) => log::info!(
+            "code image diagnostic: base NCCH title={:016X} product={} ncch_v={} remaster_v={} compressed={} bytes={} fnv1a64={:016X}",
+            title.program_id(),
+            title.ncch.product_code,
+            title.ncch.version,
+            title.exheader.remaster_version,
+            title.exheader.compress_code,
+            code.len(),
+            code_fingerprint(&code)
+        ),
+        Err(error) => log::warn!("code image diagnostic: could not read base NCCH .code: {error}"),
+    }
+
+    if let Some(update) = title.update() {
+        match update.title.ncch_code() {
+            Ok(code) => log::info!(
+                "code image diagnostic: update NCCH title={:016X} product={} ncch_v={} cia_v={} remaster_v={} compressed={} bytes={} fnv1a64={:016X}",
+                update.title_id,
+                update.title.ncch.product_code,
+                update.title.ncch.version,
+                update.version,
+                update.title.exheader.remaster_version,
+                update.title.exheader.compress_code,
+                code.len(),
+                code_fingerprint(&code)
+            ),
+            Err(error) => log::warn!("code image diagnostic: could not read update NCCH .code: {error}"),
+        }
+    } else {
+        log::info!("code image diagnostic: no update is attached");
+    }
+
+    log::info!(
+        "code image diagnostic: runtime .code bytes={} fnv1a64={:016X} text=0x{:08X}/0x{:X}/{}p rodata=0x{:08X}/0x{:X}/{}p data=0x{:08X}/0x{:X}/{}p bss=0x{:X}",
+        runtime_code.len(),
+        code_fingerprint(runtime_code),
+        title.exheader.text.address,
+        title.exheader.text.size,
+        title.exheader.text.num_pages,
+        title.exheader.rodata.address,
+        title.exheader.rodata.size,
+        title.exheader.rodata.num_pages,
+        title.exheader.data.address,
+        title.exheader.data.size,
+        title.exheader.data.num_pages,
+        title.exheader.bss_size
+    );
+}
+
 /// maps the code segments, saying whether a mod changed them.
 fn map_code(system: &mut System, title: &Title) -> Result<bool, LoadError> {
     let (code, modded) = crate::mods::code(title, system.config.data_dir.as_deref())?;
+    log_code_images(title, &code);
     let exheader = &title.exheader;
 
     let segments = [
@@ -400,13 +461,30 @@ fn map_code(system: &mut System, title: &Title) -> Result<bool, LoadError> {
         // the write has to go to physical memory, .text and .rodata are about
         // to be visible to the guest without write permission.
         let paged = &code[start..code.len().min(start + mapped_size as usize)];
-        system.memory.write_physical(block.addr, paged);
+        if !system.memory.write_physical(block.addr, paged) {
+            log::error!("code map diagnostic: failed to write {name} at physical 0x{:08X}", block.addr);
+            continue;
+        }
 
-        log::debug!(
-            "mapped {name} at 0x{:08X}, 0x{:X} bytes in 0x{mapped_size:X}",
+        // Compare the mapped virtual view, including page padding, with the
+        // exact bytes the loader intended to place there.
+        let mut expected = vec![0; mapped_size as usize];
+        expected[..paged.len()].copy_from_slice(paged);
+        let mut actual = vec![0; mapped_size as usize];
+        system.memory.read_bytes(info.address, &mut actual);
+        let matches = actual == expected;
+        log::info!(
+            "code map diagnostic: {name} guest=0x{:08X} physical=0x{:08X} source=0x{:X} segment_bytes=0x{:X} mapped_bytes=0x{mapped_size:X} expected_fnv1a64={:016X} mapped_fnv1a64={:016X} identical={matches}",
             info.address,
-            info.size
+            block.addr,
+            source_offset,
+            paged.len(),
+            code_fingerprint(&expected),
+            code_fingerprint(&actual)
         );
+        if !matches {
+            log::error!("code map diagnostic: guest-visible {name} differs from the source image");
+        }
     }
 
     // BSS starts right where .data's bytes end, in the rest of its last page,
