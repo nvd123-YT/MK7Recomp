@@ -81,7 +81,7 @@ fn plugin_roots(sdmc_root: &Path, data_dir: &Path) -> [PathBuf; 4] {
 /// Looks for title-specific plugins first, then a default plugin. Returns the
 /// bootloader entry point when a plugin was successfully installed.
 pub fn load_for_title(system: &mut System, title: &Title, game_entry: u32) -> Option<u32> {
-    if !system.services.plgldr.enabled || system.services.plgldr.plugin_loaded {
+    if !system.config.plugins_3gx_enabled || !system.services.plgldr.enabled || system.services.plgldr.plugin_loaded {
         return None;
     }
     if ((title.program_id() >> 32) as u32 & 0xFFFF_FFED) != 0x0004_0000 {

@@ -540,6 +540,8 @@ pub struct Settings {
     pub resolution: u32,
     /// apply code patches and RomFS overlays from game mods folders.
     pub mods_enabled: bool,
+    /// load Luma/Citra 3GX plugins at game startup.
+    pub plugins_3gx_enabled: bool,
     /// draw the texture packs put in games' mods folders.
     pub texture_packs: bool,
     /// draw a picture in between each two of a game at 30 frames a second.
@@ -609,6 +611,7 @@ impl Default for Settings {
             hardware_rasterizer: true,
             resolution: 2,
             mods_enabled: true,
+            plugins_3gx_enabled: true,
             texture_packs: true,
             frame_interpolation: false,
             recompiled: true,

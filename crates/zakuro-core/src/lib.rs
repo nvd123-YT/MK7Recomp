@@ -61,6 +61,8 @@ pub struct Config {
     pub hardware_renderer: bool,
     /// apply code patches and RomFS overlays from a game's mods folder.
     pub mods_enabled: bool,
+    /// load Luma/Citra 3GX plugins at game startup.
+    pub plugins_3gx_enabled: bool,
     /// draw the pictures of the texture pack in the title's mods folder in
     /// place of its textures, which takes the host's GPU.
     pub texture_packs: bool,
@@ -113,6 +115,7 @@ impl Default for Config {
             data_dir: None,
             hardware_renderer: false,
             mods_enabled: true,
+            plugins_3gx_enabled: true,
             texture_packs: true,
             update: None,
             dlc: Vec::new(),
@@ -274,6 +277,8 @@ impl System {
         let spin = spin::SpinLoops::new(config.skip_idle_loops);
         let app_bytes = 64 * 1024 * 1024;
         let mut services = ServiceState::default();
+        services.plgldr.enabled = config.plugins_3gx_enabled;
+        services.plgldr.allow_game_change = config.plugins_3gx_enabled;
         if let Some(dir) = &config.data_dir {
             services.fs.user_dir = dir.join("user");
         }

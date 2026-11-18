@@ -661,6 +661,7 @@ impl App {
             find_recompiled: !interpret,
             hardware_renderer: self.options.hardware_rasterizer.unwrap_or(settings.hardware_rasterizer),
             mods_enabled: settings.mods_enabled,
+            plugins_3gx_enabled: settings.plugins_3gx_enabled,
             texture_packs: settings.texture_packs,
             interpolate: settings.frame_interpolation,
             enhancements: settings
