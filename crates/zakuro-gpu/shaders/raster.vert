@@ -1,5 +1,10 @@
 #version 450
 
+// Match Azahar's Apple-driver safeguard against varying vertex-position results.
+out gl_PerVertex {
+    invariant vec4 gl_Position;
+};
+
 // vertices the CPU already shaded, clipped and placed on the target, with
 // w kept so the varyings interpolate with perspective.
 layout(location = 0) in vec4 position;

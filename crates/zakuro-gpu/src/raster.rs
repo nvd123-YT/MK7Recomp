@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
@@ -13,6 +14,10 @@ pub(crate) mod hardware;
 use crate::texture::TextureFormat;
 use crate::shader::{self, ShaderUnit, Vec4};
 use crate::{format::ColorFormat, GpuMemory};
+
+// Log the first draw using each special texture0 mode; those modes need
+// distinct cube/shadow texture handling rather than the normal 2D path.
+static REPORTED_TEXTURE0_TYPES: AtomicU32 = AtomicU32::new(0);
 
 /// reads a float24-encoded viewport register.
 fn read_float24(registers: &[u32], index: usize) -> f32 {
@@ -1407,7 +1412,7 @@ fn inside(vertex: &Vertex) -> bool {
 fn held_in_range(mut vertex: Vertex) -> Vertex {
     let [_, _, z, w] = vertex.clip;
     let z_over_w = z / w;
-    if z_over_w > 0.0 && z_over_w < 1e-8 {
+    if z_over_w > 0.0 && z_over_w < 1e-6 {
         vertex.clip[2] = 0.0;
     } else if z_over_w < -1.0 && z_over_w > -1.00001 {
         vertex.clip[2] = -w;
@@ -2055,6 +2060,18 @@ fn bind_texture<M: GpuMemory>(
     }
 
     let base = TEXTURE_UNIT_BASES[unit];
+    let parameters = registers[base + 2];
+    if unit == 0 {
+        let texture_type = (parameters >> 28) & 7;
+        if texture_type != 0 && texture_type != 3 {
+            let bit = 1u32 << texture_type;
+            if REPORTED_TEXTURE0_TYPES.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                log::warn!(
+                    "texture0 uses PICA texture type {texture_type}; this renderer currently only handles 2D and projected 2D textures on this path (parameters {parameters:#010X})"
+                );
+            }
+        }
+    }
     let dimensions = registers[base + 1];
     let height = dimensions & 0x7FF;
     let width = (dimensions >> 16) & 0x7FF;

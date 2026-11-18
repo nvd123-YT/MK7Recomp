@@ -1,5 +1,10 @@
 #version 450
 
+// Match Azahar's Apple-driver safeguard against varying vertex-position results.
+out gl_PerVertex {
+    invariant vec4 gl_Position;
+};
+
 // the PICA200's vertex shader, run on the GPU. each vertex interprets the
 // title's program the way the CPU's shader interpreter does, then hands the
 // fragment stages what the rasterizer would have, clipping and perspective
@@ -427,7 +432,7 @@ void main() {
     // z on an end of the range the PICA draws when it misses one only by
     // rounding, as clip_triangle has it
     float z_over_w = position.z / position.w;
-    if (z_over_w > 0.0 && z_over_w < 1e-8) {
+    if (z_over_w > 0.0 && z_over_w < 1e-6) {
         position.z = 0.0;
     } else if (z_over_w < -1.0 && z_over_w > -1.00001) {
         position.z = -position.w;

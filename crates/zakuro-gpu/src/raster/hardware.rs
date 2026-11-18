@@ -1008,8 +1008,8 @@ impl Filtering {
     fn of(bound: &BoundTexture) -> Filtering {
         let lod = bound.lod;
         match bound.levels {
-            // one size is only ever magnified
-            1 => Filtering { minify: bound.linear, between: false, levels: (0, 0), bias: 0, ..Filtering::wrapping(bound) },
+            // even a single-level texture can be minified; keep its min filter distinct from its mag filter
+            1 => Filtering { minify: lod.linear, between: false, levels: (0, 0), bias: 0, ..Filtering::wrapping(bound) },
             _ => Filtering { minify: lod.linear, between: lod.between, levels: (lod.min, lod.max), bias: lod.bias, ..Filtering::wrapping(bound) },
         }
     }
