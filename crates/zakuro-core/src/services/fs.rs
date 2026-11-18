@@ -53,7 +53,7 @@ impl NcchArchivePath {
     /// the media type as a single byte at offset 8.
     fn decode(system: &mut System, path_size: u32, path_ptr: u32) -> Option<NcchArchivePath> {
         use zakuro_cpu::Bus;
-        if path_size < 12 {
+        if path_size != 16 {
             return None;
         }
         Some(NcchArchivePath {
@@ -76,6 +76,44 @@ impl NcchArchivePath {
             _ => None,
         }
     }
+}
+
+/// the NCCH archive file path has open type, content index, file type and
+/// an eight-byte ExeFS filename, matching Azahar's NCCHFilePath.
+const NCCH_FILE_PATH_SIZE: u32 = 0x14;
+/// SelfNCCH paths contain a type and an eight-byte ExeFS filename.
+const SELF_NCCH_FILE_PATH_SIZE: u32 = 0x0C;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NcchFilePath {
+    open_type: u32,
+    content_index: u32,
+    kind: u32,
+    filename: String,
+}
+
+impl NcchFilePath {
+    fn decode(system: &mut System, path_size: u32, path_ptr: u32) -> Option<Self> {
+        use zakuro_cpu::Bus;
+        if path_size != NCCH_FILE_PATH_SIZE {
+            return None;
+        }
+        Some(Self {
+            open_type: system.memory.read32(path_ptr),
+            content_index: system.memory.read32(path_ptr + 4),
+            kind: system.memory.read32(path_ptr + 8),
+            filename: read_exefs_filename(system, path_ptr + 12)?,
+        })
+    }
+}
+
+fn read_exefs_filename(system: &mut System, address: u32) -> Option<String> {
+    use zakuro_cpu::Bus;
+    let mut bytes = [0u8; 8];
+    system.memory.read_bytes(address, &mut bytes);
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let filename = std::str::from_utf8(&bytes[..end]).ok()?;
+    (!filename.is_empty()).then(|| filename.to_owned())
 }
 
 /// path encodings.
@@ -1008,30 +1046,39 @@ fn open_file(
 ) -> Option<u32> {
     match archive_id {
         ARCHIVE_SELF_NCCH => open_self_ncch(system, path_type, path_size, path_ptr),
-        ARCHIVE_NCCH if path_type == PATH_BINARY && path_size >= 12 => {
-            use zakuro_cpu::Bus;
-            let access_type = system.memory.read32(path_ptr);
-            if access_type != 0 {
-                log::warn!("fs: NCCH archive access type {access_type} is not implemented");
+        ARCHIVE_NCCH if path_type == PATH_BINARY => {
+            let Some(file_path) = NcchFilePath::decode(system, path_size, path_ptr) else {
+                log::warn!("fs: malformed NCCH file path ({path_size} bytes)");
+                return None;
+            };
+            if file_path.open_type != 0 {
+                log::warn!("fs: NCCH archive open type {} is not implemented", file_path.open_type);
                 return None;
             }
 
             // the media type in the *archive* path decides what this is, a game
-            // reaching into its own cartridge, or, far more often, a read of
-            // one of the system's shared data archives on NAND, which has
-            // nothing to do with this title's content.
+            // reaching into its own cartridge, an installed title/update on SD,
+            // or one of the system's shared data archives on NAND.
             let archive_path = archive_path.unwrap_or_default();
             match archive_path.media_type {
                 MEDIA_NAND => open_system_archive(system, archive_path),
-                MEDIA_GAMECARD => {
-                    let kind = system.memory.read32(path_ptr + 8);
-                    open_ncch_kind(system, kind, false, NcchCodeSource::SelectedNcch)
-                }
+                MEDIA_GAMECARD => open_ncch_kind(
+                    system,
+                    file_path.kind,
+                    false,
+                    NcchCodeSource::SelectedNcch,
+                    &file_path.filename,
+                ),
                 MEDIA_SDMC => {
-                    let content_index = system.memory.read32(path_ptr + 4) as u16;
-                    let kind = system.memory.read32(path_ptr + 8);
-                    let title_id = (archive_path.high_program_id as u64) << 32 | archive_path.low_program_id as u64;
-                    open_sd_title(system, title_id, content_index, kind)
+                    let title_id = (archive_path.high_program_id as u64) << 32
+                        | archive_path.low_program_id as u64;
+                    open_sd_title(
+                        system,
+                        title_id,
+                        file_path.content_index as u16,
+                        file_path.kind,
+                        &file_path.filename,
+                    )
                 }
                 other => {
                     log::warn!(
@@ -1056,15 +1103,47 @@ fn open_self_ncch(
     path_size: u32,
     path_ptr: u32,
 ) -> Option<u32> {
-    // a binary path selects which part of the NCCH, an empty path means RomFS.
-    let kind = if path_type == PATH_BINARY && path_size >= 4 {
-        use zakuro_cpu::Bus;
-        system.memory.read32(path_ptr)
-    } else {
-        SELF_NCCH_ROMFS
-    };
+    if path_type != PATH_BINARY || path_size != SELF_NCCH_FILE_PATH_SIZE {
+        log::warn!("fs: malformed SelfNCCH path type {path_type} size {path_size}");
+        return None;
+    }
+    use zakuro_cpu::Bus;
+    let kind = system.memory.read32(path_ptr);
+    let filename = read_exefs_filename(system, path_ptr + 4)?;
 
-    open_ncch_kind(system, kind, false, NcchCodeSource::Runtime)
+    match kind {
+        SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
+            open_ncch_kind(system, kind, false, NcchCodeSource::Runtime, &filename)
+        }
+        SELF_NCCH_CODE => {
+            // Code is deliberately not exposed by SelfNCCH; the console and
+            // Azahar expose .code through the separate NCCH archive instead.
+            log::debug!("fs: SelfNCCH does not expose the executable code section");
+            None
+        }
+        SELF_NCCH_EXEFS => {
+            let title = system.title.as_ref()?;
+            let file = self_ncch_exefs_file(title, &filename)?;
+            Some(system.services.fs.add_file(file))
+        }
+        other => {
+            log::warn!("fs: unknown SelfNCCH path type {other}");
+            None
+        }
+    }
+}
+
+fn self_ncch_exefs_file(title: &zakuro_fs::Title, filename: &str) -> Option<OpenFile> {
+    // SelfNCCH exposes only the icon, banner and logo. It does not expose
+    // .code; that belongs to ARCHIVE_NCCH.
+    if !matches!(filename, "icon" | "banner" | "logo") {
+        return None;
+    }
+    let data = title.exefs_file(filename)?.to_vec();
+    Some(OpenFile {
+        path: format!("exefs:/{filename}"),
+        backing: FileBacking::Memory(data),
+    })
 }
 
 /// opens one of the system's shared data archives on NAND.
@@ -1138,6 +1217,7 @@ fn ncch_kind_file(
     update: bool,
     code_source: NcchCodeSource,
     data_dir: Option<&std::path::Path>,
+    filename: &str,
 ) -> Option<OpenFile> {
     match kind {
         SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
@@ -1145,22 +1225,19 @@ fn ncch_kind_file(
             let path = if update || kind == SELF_NCCH_UPDATE_ROMFS { "patch:/" } else { "romfs:/" };
             Some(OpenFile { path: path.into(), backing })
         }
-        SELF_NCCH_CODE => match code_source {
+        SELF_NCCH_CODE | SELF_NCCH_EXEFS if filename == ".code" => match code_source {
             NcchCodeSource::Runtime => executable_code_file(title, data_dir),
             NcchCodeSource::SelectedNcch => ncch_code_file(selected),
         },
-        SELF_NCCH_EXEFS => match code_source {
-            NcchCodeSource::Runtime => {
-                let data = title.code().ok()?;
-                Some(OpenFile {
-                    path: "exefs:/.code".into(),
-                    backing: FileBacking::Memory(data),
-                })
-            }
-            NcchCodeSource::SelectedNcch => ncch_code_file(selected),
-        },
+        SELF_NCCH_CODE | SELF_NCCH_EXEFS => {
+            let data = selected.exefs_file(filename)?.to_vec();
+            Some(OpenFile {
+                path: format!("exefs:/{filename}"),
+                backing: FileBacking::Memory(data),
+            })
+        }
         other => {
-            log::warn!("fs: SelfNCCH path type {other} is not implemented");
+            log::warn!("fs: NCCH file path type {other} is not implemented");
             None
         }
     }
@@ -1171,17 +1248,26 @@ fn open_ncch_kind(
     kind: u32,
     use_update: bool,
     code_source: NcchCodeSource,
+    filename: &str,
 ) -> Option<u32> {
     let data_dir = system.config.data_dir.clone().filter(|_| system.config.mods_enabled);
     let title = system.title.as_ref()?;
     let update = use_update || kind == SELF_NCCH_UPDATE_ROMFS;
     let selected = if update { &title.update()?.title } else { title };
-    let file = ncch_kind_file(title, selected, kind, update, code_source, data_dir.as_deref())?;
+    let file = ncch_kind_file(
+        title,
+        selected,
+        kind,
+        update,
+        code_source,
+        data_dir.as_deref(),
+        filename,
+    )?;
     match kind {
         SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
             log::debug!("fs: opened {}, {} MiB", file.path, file.backing.size() / (1024 * 1024));
         }
-        SELF_NCCH_CODE | SELF_NCCH_EXEFS => {
+        SELF_NCCH_CODE | SELF_NCCH_EXEFS if filename == ".code" => {
             let source = match code_source {
                 NcchCodeSource::Runtime => "runtime",
                 NcchCodeSource::SelectedNcch => "selected NCCH",
@@ -1198,6 +1284,9 @@ fn open_ncch_kind(
                 file.backing.size(),
                 kind
             );
+        }
+        SELF_NCCH_CODE | SELF_NCCH_EXEFS => {
+            log::debug!("fs: opened NCCH ExeFS section '{filename}' ({} bytes)", file.backing.size());
         }
         _ => {}
     }
@@ -1218,7 +1307,13 @@ fn romfs_backing(title: &zakuro_fs::Title) -> Option<FileBacking> {
 
 /// opens a title on the SD card through the NCCH archive, the game itself
 /// installed from a CIA, its update, or the content of an index of its DLC.
-fn open_sd_title(system: &mut System, title_id: u64, content_index: u16, kind: u32) -> Option<u32> {
+fn open_sd_title(
+    system: &mut System,
+    title_id: u64,
+    content_index: u16,
+    kind: u32,
+    filename: &str,
+) -> Option<u32> {
     let (is_base_title, is_update_title) = {
         let title = system.title.as_ref()?;
         (
@@ -1227,10 +1322,10 @@ fn open_sd_title(system: &mut System, title_id: u64, content_index: u16, kind: u
         )
     };
     if is_base_title {
-        return open_ncch_kind(system, kind, false, NcchCodeSource::SelectedNcch);
+        return open_ncch_kind(system, kind, false, NcchCodeSource::SelectedNcch, filename);
     }
     if is_update_title {
-        return open_ncch_kind(system, kind, true, NcchCodeSource::SelectedNcch);
+        return open_ncch_kind(system, kind, true, NcchCodeSource::SelectedNcch, filename);
     }
     let Some(dlc) = system.dlc.iter().find(|dlc| dlc.title_id == title_id) else {
         log::warn!("fs: {title_id:016X} is not on the SD card");
@@ -1343,6 +1438,52 @@ mod executable_code_tests {
     use super::*;
 
     #[test]
+    fn selfncch_rejects_code_and_exposes_only_named_metadata_sections() {
+        use zakuro_fs::testing::{ncch, write};
+
+        const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
+        let code = [0x11, 0x22, 0x33, 0x44];
+        let path = write("selfncch-exefs", "game.cxi", &ncch(PROGRAM_ID, Some(&code), &[]));
+        let title = zakuro_fs::Title::load(&path).unwrap();
+
+        assert!(self_ncch_exefs_file(&title, ".code").is_none());
+        assert!(self_ncch_exefs_file(&title, "icon").is_none());
+        assert!(self_ncch_exefs_file(&title, "banner").is_none());
+        assert!(self_ncch_exefs_file(&title, "logo").is_none());
+
+        // The separate NCCH archive still exposes the selected title's .code.
+        let file = ncch_kind_file(
+            &title,
+            &title,
+            SELF_NCCH_EXEFS,
+            false,
+            NcchCodeSource::SelectedNcch,
+            None,
+            ".code",
+        )
+        .unwrap();
+        let FileBacking::Memory(actual) = file.backing else {
+            panic!("NCCH .code must be exposed as an in-memory file");
+        };
+        assert_eq!(actual, code);
+
+        // An ExeFS request for a different, absent filename must never
+        // accidentally receive the game's .code bytes.
+        assert!(ncch_kind_file(
+            &title,
+            &title,
+            SELF_NCCH_EXEFS,
+            false,
+            NcchCodeSource::SelectedNcch,
+            None,
+            "icon",
+        )
+        .is_none());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn ncch_code_archive_exposes_the_runtime_executable_image() {
         use zakuro_fs::testing::{ncch, write};
 
@@ -1403,6 +1544,7 @@ mod executable_code_tests {
             true,
             NcchCodeSource::SelectedNcch,
             None,
+            ".code",
         )
         .unwrap();
         let FileBacking::Memory(exefs_code) = exefs.backing else {
@@ -1418,6 +1560,7 @@ mod executable_code_tests {
             true,
             NcchCodeSource::SelectedNcch,
             None,
+            ".code",
         )
         .unwrap();
         let FileBacking::Memory(selected_update_code) = selected_update_code.backing else {
@@ -1432,6 +1575,7 @@ mod executable_code_tests {
             true,
             NcchCodeSource::Runtime,
             None,
+            ".code",
         )
         .unwrap();
         let FileBacking::Memory(runtime_code) = code.backing else {
@@ -1448,6 +1592,7 @@ mod executable_code_tests {
             false,
             NcchCodeSource::SelectedNcch,
             None,
+            ".code",
         )
         .unwrap();
         let FileBacking::Memory(base_exefs_code) = base_exefs.backing else {
@@ -1462,6 +1607,7 @@ mod executable_code_tests {
             false,
             NcchCodeSource::SelectedNcch,
             None,
+            ".code",
         )
         .unwrap();
         let FileBacking::Memory(base_code_image) = base_code_file.backing else {
