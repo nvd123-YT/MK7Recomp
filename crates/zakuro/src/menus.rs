@@ -734,6 +734,8 @@ impl Menus {
                         ui.selectable_value(&mut settings.renderer, Renderer::OpenGl, "OpenGL");
                     });
                 rasterizer(ui, &mut settings.hardware_rasterizer);
+                ui.checkbox(&mut settings.mods_enabled, "Enable game mods")
+                    .on_hover_text("Apply code patches and RomFS replacements from the game's mods folder. Turn off to test the original game files. 3GX plugins such as CTGP-7 load separately.");
                 ui.add_enabled_ui(settings.hardware_rasterizer, |ui| {
                     resolution(ui, &mut settings.resolution);
                     texture_packs(ui, &mut settings.texture_packs);

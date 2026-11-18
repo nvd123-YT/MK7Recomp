@@ -66,7 +66,11 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
     let mut title = Title::load(path)?;
     log::info!("loaded {}", title.describe());
     let updated = config.update.as_ref().is_some_and(|update| attach_update(&mut title, update));
-    crate::mods::lay(&mut title, config.data_dir.as_deref());
+    if config.mods_enabled {
+        crate::mods::lay(&mut title, config.data_dir.as_deref());
+    } else {
+        log::info!("game mods are disabled; using the unmodified title files");
+    }
     let dlc = load_dlc(&title, &config.dlc);
 
     let exheader = &title.exheader;
@@ -217,7 +221,7 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
             false => log::warn!("frame interpolation takes the 3D drawn on the GPU and shown with Vulkan, it is off"),
         }
     }
-    if let Some(data_dir) = system.config.data_dir.as_deref().filter(|_| system.config.texture_packs) {
+    if let Some(data_dir) = system.config.data_dir.as_deref().filter(|_| system.config.mods_enabled && system.config.texture_packs) {
         let dir = crate::mods::textures(data_dir, title.program_id());
         if !on_gpu {
             if std::fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_some()) {
@@ -251,7 +255,7 @@ pub fn swap_recompiled(system: &mut System, path: &std::path::Path) -> Result<()
     system.recompiled = None;
     let mut library = crate::recompiled::Library::open(path).map_err(|error| format!("could not load {}, {error}", path.display()))?;
     if !library.checks_itself() {
-        let modded = crate::mods::code(title, system.config.data_dir.as_deref()).is_ok_and(|(_, modded)| modded);
+        let modded = crate::mods::code(title, system.config.data_dir.as_deref().filter(|_| system.config.mods_enabled)).is_ok_and(|(_, modded)| modded);
         if modded || title.update().is_some() {
             let what = if modded { "a mod" } else { "the update" };
             return Err(format!("{what} changed the game's code and {} can't tell where", path.display()));
@@ -409,7 +413,7 @@ fn log_code_images(title: &Title, runtime_code: &[u8]) {
 
 /// maps the code segments, saying whether a mod changed them.
 fn map_code(system: &mut System, title: &Title) -> Result<bool, LoadError> {
-    let (code, modded) = crate::mods::code(title, system.config.data_dir.as_deref())?;
+    let (code, modded) = crate::mods::code(title, system.config.data_dir.as_deref().filter(|_| system.config.mods_enabled))?;
     log_code_images(title, &code);
     let exheader = &title.exheader;
 

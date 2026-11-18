@@ -59,6 +59,8 @@ pub struct Config {
     pub data_dir: Option<std::path::PathBuf>,
     /// draw on the host's GPU through Vulkan, when there is one that can.
     pub hardware_renderer: bool,
+    /// apply code patches and RomFS overlays from a game's mods folder.
+    pub mods_enabled: bool,
     /// draw the pictures of the texture pack in the title's mods folder in
     /// place of its textures, which takes the host's GPU.
     pub texture_packs: bool,
@@ -110,6 +112,7 @@ impl Default for Config {
             find_recompiled: false,
             data_dir: None,
             hardware_renderer: false,
+            mods_enabled: true,
             texture_packs: true,
             update: None,
             dlc: Vec::new(),

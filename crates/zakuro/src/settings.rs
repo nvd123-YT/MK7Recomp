@@ -538,6 +538,8 @@ pub struct Settings {
     pub hardware_rasterizer: bool,
     /// how many times the console's resolution the GPU draws the 3D at.
     pub resolution: u32,
+    /// apply code patches and RomFS overlays from game mods folders.
+    pub mods_enabled: bool,
     /// draw the texture packs put in games' mods folders.
     pub texture_packs: bool,
     /// draw a picture in between each two of a game at 30 frames a second.
@@ -606,6 +608,7 @@ impl Default for Settings {
             renderer: Renderer::Vulkan,
             hardware_rasterizer: true,
             resolution: 2,
+            mods_enabled: true,
             texture_packs: true,
             frame_interpolation: false,
             recompiled: true,

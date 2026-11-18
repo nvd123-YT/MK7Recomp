@@ -53,6 +53,7 @@
         "renderer": "\"vulkan\"",
         "hardware_rasterizer": "true",
         "resolution": "2",
+        "mods_enabled": "true",
         "texture_packs": "true",
         "frame_interpolation": "false",
         "recompiled": "true",
@@ -211,6 +212,29 @@
       },
       "defaults": {
         "resolution": "2"
+      }
+    },
+    {
+      "id": "mods_enabled",
+      "label": "Game mods",
+      "group": "Graphics",
+      "help": "Apply code patches and RomFS replacements from the game's mods folder. 3GX plugins such as CTGP-7 are loaded separately.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "mods_enabled": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "mods_enabled": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "mods_enabled": "true"
       }
     },
     {

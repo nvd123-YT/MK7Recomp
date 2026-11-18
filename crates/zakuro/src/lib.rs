@@ -660,6 +660,7 @@ impl App {
             linked: self.linked.filter(|_| !interpret),
             find_recompiled: !interpret,
             hardware_renderer: self.options.hardware_rasterizer.unwrap_or(settings.hardware_rasterizer),
+            mods_enabled: settings.mods_enabled,
             texture_packs: settings.texture_packs,
             interpolate: settings.frame_interpolation,
             enhancements: settings
@@ -1166,7 +1167,7 @@ impl App {
         // a scan may have taken it out of the library meanwhile
         if let Some(game) = self.library.games.iter().find(|game| game.path == wanted.path) {
             let update = game.update.as_ref().map(|update| update.path.as_path());
-            self.jobs.push(Job::start(&game.path, update, game.program_id, &game.name, self.data_dir.as_deref(), toolchain));
+            self.jobs.push(Job::start(&game.path, update, game.program_id, &game.name, self.data_dir.as_deref().filter(|_| self.settings.mods_enabled), toolchain));
         }
     }
 

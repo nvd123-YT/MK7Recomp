@@ -1172,7 +1172,7 @@ fn open_ncch_kind(
     use_update: bool,
     code_source: NcchCodeSource,
 ) -> Option<u32> {
-    let data_dir = system.config.data_dir.clone();
+    let data_dir = system.config.data_dir.clone().filter(|_| system.config.mods_enabled);
     let title = system.title.as_ref()?;
     let update = use_update || kind == SELF_NCCH_UPDATE_ROMFS;
     let selected = if update { &title.update()?.title } else { title };
