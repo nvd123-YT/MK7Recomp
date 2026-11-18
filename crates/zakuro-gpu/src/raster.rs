@@ -2212,7 +2212,9 @@ fn bind_texture<M: GpuMemory>(
             decoded.push(found.0);
         }
         let faces: [Arc<[[u8; 4]]>; 6] = decoded.try_into().ok()?;
-        let texels = cache.cube_atlas((addresses, format, width, levels), faces, format, width, levels);
+        // Keep one set of Arc handles for the atlas cache and one for the
+        // native Vulkan cube upload; cloning these handles does not copy texels.
+        let texels = cache.cube_atlas((addresses, format, width, levels), faces.clone(), format, width, levels);
         return Some(BoundTexture {
             texels,
             cube_faces: Some(faces),
