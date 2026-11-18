@@ -20,6 +20,8 @@ const PLUGIN_HEADER_SIZE: u32 = 0x100;
 // The 3DS-only startup flash writes to a hardware LED register that the
 // desktop runtime does not map. Always skip that cosmetic hardware effect.
 const NO_FLASH_FOR_EMULATOR: u32 = 1;
+const CHECK_RESULT_COMPARE_R0_R1: u32 = 0xE150_0001;
+const CHECK_RESULT_COMPARE_R0_R0: u32 = 0xE150_0000;
 const BOOTLOADER: [u8; 412] = [
 0xff, 0x1f, 0x2d, 0xe9, 0x00, 0x00, 0x0f, 0xe1, 0x01, 0x00, 0x2d, 0xe9, 0xf0, 0x00, 0x8f, 0xe2,
  0x04, 0x10, 0x90, 0xe5, 0x00, 0x00, 0x90, 0xe5, 0xd4, 0x20, 0x8f, 0xe2, 0x0f, 0xe0, 0xa0, 0xe1,
@@ -337,6 +339,18 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
         NO_FLASH_FOR_EMULATOR,
         load_func,
     );
+    let ignore_executable_check = std::env::var("ZAKURO_3GX_IGNORE_EXE_CHECK")
+        .is_ok_and(|value| value == "1");
+    if ignore_executable_check {
+        if !force_executable_check_success(&mut boot) {
+            system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
+            system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
+            system.memory.unmap(PLUGIN_HEAP_ADDRESS, heap_size);
+            system.memory.phys.free(block);
+            return Err(LoadError::MapFailed);
+        }
+        log::warn!("3GX executable-check result override is enabled for this test session");
+    }
     if !system.memory.write_physical(block.addr + boot_offset, &boot) {
         system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
         system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
@@ -447,6 +461,26 @@ fn patch_bootloader(
     }
 }
 
+
+/// Changes the embedded result comparison so a test session can proceed
+/// regardless of the embedded executable check's return value. The check
+/// function itself still runs, and the bootloader still records success.
+fn force_executable_check_success(boot: &mut [u8; 412]) -> bool {
+    let mut compare_offset = None;
+    for (index, word) in boot.chunks_exact(4).enumerate() {
+        if u32::from_le_bytes(word.try_into().unwrap()) == CHECK_RESULT_COMPARE_R0_R1 {
+            if compare_offset.replace(index * 4).is_some() {
+                return false;
+            }
+        }
+    }
+    let Some(offset) = compare_offset else {
+        return false;
+    };
+    boot[offset..offset + 4].copy_from_slice(&CHECK_RESULT_COMPARE_R0_R0.to_le_bytes());
+    true
+}
+
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -539,6 +573,25 @@ mod tests {
         let no_flash_marker = 0x118;
         let value = u32::from_le_bytes(boot[no_flash_marker..no_flash_marker + 4].try_into().unwrap());
         assert_eq!(value, NO_FLASH_FOR_EMULATOR);
+    }
+
+    #[test]
+    fn executable_check_override_changes_only_the_result_comparison() {
+        let mut boot = BOOTLOADER;
+        assert!(force_executable_check_success(&mut boot));
+
+        let words: Vec<u32> = boot
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R1).count(),
+            0
+        );
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
+            1
+        );
     }
 
     #[test]
