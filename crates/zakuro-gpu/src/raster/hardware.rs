@@ -1641,6 +1641,8 @@ pub struct Hardware {
     upright_image: Option<Compute>,
     samples: Option<Local>,
     samplers: QuickMap<Filtering, vk::Sampler>,
+    /// the furthest a sampler's bias reaches, past which a unit's is cut.
+    max_bias: f32,
     ring: Buffer,
     used: u64,
     /// vertex arrays kept across batches, how much of it they take, and
@@ -1914,6 +1916,7 @@ impl Hardware {
                 upright_image: None,
                 samples: None,
                 samplers: QuickMap::default(),
+                max_bias: properties.limits.max_sampler_lod_bias,
                 used: 0,
                 heap: unmade(),
                 heap_used: 0,
@@ -3093,7 +3096,7 @@ impl Hardware {
             .mag_filter(filter(filtering.magnify))
             .min_filter(filter(filtering.minify))
             .mipmap_mode(between)
-            .mip_lod_bias(0.0)
+            .mip_lod_bias((filtering.bias as f32 / 256.0).clamp(-self.max_bias, self.max_bias))
             .address_mode_u(mode(filtering.s))
             .address_mode_v(mode(filtering.t))
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)

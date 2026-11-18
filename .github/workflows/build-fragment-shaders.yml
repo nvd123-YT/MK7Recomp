@@ -1,0 +1,50 @@
+name: Build Vulkan Fragment Shaders
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/zakuro-gpu/shaders/raster.frag"
+      - ".github/workflows/build-fragment-shaders.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-vulkan-fragment-shaders-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Install GLSL compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools
+
+      - name: Compile Vulkan fragment shader variants
+        run: |
+          glslangValidator -V --target-env vulkan1.3 -S frag \
+            -o crates/zakuro-gpu/shaders/raster.frag.spv \
+            crates/zakuro-gpu/shaders/raster.frag
+          glslangValidator -V --target-env vulkan1.3 -S frag -DWRITES_DEPTH=1 \
+            -o crates/zakuro-gpu/shaders/raster_depth.frag.spv \
+            crates/zakuro-gpu/shaders/raster.frag
+
+      - name: Commit updated SPIR-V binaries
+        run: |
+          if git diff --quiet -- crates/zakuro-gpu/shaders/raster.frag.spv crates/zakuro-gpu/shaders/raster_depth.frag.spv; then
+            echo "Fragment SPIR-V binaries are already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/zakuro-gpu/shaders/raster.frag.spv crates/zakuro-gpu/shaders/raster_depth.frag.spv
+          git commit -m "Rebuild Vulkan fragment shader binaries"
+          git push origin HEAD:main

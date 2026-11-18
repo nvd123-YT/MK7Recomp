@@ -29,6 +29,18 @@ fn loc_register(registers: &[u32], index: usize) -> u32 {
     (registers[index] & 0x0FFF_FFFF) << 3
 }
 
+/// PICA cube face address: the main texture register supplies bits 22-27,
+/// while each additional face register supplies its own low 22 address bits.
+fn cube_face_address(registers: &[u32], base: usize, face: usize) -> u32 {
+    let main = registers[base + 4] & 0x0FFF_FFFF;
+    let address = if face == 0 {
+        main
+    } else {
+        (main & !0x003F_FFFF) | (registers[base + 4 + face] & 0x003F_FFFF)
+    };
+    address << 3
+}
+
 struct AttributeLoader {
     offset: u32,
     /// for each of the loader's up to twelve components, the attribute
@@ -1105,7 +1117,9 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
             None => OUTSIDE,
         })
         .collect();
-    let mut placed: Vec<Screen> = Vec::with_capacity(shaded.len());
+    // Reuse source vertices for the common case. Only a triangle that needs
+    // quaternion sign correction receives triangle-local copies.
+    let mut placed = source.clone();
     let mut indices: Vec<u32> = Vec::with_capacity(triangles * 3);
     let culls = |p: &Screen, q: &Screen, r: &Screen| {
         let counter_clockwise = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) > 0.0;
@@ -1115,16 +1129,30 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
         let (a, b, c) = (at(ia), at(ib), at(ic));
         let [sa, sb, sc] = [slots[a], slots[b], slots[c]];
         if sa != OUTSIDE && sb != OUTSIDE && sc != OUTSIDE {
-            let mut triangle = [source[sa as usize], source[sb as usize], source[sc as usize]];
+            let source_indices = [sa, sb, sc];
+            let mut triangle = [
+                source[sa as usize],
+                source[sb as usize],
+                source[sc as usize],
+            ];
             let reference = triangle[0].quaternion_over_w;
-            align_quaternion(&reference, &mut triangle[1].quaternion_over_w);
-            align_quaternion(&reference, &mut triangle[2].quaternion_over_w);
+            let opposite = [1usize, 2usize].map(|i| {
+                (0..4)
+                    .map(|component| reference[component] * triangle[i].quaternion_over_w[component])
+                    .sum::<f32>() < 0.0
+            });
             if culls(&triangle[0], &triangle[1], &triangle[2]) {
                 culled += 1;
-            } else {
+            } else if opposite.iter().any(|&needs_flip| needs_flip) {
+                align_quaternion(&reference, &mut triangle[1].quaternion_over_w);
+                align_quaternion(&reference, &mut triangle[2].quaternion_over_w);
                 let first = placed.len() as u32;
                 placed.extend_from_slice(&triangle);
                 indices.extend([first, first + 1, first + 2]);
+            } else {
+                // Preserve normal indexed vertex reuse; do not expand
+                // ordinary meshes to three new vertices per triangle.
+                indices.extend(source_indices);
             }
             continue;
         }
@@ -1707,6 +1735,9 @@ pub struct TextureCache {
     /// by address, format and size, hashed by a multiply rather than
     /// SipHash, as each draw looks its textures up.
     entries: zakuro_common::hash::IntMap<TextureKey, Decoded>,
+    /// assembled cube atlases, retained alongside their source faces
+    cubes: zakuro_common::hash::IntMap<CubeTextureKey, CubeAtlas>,
+    cube_texels: usize,
     texels: usize,
     /// counts command lists. nothing but drawing changes memory while one
     /// runs, so a texture checked during it is not checked again unless a
@@ -1726,6 +1757,12 @@ pub struct TextureCache {
 
 /// address, format, width, height and how many sizes.
 type TextureKey = (u32, TextureFormat, u32, u32, u32);
+type CubeTextureKey = ([u32; 6], TextureFormat, u32, u32);
+
+struct CubeAtlas {
+    faces: [Arc<[[u8; 4]]>; 6],
+    texels: Arc<[[u8; 4]]>,
+}
 
 /// a texture's texels, and the texture pack's picture replacing it.
 type Found = (Arc<[[u8; 4]]>, Option<Arc<crate::pack::Material>>);
@@ -1753,6 +1790,8 @@ impl TextureCache {
     pub fn set_pack(&mut self, pack: Option<Arc<crate::pack::Pack>>) {
         self.pack = pack;
         self.entries.clear();
+        self.cubes.clear();
+        self.cube_texels = 0;
         self.texels = 0;
     }
 
@@ -1760,6 +1799,8 @@ impl TextureCache {
     /// state had it.
     pub fn forget(&mut self) {
         self.entries.clear();
+        self.cubes.clear();
+        self.cube_texels = 0;
         self.texels = 0;
     }
 
@@ -1859,6 +1900,8 @@ impl TextureCache {
         let count = texels.len();
         if self.texels + count > CACHED_TEXELS {
             self.entries.clear();
+            self.cubes.clear();
+            self.cube_texels = 0;
             self.texels = 0;
         }
         let replacement = picture_for(self.pack.as_deref(), data, &texels, key, &mut self.rows);
@@ -1868,6 +1911,53 @@ impl TextureCache {
         }
         self.texels += count;
         (texels, replacement)
+    }
+
+    /// Builds a 3x2 atlas from the six PICA cube faces. The top row is
+    /// -Y, +Z, -Z; the bottom row is +X, -X, +Y.
+    fn cube_atlas(
+        &mut self,
+        key: CubeTextureKey,
+        faces: [Arc<[[u8; 4]]>; 6],
+        format: TextureFormat,
+        width: u32,
+        levels: u32,
+    ) -> Arc<[[u8; 4]]> {
+        if let Some(atlas) = self.cubes.get(&key) {
+            if atlas.faces.iter().zip(&faces).all(|(old, new)| Arc::ptr_eq(old, new)) {
+                return atlas.texels.clone();
+            }
+        }
+        let texel_count: usize = texture_levels(format, width, width, levels)
+            .map(|level| (level.width * level.height * 6) as usize)
+            .sum();
+        let mut atlas = Vec::with_capacity(texel_count);
+        for level in texture_levels(format, width, width, levels) {
+            let side = level.width as usize;
+            for row in [[3usize, 4, 5], [0usize, 1, 2]] {
+                for y in 0..side {
+                    let start = level.texels + y * side;
+                    for face in row {
+                        atlas.extend_from_slice(&faces[face][start..start + side]);
+                    }
+                }
+            }
+        }
+
+        let texels: Arc<[[u8; 4]]> = Arc::from(atlas);
+        const CUBE_CACHE_LIMIT: usize = CACHED_TEXELS / 4;
+        if texel_count <= CUBE_CACHE_LIMIT {
+            if let Some(previous) = self.cubes.remove(&key) {
+                self.cube_texels = self.cube_texels.saturating_sub(previous.texels.len());
+            }
+            if self.cube_texels + texel_count > CUBE_CACHE_LIMIT {
+                self.cubes.clear();
+                self.cube_texels = 0;
+            }
+            self.cube_texels += texel_count;
+            self.cubes.insert(key, CubeAtlas { faces, texels: texels.clone() });
+        }
+        texels
     }
 }
 
@@ -2061,32 +2151,83 @@ fn bind_texture<M: GpuMemory>(
 
     let base = TEXTURE_UNIT_BASES[unit];
     let parameters = registers[base + 2];
-    if unit == 0 {
-        let texture_type = (parameters >> 28) & 7;
-        if texture_type != 0 && texture_type != 3 {
-            let bit = 1u32 << texture_type;
-            if REPORTED_TEXTURE0_TYPES.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
-                log::warn!(
-                    "texture0 uses PICA texture type {texture_type}; this renderer currently only handles 2D and projected 2D textures on this path (parameters {parameters:#010X})"
-                );
-            }
+    let texture_type = if unit == 0 { (parameters >> 28) & 7 } else { 0 };
+    if unit == 0 && matches!(texture_type, 2 | 4) {
+        let bit = 1u32 << texture_type;
+        if REPORTED_TEXTURE0_TYPES.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            log::warn!(
+                "texture0 uses PICA shadow texture type {texture_type}; shadow sampling is not implemented yet (parameters {parameters:#010X})"
+            );
         }
     }
     let dimensions = registers[base + 1];
     let height = dimensions & 0x7FF;
     let width = (dimensions >> 16) & 0x7FF;
-    if width == 0 || height == 0 {
+    if width == 0 || (texture_type != 1 && height == 0) {
         return Some(empty_texture());
     }
 
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
     let format = crate::texture::TextureFormat::from_raw(registers[format_register]);
+
+    // TextureCube uses six independently addressed square images. Assemble
+    // them into a cached mip-preserving atlas while keeping the GPU draw path.
+    if unit == 0 && texture_type == 1 {
+        let levels = level_count(registers, base, width, width);
+        let size = texture_bytes(format, width, width, levels);
+        let raw_addresses: [u32; 6] = std::array::from_fn(|face| {
+            cube_face_address(registers, base, face)
+        });
+        if raw_addresses[0] == 0 {
+            return Some(empty_texture());
+        }
+        let addresses = raw_addresses.map(|address| memory.translate(address));
+
+        let mut decoded = Vec::with_capacity(6);
+        for &addr in &addresses {
+            let key = (addr, format, width, width, levels);
+            let found = match cache.checked(key, size as u32) {
+                Some(found) => found,
+                None => match cache.unchanged(key, size as u32, memory) {
+                    Some(found) => found,
+                    None => {
+                        let found = match memory.slice(addr, size) {
+                            Some(data) => cache.decoded(key, data),
+                            None => {
+                                let mut data = vec![0u8; size];
+                                memory.read(addr, &mut data);
+                                cache.decoded(key, &data)
+                            }
+                        };
+                        cache.watch(key, size as u32, memory);
+                        found
+                    }
+                },
+            };
+            decoded.push(found.0);
+        }
+        let faces: [Arc<[[u8; 4]]>; 6] = decoded.try_into().ok()?;
+        let texels = cache.cube_atlas((addresses, format, width, levels), faces, format, width, levels);
+        return Some(BoundTexture {
+            texels,
+            drawn: None,
+            linear: parameters & 0x2 != 0,
+            wrap_s: Wrap::ClampToEdge,
+            wrap_t: Wrap::ClampToEdge,
+            width: width * 3,
+            height: width * 2,
+            border: registers[base].to_le_bytes().map(|c| c as f32 / 255.0),
+            replacement: None,
+            levels,
+            lod: Lod::read(registers, base, levels),
+        });
+    }
+
     let address = loc_register(registers, base + 4);
     if address == 0 {
         // a unit pointed at nothing.
         return Some(empty_texture());
     }
-
     let addr = memory.translate(address);
     log::trace!("texture unit {unit}: 0x{address:08X} -> 0x{addr:08X}, {width}x{height} {format:?}");
     // a buffer drawn into has the one size
@@ -2143,6 +2284,9 @@ fn drawn_texture<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> Op
         return None;
     }
     let base = TEXTURE_UNIT_BASES[unit];
+    if unit == 0 && ((registers[base + 2] >> 28) & 7) == 1 {
+        return None;
+    }
     let dimensions = registers[base + 1];
     let (height, width) = (dimensions & 0x7FF, (dimensions >> 16) & 0x7FF);
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
@@ -2160,21 +2304,33 @@ fn drawn_texture<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> Op
 
 /// the guest memory a texture unit reads, when it is on.
 #[cfg(feature = "vulkan")]
-fn texture_range<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> Option<(u32, u32)> {
+fn texture_ranges<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> Vec<(u32, u32)> {
     if registers[REG_TEXTURE_CONFIG] & (1 << unit) == 0 {
-        return None;
+        return Vec::new();
     }
     let base = TEXTURE_UNIT_BASES[unit];
     let dimensions = registers[base + 1];
     let (height, width) = (dimensions & 0x7FF, (dimensions >> 16) & 0x7FF);
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
     let format = crate::texture::TextureFormat::from_raw(registers[format_register]);
+    if unit == 0 && ((registers[base + 2] >> 28) & 7) == 1 {
+        if width == 0 {
+            return Vec::new();
+        }
+        let size = texture_bytes(format, width, width, level_count(registers, base, width, width)) as u32;
+        return (0..6)
+            .filter_map(|face| {
+                let address = cube_face_address(registers, base, face);
+                (address != 0).then(|| (memory.translate(address), size))
+            })
+            .collect();
+    }
     let address = loc_register(registers, base + 4);
     if width == 0 || height == 0 || address == 0 {
-        return None;
+        return Vec::new();
     }
     let size = texture_bytes(format, width, height, level_count(registers, base, width, height));
-    Some((memory.translate(address), size as u32))
+    vec![(memory.translate(address), size as u32)]
 }
 
 /// where and how depth testing reads/writes, or None when disabled.
@@ -3256,7 +3412,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 past[unit] = !hardware.covers(texture);
                 continue;
             }
-            if let Some((addr, len)) = texture_range(registers, memory, unit) {
+            for (addr, len) in texture_ranges(registers, memory, unit) {
                 if let Err(error) = hardware.prepare_read(memory, addr, len) {
                     log::error!("the GPU could not write back a buffer, {error}");
                 }
@@ -3763,6 +3919,27 @@ mod tests {
             let dot = (0..4).map(|i| reference[i] * quaternion[i]).sum::<f32>();
             assert!(dot >= 0.0, "triangle vertex quaternion had opposite sign: {quaternion:?}");
         }
+    }
+
+    #[test]
+    fn placement_reuses_shared_vertices_when_quaternion_signs_match() {
+        let vertex = |x: f32, y: f32| Vertex {
+            clip: [x, y, -0.5, 1.0],
+            color: RED,
+            texcoords: [[0.0; 2]; 3],
+            quaternion: [0.0, 0.0, 0.0, 1.0],
+            view: [0.0; 3],
+            texcoord0_w: 1.0,
+        };
+        let vertices = [
+            vertex(-0.8, -0.8),
+            vertex(0.8, -0.8),
+            vertex(-0.8, 0.8),
+        ];
+        let registers = target_registers();
+        let placement = place(&registers, &vertices, None, viewport(&registers).unwrap());
+        assert_eq!(placement.placed.len(), 3);
+        assert_eq!(placement.indices, [0, 1, 2]);
     }
 
     #[test]
@@ -6921,5 +7098,58 @@ mod tests {
         assert!(own == plain, "the title's own picture");
         assert!(between == halfway, "the picture in between");
         assert!(own != between);
+    }
+}
+
+#[cfg(test)]
+mod cube_texture_tests {
+    use super::*;
+
+    #[test]
+    fn cube_atlas_places_faces_in_the_expected_tiles_and_preserves_mips() {
+        let faces: [Arc<[[u8; 4]]>; 6] = std::array::from_fn(|face| {
+            let mut pixels = Vec::new();
+            for level in 0..2 {
+                let side = 16usize >> level;
+                pixels.extend((0..side * side).map(|_| [face as u8, level as u8, 0, 255]));
+            }
+            Arc::from(pixels)
+        });
+        let key = (
+            [0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000],
+            TextureFormat::Rgba8,
+            16,
+            2,
+        );
+        let mut cache = TextureCache::default();
+        let atlas = cache.cube_atlas(key, faces.clone(), TextureFormat::Rgba8, 16, 2);
+
+        assert_eq!(atlas.len(), 48 * 32 + 24 * 16);
+        let pixel = |x: usize, y: usize| atlas[y * 48 + x][0];
+        assert_eq!(pixel(0, 0), 3);
+        assert_eq!(pixel(16, 0), 4);
+        assert_eq!(pixel(32, 0), 5);
+        assert_eq!(pixel(0, 16), 0);
+        assert_eq!(pixel(16, 16), 1);
+        assert_eq!(pixel(32, 16), 2);
+        assert_eq!(atlas[48 * 32][0], 3);
+        assert_eq!(atlas[48 * 32][1], 1);
+
+        let cached = cache.cube_atlas(key, faces, TextureFormat::Rgba8, 16, 2);
+        assert!(Arc::ptr_eq(&atlas, &cached));
+    }
+
+    #[test]
+    fn cube_face_registers_keep_the_shared_upper_address_bits() {
+        let mut registers = vec![0u32; 0x100];
+        let base = 0x81;
+        registers[base + 4] = 0x0ABC_1234;
+        registers[base + 5] = 0x0000_3456;
+
+        assert_eq!(cube_face_address(&registers, base, 0), 0x0ABC_1234 << 3);
+        assert_eq!(
+            cube_face_address(&registers, base, 1),
+            ((0x0ABC_1234 & !0x003F_FFFF) | 0x0000_3456) << 3
+        );
     }
 }
