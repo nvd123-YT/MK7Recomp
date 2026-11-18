@@ -1108,7 +1108,10 @@ fn get_system_info(system: &mut System) {
         (26, _) => 5,
         // Citra/Azahar extension used by CTGP-7 and other homebrew.
         // 2 identifies the Azahar-compatible runtime; upstream Citra reports 1.
-        (0x0002_0000, 0) => 2,
+        (0x0002_0000, 0) => {
+            log::info!("svcGetSystemInfo: reporting Azahar-compatible identifier 2 for CTGP-7");
+            2
+        }
         (0x0002_0000, 1) => host_tick(),
         (0x0002_0000, 2) => u64::from(system.emulation_speed),
         _ => {
@@ -1154,7 +1157,7 @@ fn kernel_set_state(system: &mut System) {
             let requested = value as u16;
             // Citra/Azahar use 0xFFFF as a reset-to-normal sentinel.
             system.emulation_speed = if requested == u16::MAX { 100 } else { requested };
-            log::debug!(
+            log::info!(
                 "svcKernelSetState: emulation speed is now {}%",
                 system.emulation_speed
             );
