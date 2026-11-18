@@ -35,7 +35,7 @@ fn invalid_handle(system: &mut System, handle: u32, what: &str) -> u32 {
 /// reach services, which load code, or that nothing implements stop the
 /// code, and the step runs them.
 pub fn in_place(number: u32) -> bool {
-    matches!(number, 0x02 | 0x0A..=0x0C | 0x11 | 0x13..=0x1D | 0x21..=0x25 | 0x27 | 0x28 | 0x2A | 0x2B | 0x35 | 0x37..=0x3A | 0x3D | 0x54..=0x56 | 0x94 | 0xB3)
+    matches!(number, 0x02 | 0x0A..=0x0C | 0x11 | 0x13..=0x1D | 0x21..=0x25 | 0x27 | 0x28 | 0x2A | 0x2B | 0x35 | 0x37..=0x3A | 0x3D | 0x54..=0x56 | 0x7C | 0x94 | 0xB3)
 }
 
 /// runs one supervisor call.
@@ -97,6 +97,7 @@ pub fn dispatch(system: &mut System, number: u32) {
         0x3A => get_resource_limit_current_values(system),
         0x3C => svc_break(system),
         0x3D => output_debug_string(system),
+        0x7C => kernel_set_state(system),
         // cache maintenance.
         0x54..=0x56 | 0x94 => {
             // Data and instruction caches are coherent in this emulator.
@@ -1122,6 +1123,27 @@ fn get_process_info(system: &mut System) {
     system.cpu.regs[2] = (value >> 32) as u32;
 }
 
+/// Citra/Azahar's extension SVC used by CTGP-7 to set emulation speed.
+/// This runtime does not expose a host frame limiter yet, but acknowledges
+/// the request so the plugin can complete its initialization sequence.
+fn kernel_set_state(system: &mut System) {
+    const KERNEL_STATE_REBOOT: u32 = 7;
+    const KERNEL_STATE_CITRA_EMULATION_SPEED: u32 = 0x0002_0000;
+
+    let state = system.cpu.regs[0];
+    let value = system.cpu.regs[1];
+    match state {
+        KERNEL_STATE_CITRA_EMULATION_SPEED => {
+            log::debug!("svcKernelSetState: CTGP requested emulation speed {value}%");
+        }
+        KERNEL_STATE_REBOOT => {
+            log::warn!("svcKernelSetState requested a reboot; reboot is not implemented");
+        }
+        _ => log::debug!("svcKernelSetState({state}, {value}, {})", system.cpu.regs[2]),
+    }
+    system.cpu.regs[0] = 0;
+}
+
 fn get_process_id(system: &mut System) {
     let handle = system.cpu.regs[1];
     let _ = handle;
@@ -1302,6 +1324,15 @@ mod tests {
         assert_eq!(system.cpu.regs[0], 0);
         assert_eq!(system.cpu.regs[1], 2, "CTGP-7 expects the Azahar compatibility identifier");
         assert_eq!(system.cpu.regs[2], 0);
+    }
+
+    #[test]
+    fn kernel_set_state_accepts_ctgp_emulation_speed_reset() {
+        let mut system = System::new(crate::Config::default());
+        system.cpu.regs[..3].copy_from_slice(&[0x0002_0000, 65_535, 0]);
+        dispatch(&mut system, 0x7C);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert!(!system.unimplemented_svcs.contains(&0x7C));
     }
 
     #[test]
