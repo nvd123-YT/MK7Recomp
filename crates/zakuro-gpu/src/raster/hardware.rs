@@ -3001,7 +3001,7 @@ impl Hardware {
     /// the texture's image, uploaded the first time it is drawn with, all
     /// its sizes, or a texture pack's picture in its place once it has been
     /// read, with the smallest of the picture's sizes to draw with.
-    fn texture(&mut self, bound: &BoundTexture) -> Result<(vk::ImageView, Option<vk::ImageView>, Option<u32>), String> {
+    fn texture(&mut self, bound: &BoundTexture, needs_cube_atlas: bool) -> Result<(vk::ImageView, Option<vk::ImageView>, Option<u32>), String> {
         let size = (bound.width, bound.height);
         if let Some((view, smallest)) = bound.replacement.as_ref().and_then(|material| self.replacement(material, size)) {
             return Ok((view, None, Some(smallest)));
@@ -3086,8 +3086,14 @@ impl Hardware {
             None
         };
 
-        // Upload/cache the ordinary 2D view as well. For cubemaps this is the
-        // mip-preserving 3x2 atlas; it is required by ShadowCube's texelFetch.
+        // Ordinary TextureCube only samples the native cube view. Avoid
+        // uploading its atlas; ShadowCube alone needs the 2D atlas for texelFetch.
+        if cube_view.is_some() && !needs_cube_atlas {
+            return Ok((self.blank.view, cube_view, None));
+        }
+
+        // Upload/cache the ordinary 2D view. For ShadowCube this is the
+        // mip-preserving 3x2 atlas used by the PICA depth-comparison shader.
         let key = Arc::as_ptr(&bound.texels) as *const u8 as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.batch;
@@ -4181,7 +4187,9 @@ impl Hardware {
                             Filtering::of(bound)
                         }
                         None => {
-                            let (view, native_cube_view, picture) = self.texture(bound)?;
+                            let needs_cube_atlas = unit == 0
+                                && ((draw.registers[TEXTURE_UNIT_BASES[0] + 2] >> 28) & 7) == 4;
+                            let (view, native_cube_view, picture) = self.texture(bound, needs_cube_atlas)?;
                             (views[unit], twin_views[unit]) = (view, view);
                             if let Some(native_cube_view) = native_cube_view {
                                 cube_view = native_cube_view;
