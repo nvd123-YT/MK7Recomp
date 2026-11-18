@@ -149,6 +149,53 @@ vec4 sample_cube(vec3 direction) {
     return texture(texture0_cube, direction);
 }
 
+// PICA Shadow2D stores a packed 24-bit depth and 8-bit stencil value.
+// Texture decoding reverses RGBA8 bytes for color use; put them back in their
+// original little-endian order before extracting the packed depth and stencil.
+uint shadow_pixel(ivec2 coordinate) {
+    vec4 rgba = texelFetch(texture0, coordinate, 0);
+    uvec4 bytes = uvec4(round(rgba * 255.0));
+    return bytes.a | (bytes.b << 8u) | (bytes.g << 16u) | (bytes.r << 24u);
+}
+
+float compare_shadow(uint packed, uint reference_depth) {
+    uint depth = packed >> 8u;
+    uint stencil = packed & 0xFFu;
+    return depth <= reference_depth ? 0.0 : float(stencil) / 255.0;
+}
+
+float sample_shadow_2d(ivec2 coordinate, uint reference_depth) {
+    ivec2 size = textureSize(texture0, 0);
+    if (any(lessThan(coordinate, ivec2(0))) ||
+        any(greaterThanEqual(coordinate, size))) {
+        return 1.0;
+    }
+    return compare_shadow(shadow_pixel(coordinate), reference_depth);
+}
+
+vec4 shadow_texture_2d(vec2 uv, float w) {
+    uint shadow_register = units[0].w;
+    if ((shadow_register & 1u) == 0u) {
+        uv /= w;
+    }
+    uint shadow_bias = shadow_register & 0x00FFFFFEu;
+    float depth_float = min(abs(w), 1.0) * 16777215.0;
+    uint reference_depth = uint(max(0, int(depth_float) - int(shadow_bias)));
+
+    vec2 coordinate = vec2(textureSize(texture0, 0)) * uv - vec2(0.5);
+    vec2 coordinate_floor = floor(coordinate);
+    vec2 fraction = coordinate - coordinate_floor;
+    ivec2 base = ivec2(coordinate_floor);
+    vec4 samples = vec4(
+        sample_shadow_2d(base, reference_depth),
+        sample_shadow_2d(base + ivec2(1, 0), reference_depth),
+        sample_shadow_2d(base + ivec2(0, 1), reference_depth),
+        sample_shadow_2d(base + ivec2(1, 1), reference_depth));
+    vec2 vertical = mix(samples.xy, samples.zw, fraction.yy);
+    float result = mix(vertical.x, vertical.y, fraction.x);
+    return vec4(result);
+}
+
 // a texture unit's sample, with v = 0 at the bottom row as the PICA has it
 // and the border color outside the texture where the unit clamps to it
 vec4 sample_unit(uint unit, vec2 uv) {
@@ -660,6 +707,8 @@ void main() {
         bool projected = texture0_type == 3u;
         if (texture0_type == 1u) {
             textures[0] = sample_cube(vec3(in_texcoords01.xy, in_view.w));
+        } else if (texture0_type == 2u) {
+            textures[0] = shadow_texture_2d(in_texcoords01.xy, in_view.w);
         } else {
             textures[0] = sample_unit(0u, projected ? in_texcoords01.xy / in_view.w : in_texcoords01.xy);
         }

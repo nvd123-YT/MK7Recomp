@@ -68,6 +68,14 @@ pub enum LoadError {
     MapFailed,
 }
 
+/// a stable diagnostic fingerprint for comparing the title's code image
+/// with the bytes visible at its guest virtual addresses.
+fn code_fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xCBF2_9CE4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01B3)
+    })
+}
+
 /// Conventional Luma path plus the project's shorter data-directory layout.
 fn plugin_roots(sdmc_root: &Path, data_dir: &Path) -> [PathBuf; 4] {
     [
@@ -187,6 +195,43 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
             return Err(LoadError::HomebrewExecutable);
         }
     }
+
+    // CTGP validates the actual executable image before installing its patches.
+    // Record the revision and fingerprints to distinguish mapping errors from
+    // an unsupported base/update build without dumping game code bytes.
+    let data_dir = system.config.data_dir.as_deref().filter(|_| system.config.mods_enabled);
+    let (source_code, code_is_modded) = match crate::mods::code(title, data_dir) {
+        Ok(result) => result,
+        Err(error) => {
+            log::warn!("3GX code-check diagnostics could not read the source image: {error}");
+            (Vec::new(), false)
+        }
+    };
+    let mut mapped_code = Vec::new();
+    for segment in [title.exheader.text, title.exheader.rodata, title.exheader.data] {
+        let size = segment.num_pages.saturating_mul(PAGE_SIZE);
+        if size == 0 { continue; }
+        let start = mapped_code.len();
+        mapped_code.resize(start + size as usize, 0);
+        system.memory.read_bytes(segment.address, &mut mapped_code[start..]);
+    }
+    log::info!(
+        "3GX executable-check context: title={:016X} product='{}' ncch_version={} remaster_version={} update_version={:?} modded={} entry=0x{game_entry:08X} source_code_bytes=0x{:X} source_fnv1a64={:016X} mapped_segment_bytes=0x{:X} mapped_fnv1a64={:016X} plugin_checksum={:08X} plugin_args={:08X?} checker_words={}",
+        title.program_id(),
+        title.ncch.product_code,
+        title.ncch.version,
+        title.exheader.remaster_version,
+        title.update().map(|update| update.version),
+        code_is_modded,
+        source_code.len(),
+        code_fingerprint(&source_code),
+        mapped_code.len(),
+        code_fingerprint(&mapped_code),
+        plugin.executable_checksum,
+        plugin.executable_check_args,
+        plugin.executable_check.as_ref().map_or(0, Vec::len)
+    );
+
     let load_func = plugin.executable_check.as_deref().ok_or(LoadError::MissingChecksumFunction)?;
     if load_func.len() > 32 {
         return Err(LoadError::MissingChecksumFunction);

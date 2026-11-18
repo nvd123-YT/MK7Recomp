@@ -4233,8 +4233,15 @@ impl Hardware {
         let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
         words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
         for (unit, base) in TEXTURE_UNIT_BASES.into_iter().enumerate() {
-            // The fragment shader applies the PICA's explicit derivative-based LOD bias.
-            words.extend([r[base + 2], r[base], (lod_biases[unit] as f32 / 256.0).to_bits(), 0]);
+            // The final word carries PICA's shadow config for texture unit 0:
+            // orthographic in bit 0 and the already-shifted bias in bits 1..23.
+            let shadow = if unit == 0 { r[base + 10] } else { 0 };
+            words.extend([
+                r[base + 2],
+                r[base],
+                (lod_biases[unit] as f32 / 256.0).to_bits(),
+                shadow,
+            ]);
         }
         let depth_flags = depth_map.w_buffer as u32 | (shaded.is_some() as u32) << 1;
         // the depth map goes through the viewport where it fits, and what

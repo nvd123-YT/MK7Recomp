@@ -2157,11 +2157,11 @@ fn bind_texture<M: GpuMemory>(
     let base = TEXTURE_UNIT_BASES[unit];
     let parameters = registers[base + 2];
     let texture_type = if unit == 0 { (parameters >> 28) & 7 } else { 0 };
-    if unit == 0 && matches!(texture_type, 2 | 4) {
+    if unit == 0 && texture_type == 4 {
         let bit = 1u32 << texture_type;
         if REPORTED_TEXTURE0_TYPES.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
             log::warn!(
-                "texture0 uses PICA shadow texture type {texture_type}; shadow sampling is not implemented yet (parameters {parameters:#010X})"
+                "texture0 uses PICA ShadowCube; six-face depth comparison is not implemented yet (parameters {parameters:#010X})"
             );
         }
     }
