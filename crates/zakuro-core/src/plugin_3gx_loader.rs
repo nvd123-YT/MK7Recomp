@@ -17,6 +17,9 @@ use crate::System;
 const BOOTLOADER_ADDRESS: u32 = PLUGIN_HEADER_ADDRESS - 0x1000;
 const BOOTLOADER_SIZE: u32 = 0x1000;
 const PLUGIN_HEADER_SIZE: u32 = 0x100;
+// The 3DS-only startup flash writes to a hardware LED register that the
+// desktop runtime does not map. Always skip that cosmetic hardware effect.
+const NO_FLASH_FOR_EMULATOR: u32 = 1;
 const BOOTLOADER: [u8; 412] = [
 0xff, 0x1f, 0x2d, 0xe9, 0x00, 0x00, 0x0f, 0xe1, 0x01, 0x00, 0x2d, 0xe9, 0xf0, 0x00, 0x8f, 0xe2,
  0x04, 0x10, 0x90, 0xe5, 0x00, 0x00, 0x90, 0xe5, 0xd4, 0x20, 0x8f, 0xe2, 0x0f, 0xe0, 0xa0, 0xe1,
@@ -331,7 +334,7 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
         plugin.executable_checksum,
         PLUGIN_HEADER_ADDRESS - 0xC,
         PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
-        system.services.plgldr.no_flash as u32,
+        NO_FLASH_FOR_EMULATOR,
         load_func,
     );
     if !system.memory.write_physical(block.addr + boot_offset, &boot) {
@@ -513,6 +516,29 @@ mod tests {
         assert_eq!(roots[1], Path::new("/data/user/sdmc/plugins"));
         assert_eq!(roots[2], Path::new("/data/luma/plugins"));
         assert_eq!(roots[3], Path::new("/data/plugins"));
+    }
+
+    #[test]
+    fn emulator_bootloader_skips_the_hardware_led_flash() {
+        let mut boot = BOOTLOADER;
+        patch_bootloader(
+            &mut boot,
+            0,
+            0,
+            0,
+            &[0; 4],
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            0,
+            0,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            NO_FLASH_FOR_EMULATOR,
+            &[0xE320_F000],
+        );
+
+        let no_flash_marker = 0x118;
+        let value = u32::from_le_bytes(boot[no_flash_marker..no_flash_marker + 4].try_into().unwrap());
+        assert_eq!(value, NO_FLASH_FOR_EMULATOR);
     }
 
     #[test]
