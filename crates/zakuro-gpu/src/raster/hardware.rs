@@ -3001,90 +3001,97 @@ impl Hardware {
     /// the texture's image, uploaded the first time it is drawn with, all
     /// its sizes, or a texture pack's picture in its place once it has been
     /// read, with the smallest of the picture's sizes to draw with.
-    fn texture(&mut self, bound: &BoundTexture) -> Result<(vk::ImageView, Option<u32>), String> {
+    fn texture(&mut self, bound: &BoundTexture) -> Result<(vk::ImageView, Option<vk::ImageView>, Option<u32>), String> {
         let size = (bound.width, bound.height);
         if let Some((view, smallest)) = bound.replacement.as_ref().and_then(|material| self.replacement(material, size)) {
-            return Ok((view, Some(smallest)));
+            return Ok((view, None, Some(smallest)));
         }
 
-        if let Some(faces) = &bound.cube_faces {
-            // An exact key: each cache value retains the six Arc allocations.
+        // Cubemaps need two Vulkan views: the native six-layer view used for
+        // ordinary TextureCube sampling, and the 3x2 atlas used by ShadowCube's
+        // PICA depth-comparison shader.
+        let cube_view = if let Some(faces) = &bound.cube_faces {
             let key = std::array::from_fn(|face| Arc::as_ptr(&faces[face]) as *const u8 as usize);
             if let Some(texture) = self.cube_textures.get_mut(&key) {
                 texture.used = self.batch;
-                return Ok((texture.image.view, None));
-            }
-            self.mark(Work::Upload, false);
-            self.end_rendering();
-            let side = bound.cube_side.ok_or("cube texture is missing its face size")?;
-            let image = self.image_cube_levels(
-                side,
-                bound.levels,
-                COLOR_FORMAT,
-                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-                vk::ImageAspectFlags::COLOR,
-            )?;
-            let face_pixels = faces[0].len();
-            if faces.iter().any(|face| face.len() != face_pixels) {
-                self.destroy_image(&image);
-                return Err("cube texture faces have different decoded lengths".to_owned());
-            }
-            let face_bytes = face_pixels as u64 * 4;
-            let total_bytes = face_bytes * 6;
-            let offset = self.stage(total_bytes, 16)?;
-            let staging = self.ring(offset, total_bytes);
-            for (face_index, face) in faces.iter().enumerate() {
-                let start = face_index * face_pixels * 4;
-                let output = &mut staging[start..start + face_pixels * 4];
-                for (out, texel) in output.chunks_exact_mut(4).zip(face.iter()) {
-                    out.copy_from_slice(texel);
+                Some(texture.image.view)
+            } else {
+                self.mark(Work::Upload, false);
+                self.end_rendering();
+                let side = bound.cube_side.ok_or("cube texture is missing its face size")?;
+                let image = self.image_cube_levels(
+                    side,
+                    bound.levels,
+                    COLOR_FORMAT,
+                    vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                    vk::ImageAspectFlags::COLOR,
+                )?;
+                let face_pixels = faces[0].len();
+                if faces.iter().any(|face| face.len() != face_pixels) {
+                    self.destroy_image(&image);
+                    return Err("cube texture faces have different decoded lengths".to_owned());
                 }
-            }
-
-            let mut regions = Vec::with_capacity((bound.levels * 6) as usize);
-            let mut mip_offset = 0u64;
-            for level in 0..bound.levels {
-                let mip_side = (side >> level).max(1);
-                let mip_bytes = (mip_side * mip_side) as u64 * 4;
-                for face in 0..6u32 {
-                    regions.push(vk::BufferImageCopy::default()
-                        .buffer_offset(offset + face as u64 * face_bytes + mip_offset)
-                        .image_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(level)
-                                .base_array_layer(face)
-                                .layer_count(1),
-                        )
-                        .image_extent(vk::Extent3D { width: mip_side, height: mip_side, depth: 1 }));
+                let face_bytes = face_pixels as u64 * 4;
+                let total_bytes = face_bytes * 6;
+                let offset = self.stage(total_bytes, 16)?;
+                let staging = self.ring(offset, total_bytes);
+                for (face_index, face) in faces.iter().enumerate() {
+                    let start = face_index * face_pixels * 4;
+                    let output = &mut staging[start..start + face_pixels * 4];
+                    for (out, texel) in output.chunks_exact_mut(4).zip(face.iter()) {
+                        out.copy_from_slice(texel);
+                    }
                 }
-                mip_offset += mip_bytes;
-            }
-            unsafe {
-                self.unfenced = true;
-                self.device.cmd_copy_buffer_to_image(
-                    self.commands,
-                    self.ring.buffer,
-                    image.image,
-                    vk::ImageLayout::GENERAL,
-                    &regions,
-                );
-            }
-            self.uploads = true;
-            let view = image.view;
-            self.cube_textures.insert(key, Texture {
-                image,
-                _texels: bound.texels.clone(),
-                _cube_faces: Some(faces.clone()),
-                used: self.batch,
-            });
-            return Ok((view, None));
-        }
 
+                let mut regions = Vec::with_capacity((bound.levels * 6) as usize);
+                let mut mip_offset = 0u64;
+                for level in 0..bound.levels {
+                    let mip_side = (side >> level).max(1);
+                    let mip_bytes = (mip_side * mip_side) as u64 * 4;
+                    for face in 0..6u32 {
+                        regions.push(vk::BufferImageCopy::default()
+                            .buffer_offset(offset + face as u64 * face_bytes + mip_offset)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(level)
+                                    .base_array_layer(face)
+                                    .layer_count(1),
+                            )
+                            .image_extent(vk::Extent3D { width: mip_side, height: mip_side, depth: 1 }));
+                    }
+                    mip_offset += mip_bytes;
+                }
+                unsafe {
+                    self.unfenced = true;
+                    self.device.cmd_copy_buffer_to_image(
+                        self.commands,
+                        self.ring.buffer,
+                        image.image,
+                        vk::ImageLayout::GENERAL,
+                        &regions,
+                    );
+                }
+                self.uploads = true;
+                let view = image.view;
+                self.cube_textures.insert(key, Texture {
+                    image,
+                    _texels: bound.texels.clone(),
+                    _cube_faces: Some(faces.clone()),
+                    used: self.batch,
+                });
+                Some(view)
+            }
+        } else {
+            None
+        };
+
+        // Upload/cache the ordinary 2D view as well. For cubemaps this is the
+        // mip-preserving 3x2 atlas; it is required by ShadowCube's texelFetch.
         let key = Arc::as_ptr(&bound.texels) as *const u8 as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.batch;
-            return Ok((texture.image.view, None));
+            return Ok((texture.image.view, cube_view, None));
         }
         self.mark(Work::Upload, false);
         self.end_rendering();
@@ -3127,7 +3134,7 @@ impl Hardware {
             _cube_faces: None,
             used: self.batch,
         });
-        Ok((view, None))
+        Ok((view, cube_view, None))
     }
     /// the image of a texture pack's picture for a texture of size, and
     /// the smallest of its sizes to draw with, uploaded once it has been
@@ -4174,11 +4181,10 @@ impl Hardware {
                             Filtering::of(bound)
                         }
                         None => {
-                            let (view, picture) = self.texture(bound)?;
-                            if bound.cube_faces.is_some() {
-                                cube_view = view;
-                            } else {
-                                (views[unit], twin_views[unit]) = (view, view);
+                            let (view, native_cube_view, picture) = self.texture(bound)?;
+                            (views[unit], twin_views[unit]) = (view, view);
+                            if let Some(native_cube_view) = native_cube_view {
+                                cube_view = native_cube_view;
                             }
                             match picture {
                                 Some(smallest) => Filtering::picture(bound, smallest),
