@@ -1341,19 +1341,46 @@ fn map_process_memory_ex(system: &mut System) {
         return;
     };
 
-    let Some(source_mapping) = system.memory.mapping_at(source_address).copied() else {
-        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+    let Some(source_end) = source_address.checked_add(size) else {
+        system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
         return;
     };
-    let source_offset = source_address - source_mapping.base;
-    if source_offset.checked_add(size).is_none_or(|end| end > source_mapping.size) {
-        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
-        return;
+
+    // A process image is not necessarily backed by one physical allocation:
+    // the loader maps .text, .rodata, .data and BSS independently. Luma's
+    // process-patching flow maps their entire contiguous virtual range in one
+    // call, so preserve each source mapping's own physical backing when
+    // constructing the destination alias.
+    let mut source_cursor = source_address;
+    let mut aliases = Vec::new();
+    while source_cursor < source_end {
+        let Some(source_mapping) = system.memory.mapping_at(source_cursor).copied() else {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        };
+        let Some(mapping_end) = source_mapping.base.checked_add(source_mapping.size) else {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        };
+        let fragment_end = source_end.min(mapping_end);
+        if fragment_end <= source_cursor {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        }
+        let source_offset = source_cursor - source_mapping.base;
+        let fragment_size = fragment_end - source_cursor;
+        let Some(source_paddr) = source_mapping.paddr.checked_add(source_offset) else {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        };
+        if source_paddr.checked_add(fragment_size).is_none() {
+            system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
+            return;
+        }
+        let destination = destination_address + (source_cursor - source_address);
+        aliases.push((destination, source_paddr, fragment_size));
+        source_cursor = fragment_end;
     }
-    let Some(source_paddr) = source_mapping.paddr.checked_add(source_offset) else {
-        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
-        return;
-    };
 
     // Citra's VM manager refuses to replace any mapped destination page.
     let mut page = destination_address;
@@ -1370,13 +1397,15 @@ fn map_process_memory_ex(system: &mut System) {
     } else {
         MemoryState::Shared
     };
-    system.memory.map(
-        destination_address,
-        source_paddr,
-        size,
-        Permission::READ | Permission::WRITE | Permission::EXECUTE,
-        state,
-    );
+    for (destination, source_paddr, fragment_size) in aliases {
+        system.memory.map(
+            destination,
+            source_paddr,
+            fragment_size,
+            Permission::READ | Permission::WRITE | Permission::EXECUTE,
+            state,
+        );
+    }
     system.cpu.regs[0] = 0;
 }
 
