@@ -485,12 +485,12 @@ fn map_code(system: &mut System, title: &Title) -> Result<bool, LoadError> {
         }
     }
 
-    // BSS starts right where .data's bytes end, in the rest of its last page,
-    // and must start zeroed. what does not fit there gets pages of its own.
+    // Like the 3DS loader (and Azahar/Citra), BSS starts after the
+    // page-aligned .data segment and gets its own page-rounded allocation.
+    // Do not count unused bytes in the last .data page toward the BSS size.
     let bss_start = exheader.data.address + exheader.data.num_pages * PAGE_SIZE;
-    let bss_end = exheader.data.address + exheader.data.size + exheader.bss_size;
-    if bss_end > bss_start {
-        let bss_size = zakuro_common::bits::align_up(bss_end - bss_start, PAGE_SIZE);
+    let bss_size = zakuro_common::bits::align_up(exheader.bss_size, PAGE_SIZE);
+    if bss_size > 0 {
         let block = system
             .memory
             .phys
@@ -505,9 +505,8 @@ fn map_code(system: &mut System, title: &Title) -> Result<bool, LoadError> {
         );
         system.memory.zero_physical(block.addr, bss_size);
         log::debug!("mapped .bss at 0x{bss_start:08X}, 0x{bss_size:X} bytes");
-        // the image goes on past .data's pages into the BSS, flat, as Luma3DS
-        // and Citra lay it, where mods made with Magikoopa put their code, in
-        // BSS their exheader.bin makes bigger
+        // Code added beyond the page-aligned .data image by a mod lives in
+        // the BSS pages, provided the mod's ExHeader reserves enough space.
         let past_data = ((exheader.text.num_pages + exheader.rodata.num_pages + exheader.data.num_pages) * PAGE_SIZE) as usize;
         if let Some(tail) = code.get(past_data..).filter(|tail| !tail.is_empty()) {
             let fits = tail.len().min(bss_size as usize);
@@ -599,6 +598,32 @@ mod tests {
         let mut stub = [0; 4];
         system.memory.read_bytes(0x0010_0800, &mut stub);
         assert_eq!(stub, [0x22; 4]);
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+        std::fs::remove_file(rom).unwrap();
+    }
+
+    /// BSS receives its own page-rounded allocation after the page-aligned
+    /// .data segment, even when .data's last page is only partly occupied.
+    #[test]
+    fn bss_page_rounding_does_not_borrow_data_padding() {
+        let rom = rom("bss-page-rounding", &vec![0; 0x1800]);
+        let data_dir = std::env::temp_dir().join(format!("zakuro-loader-{}-bss-page-rounding", std::process::id()));
+        let mods = crate::mods::dir(&data_dir, PROGRAM_ID);
+        std::fs::create_dir_all(&mods).unwrap();
+
+        let mut exheader = vec![0; 0x400];
+        put(&mut exheader, 0x10, &[0x0010_0000u32, 1, 8].map(u32::to_le_bytes).concat());
+        put(&mut exheader, 0x20, &[0x0010_1000u32, 0, 0].map(u32::to_le_bytes).concat());
+        put(&mut exheader, 0x30, &[0x0010_1000u32, 1, 0x800].map(u32::to_le_bytes).concat());
+        put(&mut exheader, 0x3C, &0x1800u32.to_le_bytes());
+        std::fs::write(mods.join("exheader.bin"), &exheader).unwrap();
+
+        let system = load(&rom, Config { data_dir: Some(data_dir.clone()), ..Config::default() }).unwrap();
+        let bss = system.memory.mapping_at(0x0010_2000).expect("first BSS page is mapped");
+        assert_eq!(bss.base, 0x0010_2000);
+        assert_eq!(bss.size, 0x2000, "0x1800 bytes of BSS require two pages");
+        assert!(system.memory.mapping_at(0x0010_3000).is_some(), "second BSS page is mapped");
 
         std::fs::remove_dir_all(data_dir).unwrap();
         std::fs::remove_file(rom).unwrap();
