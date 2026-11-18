@@ -178,7 +178,8 @@ vec4 shadow_texture_2d(vec2 uv, float w) {
     if ((shadow_register & 1u) == 0u) {
         uv /= w;
     }
-    uint shadow_bias = shadow_register & 0x00FFFFFEu;
+    // PICA stores orthographic in bit 0 and the 23-bit bias in bits 1..23.
+    uint shadow_bias = (shadow_register >> 1u) & 0x007FFFFFu;
     float depth_float = min(abs(w), 1.0) * 16777215.0;
     uint reference_depth = uint(max(0, int(depth_float) - int(shadow_bias)));
 
@@ -194,6 +195,74 @@ vec4 shadow_texture_2d(vec2 uv, float w) {
     vec2 vertical = mix(samples.xy, samples.zw, fraction.yy);
     float result = mix(vertical.x, vertical.y, fraction.x);
     return vec4(result);
+}
+
+// PICA stores faces in the same atlas layout used by cube_atlas():
+// +X, -X, +Y across the lower row; -Y, +Z, -Z across the upper row.
+ivec2 shadow_cube_tile(int face) {
+    if (face == 0) return ivec2(0, 1);
+    if (face == 1) return ivec2(1, 1);
+    if (face == 2) return ivec2(2, 1);
+    if (face == 3) return ivec2(0, 0);
+    if (face == 4) return ivec2(1, 0);
+    return ivec2(2, 0);
+}
+
+float sample_shadow_cube(int face, ivec2 coordinate, ivec2 size, uint reference_depth) {
+    ivec2 atlas_coordinate = shadow_cube_tile(face) * size + coordinate;
+    return compare_shadow(shadow_pixel(atlas_coordinate), reference_depth);
+}
+
+// Adapted from Azahar's PICA ShadowCube coordinate transform and four-tap
+// depth comparison. The six face images are kept in the existing 3x2 atlas.
+vec4 shadow_texture_cube(vec2 uv, float w) {
+    ivec2 size = textureSize(texture0, 0) / ivec2(3, 2);
+    if (any(lessThanEqual(size, ivec2(0)))) {
+        return vec4(1.0);
+    }
+
+    vec3 direction = vec3(uv, w);
+    vec3 magnitude = abs(direction);
+    int face;
+
+    if (magnitude.x > magnitude.y && magnitude.x > magnitude.z) {
+        w = magnitude.x;
+        uv = -direction.zy;
+        if (direction.x < 0.0) uv.x = -uv.x;
+        face = direction.x > 0.0 ? 0 : 1;
+    } else if (magnitude.y > magnitude.z) {
+        w = magnitude.y;
+        uv = direction.xz;
+        if (direction.y < 0.0) uv.y = -uv.y;
+        face = direction.y > 0.0 ? 2 : 3;
+    } else {
+        w = magnitude.z;
+        uv = -direction.xy;
+        if (direction.z > 0.0) uv.x = -uv.x;
+        face = direction.z > 0.0 ? 4 : 5;
+    }
+
+    uint shadow_register = units[0].w;
+    uint shadow_bias = (shadow_register >> 1u) & 0x007FFFFFu;
+    uint reference_depth = uint(max(0, int(min(w, 1.0) * 16777215.0) - int(shadow_bias)));
+
+    vec2 coordinate = vec2(size) * (uv / w * 0.5 + 0.5) - vec2(0.5);
+    vec2 coordinate_floor = floor(coordinate);
+    vec2 fraction = coordinate - coordinate_floor;
+    ivec2 base = ivec2(coordinate_floor);
+    ivec2 maximum = size - ivec2(1);
+
+    ivec2 i00 = clamp(base, ivec2(0), maximum);
+    ivec2 i10 = clamp(base + ivec2(1, 0), ivec2(0), maximum);
+    ivec2 i01 = clamp(base + ivec2(0, 1), ivec2(0), maximum);
+    ivec2 i11 = clamp(base + ivec2(1, 1), ivec2(0), maximum);
+    vec4 samples = vec4(
+        sample_shadow_cube(face, i00, size, reference_depth),
+        sample_shadow_cube(face, i10, size, reference_depth),
+        sample_shadow_cube(face, i01, size, reference_depth),
+        sample_shadow_cube(face, i11, size, reference_depth));
+    vec2 vertical = mix(samples.xy, samples.zw, fraction.yy);
+    return vec4(mix(vertical.x, vertical.y, fraction.x));
 }
 
 // a texture unit's sample, with v = 0 at the bottom row as the PICA has it
@@ -709,6 +778,8 @@ void main() {
             textures[0] = sample_cube(vec3(in_texcoords01.xy, in_view.w));
         } else if (texture0_type == 2u) {
             textures[0] = shadow_texture_2d(in_texcoords01.xy, in_view.w);
+        } else if (texture0_type == 4u) {
+            textures[0] = shadow_texture_cube(in_texcoords01.xy, in_view.w);
         } else {
             textures[0] = sample_unit(0u, projected ? in_texcoords01.xy / in_view.w : in_texcoords01.xy);
         }
