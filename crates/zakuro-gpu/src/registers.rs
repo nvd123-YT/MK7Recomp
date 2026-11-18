@@ -6,11 +6,6 @@
 pub const LCD_TOP_BASE: usize = 0x0400;
 pub const LCD_BOTTOM_BASE: usize = 0x0500;
 
-/// LCD color-fill registers, in the GPU's external register window.
-/// Bit 24 enables the fill; bits 0-23 are RGB.
-pub const LCD_COLOR_FILL_TOP: usize = 0x2A04;
-pub const LCD_COLOR_FILL_BOTTOM: usize = 0x3204;
-
 /// offsets within one LCD controller's block.
 pub const LCD_FB_A_LEFT: usize = 0x68;
 pub const LCD_FB_A_RIGHT: usize = 0x6C;
