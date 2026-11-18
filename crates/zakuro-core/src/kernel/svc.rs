@@ -1381,6 +1381,7 @@ mod tests {
         system.cpu.regs[2] = 1; // HOST_TICK
         dispatch(&mut system, 0x2A);
         let first = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+        system.cpu.regs[2] = 1; // restore HOST_TICK after the previous result
         dispatch(&mut system, 0x2A);
         let second = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
         assert!(second >= first);
