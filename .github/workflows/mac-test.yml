@@ -4,6 +4,8 @@ name: Mario Kart 7 Recompiled macOS Test Build
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   workflow_run:
     workflows: ["Build Vulkan Fragment Shaders"]
@@ -25,7 +27,7 @@ jobs:
 
       - name: Package and smoke-test macOS app
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
         run: |
           version="$VERSION"
           if [ "$version" = "main" ]; then
