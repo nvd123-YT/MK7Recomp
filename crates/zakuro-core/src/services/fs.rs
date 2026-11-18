@@ -1411,6 +1411,20 @@ mod executable_code_tests {
         assert_eq!(exefs_code, update_code);
         assert_ne!(exefs_code, base_code);
 
+        let selected_update_code = ncch_kind_file(
+            &title,
+            update_title,
+            SELF_NCCH_CODE,
+            true,
+            NcchCodeSource::SelectedNcch,
+            None,
+        )
+        .unwrap();
+        let FileBacking::Memory(selected_update_code) = selected_update_code.backing else {
+            panic!("the selected update NCCH code must be exposed as in-memory bytes");
+        };
+        assert_eq!(selected_update_code, update_code);
+
         let code = ncch_kind_file(
             &title,
             update_title,
@@ -1440,6 +1454,20 @@ mod executable_code_tests {
             panic!("the base ExeFS code must be exposed as in-memory bytes");
         };
         assert_eq!(base_exefs_code, base_code);
+
+        let base_code_file = ncch_kind_file(
+            &title,
+            &title,
+            SELF_NCCH_CODE,
+            false,
+            NcchCodeSource::SelectedNcch,
+            None,
+        )
+        .unwrap();
+        let FileBacking::Memory(base_code_image) = base_code_file.backing else {
+            panic!("the base NCCH code must be exposed as in-memory bytes");
+        };
+        assert_eq!(base_code_image, base_code);
 
         std::fs::remove_file(game_path).unwrap();
         std::fs::remove_file(update_path).unwrap();
