@@ -460,6 +460,20 @@ struct Vertex {
     texcoord0_w: f32,
 }
 
+fn align_quaternion(reference: &Vec4, candidate: &mut Vec4) {
+    let dot = (0..4).map(|i| reference[i] * candidate[i]).sum::<f32>();
+    if dot < 0.0 {
+        candidate.iter_mut().for_each(|component| *component = -*component);
+    }
+}
+
+fn align_triangle_quaternions(triangle: &mut [Vertex; 3]) {
+    let reference = triangle[0].quaternion;
+    for vertex in &mut triangle[1..] {
+        align_quaternion(&reference, &mut vertex.quaternion);
+    }
+}
+
 impl Vertex {
     /// the vertex a fraction t of the way from self to other, which is
     /// how clipping makes new vertices where an edge crosses a plane.
@@ -1072,17 +1086,21 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
     let mut clipped_away = 0u32;
     let mut culled = 0u32;
     const OUTSIDE: u32 = u32::MAX;
-    let mut placed: Vec<Screen> = Vec::with_capacity(shaded.len());
+    // Keep source vertices separately from the emitted vertices. Vulkan
+    // needs triangle-local copies because shared vertices can require
+    // opposite quaternion signs in adjacent primitives.
+    let mut source: Vec<Screen> = Vec::with_capacity(shaded.len());
     let slots: Vec<u32> = shaded
         .iter()
         .map(|vertex| match inside(vertex).then(|| to_window(vertex)).flatten() {
             Some(screen) => {
-                placed.push(screen);
-                placed.len() as u32 - 1
+                source.push(screen);
+                source.len() as u32 - 1
             }
             None => OUTSIDE,
         })
         .collect();
+    let mut placed: Vec<Screen> = Vec::with_capacity(shaded.len());
     let mut indices: Vec<u32> = Vec::with_capacity(triangles * 3);
     let culls = |p: &Screen, q: &Screen, r: &Screen| {
         let counter_clockwise = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) > 0.0;
@@ -1092,10 +1110,16 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
         let (a, b, c) = (at(ia), at(ib), at(ic));
         let [sa, sb, sc] = [slots[a], slots[b], slots[c]];
         if sa != OUTSIDE && sb != OUTSIDE && sc != OUTSIDE {
-            if culls(&placed[sa as usize], &placed[sb as usize], &placed[sc as usize]) {
+            let mut triangle = [source[sa as usize], source[sb as usize], source[sc as usize]];
+            let reference = triangle[0].quaternion_over_w;
+            align_quaternion(&reference, &mut triangle[1].quaternion_over_w);
+            align_quaternion(&reference, &mut triangle[2].quaternion_over_w);
+            if culls(&triangle[0], &triangle[1], &triangle[2]) {
                 culled += 1;
             } else {
-                indices.extend([sa, sb, sc]);
+                let first = placed.len() as u32;
+                placed.extend_from_slice(&triangle);
+                indices.extend([first, first + 1, first + 2]);
             }
             continue;
         }
@@ -1117,6 +1141,7 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
     }
     Placement { placed, indices, triangles, clipped_away, culled }
 }
+
 
 /// whether texture unit 0 is projected, a texture of type 3 in bits 28-30
 /// of its GPUREG_TEXUNIT0_PARAM: its u and v are divided by coordinate set
@@ -1391,8 +1416,12 @@ fn held_in_range(mut vertex: Vertex) -> Vertex {
 }
 
 /// clips a triangle to the volume the PICA draws.
-fn clip_triangle(triangle: [Vertex; 3]) -> Vec<Vertex> {
-    let triangle = triangle.map(held_in_range);
+fn clip_triangle(mut triangle: [Vertex; 3]) -> Vec<Vertex> {
+    triangle = triangle.map(held_in_range);
+    // A quaternion and its negation describe the same orientation. Put
+    // every vertex on the first vertex's hemisphere before clipping, or
+    // edge interpolation can collapse opposite representations to zero.
+    align_triangle_quaternions(&mut triangle);
     let planes = CLIP_PLANES;
     if triangle.iter().all(inside) {
         return triangle.to_vec();
@@ -3271,7 +3300,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             Vertices::Raw { vertex_shader, raw, order } => Some((vertex_shader, hardware::Inputs::Raw(raw), None, Some(order))),
             Vertices::Shaded(_) | Vertices::Prepared(_) => None,
         };
-        if let Some((unit, inputs, order, raw)) = unshaded.filter(|_| hardware.shades() && whole && registers[REG_GEOSTAGE_CONFIG] & 0x3 != 2) {
+        if let Some((unit, inputs, order, raw)) = unshaded.filter(|_| hardware.shades() && state.lighting.is_none() && whole && registers[REG_GEOSTAGE_CONFIG] & 0x3 != 2) {
             // GPUREG_PRIMITIVE_CONFIG bits [9:8], 0 = triangle list, 1 =
             // strip, 2 = fan, 3 = whatever the geometry shader emitted,
             // which is a list.
@@ -3689,6 +3718,54 @@ mod tests {
     const RED: Vec4 = [1.0, 0.0, 0.0, 1.0];
     const GREEN: Vec4 = [0.0, 1.0, 0.0, 1.0];
     const BLUE: Vec4 = [0.0, 0.0, 1.0, 1.0];
+
+    #[test]
+    fn placement_aligns_quaternion_signs_per_triangle() {
+        let vertex = |x: f32, y: f32, quaternion: Vec4| Vertex {
+            clip: [x, y, -0.5, 1.0],
+            color: RED,
+            texcoords: [[0.0; 2]; 3],
+            quaternion,
+            view: [0.0; 3],
+            texcoord0_w: 1.0,
+        };
+        let vertices = [
+            vertex(-0.8, -0.8, [0.0, 0.0, 0.0, 1.0]),
+            vertex(0.8, -0.8, [0.0, 0.0, 0.0, -1.0]),
+            vertex(-0.8, 0.8, [0.0, 0.0, 0.0, 1.0]),
+        ];
+        let registers = target_registers();
+        let placement = place(&registers, &vertices, None, viewport(&registers).unwrap());
+        assert_eq!(placement.indices.len(), 3);
+        let [a, b, c] = placement.indices.as_slice() else {
+            unreachable!();
+        };
+        let reference = placement.placed[*a as usize].quaternion_over_w;
+        for index in [b, c] {
+            let quaternion = placement.placed[*index as usize].quaternion_over_w;
+            let dot = (0..4).map(|i| reference[i] * quaternion[i]).sum::<f32>();
+            assert!(dot >= 0.0, "triangle vertex quaternion had opposite sign: {quaternion:?}");
+        }
+    }
+
+    #[test]
+    fn clipping_aligns_quaternion_signs_before_interpolation() {
+        let vertex = |z: f32, quaternion: Vec4| Vertex {
+            clip: [0.0, 0.0, z, 1.0],
+            color: RED,
+            texcoords: [[0.0; 2]; 3],
+            quaternion,
+            view: [0.0; 3],
+            texcoord0_w: 1.0,
+        };
+        let polygon = clip_triangle([
+            vertex(-0.5, [0.0, 0.0, 0.0, 1.0]),
+            vertex(0.5, [0.0, 0.0, 0.0, -1.0]),
+            vertex(-0.5, [0.0, 0.0, 0.0, 1.0]),
+        ]);
+        assert!(polygon.len() >= 3);
+        assert!(polygon.iter().all(|vertex| vertex.quaternion[3] > 0.99));
+    }
 
     /// titles map depth with a scale of -1, so near is 1, and keep the
     /// nearer surface with a GREATER test against a buffer cleared to 0.
