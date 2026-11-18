@@ -1390,6 +1390,7 @@ mod tests {
         let second = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
         assert!(second >= first);
 
+        system.cpu.regs[1] = 0x0002_0000; // restore CITRA_INFORMATION after HOST_TICK
         system.cpu.regs[2] = 2; // EMULATION_SPEED
         dispatch(&mut system, 0x2A);
         assert_eq!(system.cpu.regs[1], 100);
