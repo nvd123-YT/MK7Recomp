@@ -1382,11 +1382,6 @@ impl System {
             zakuro_common::Screen::Bottom => 1,
         };
         let config = self.gpu.framebuffers[index];
-        // An enabled LCD color fill replaces scanout entirely. Do not expose
-        // a stale framebuffer or a GPU-direct image while it is active.
-        if self.gpu.lcd_color_fill(index).is_some() {
-            return None;
-        }
         let address = if right { config.address_right() } else { config.address_left() };
         let format = config.color_format();
         let bpp = format.bytes_per_pixel() as u32;
@@ -1425,15 +1420,6 @@ impl System {
         let width = screen.width();
         let height = screen.height();
         let mut out = vec![0u8; (width * height * 4) as usize];
-
-        // Match Azahar's LCD color-fill behavior: the panel scans a constant
-        // RGB value instead of the configured framebuffer while enabled.
-        if let Some([red, green, blue]) = self.gpu.lcd_color_fill(index) {
-            for pixel in out.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&[red, green, blue, 255]);
-            }
-            return out;
-        }
 
         let address = if right { config.address_right() } else { config.address_left() };
         if self.lcd_force_black || address == 0 {
