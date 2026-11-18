@@ -93,28 +93,47 @@ struct NcchFilePath {
 }
 
 impl NcchFilePath {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != NCCH_FILE_PATH_SIZE as usize {
+            return None;
+        }
+        let word = |offset: usize| {
+            Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?))
+        };
+        Some(Self {
+            open_type: word(0)?,
+            content_index: word(4)?,
+            kind: word(8)?,
+            filename: parse_exefs_filename(bytes.get(12..20)?)?,
+        })
+    }
+
     fn decode(system: &mut System, path_size: u32, path_ptr: u32) -> Option<Self> {
         use zakuro_cpu::Bus;
         if path_size != NCCH_FILE_PATH_SIZE {
             return None;
         }
-        Some(Self {
-            open_type: system.memory.read32(path_ptr),
-            content_index: system.memory.read32(path_ptr + 4),
-            kind: system.memory.read32(path_ptr + 8),
-            filename: read_exefs_filename(system, path_ptr + 12)?,
-        })
+        let mut bytes = [0u8; NCCH_FILE_PATH_SIZE as usize];
+        system.memory.read_bytes(path_ptr, &mut bytes);
+        Self::parse(&bytes)
     }
+}
+
+fn parse_exefs_filename(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 8 {
+        return None;
+    }
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let filename = std::str::from_utf8(&bytes[..end]).ok()?;
+    // RomFS path types leave this field zeroed; preserve the empty name.
+    Some(filename.to_owned())
 }
 
 fn read_exefs_filename(system: &mut System, address: u32) -> Option<String> {
     use zakuro_cpu::Bus;
     let mut bytes = [0u8; 8];
     system.memory.read_bytes(address, &mut bytes);
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    let filename = std::str::from_utf8(&bytes[..end]).ok()?;
-    // RomFS path types leave this field zeroed; preserve the empty name.
-    Some(filename.to_owned())
+    parse_exefs_filename(&bytes)
 }
 
 /// path encodings.
@@ -1437,6 +1456,25 @@ pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
 #[cfg(test)]
 mod executable_code_tests {
     use super::*;
+
+    #[test]
+    fn ncch_file_path_decodes_all_twenty_bytes() {
+        let mut bytes = [0u8; NCCH_FILE_PATH_SIZE as usize];
+        bytes[0..4].copy_from_slice(&0u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&SELF_NCCH_EXEFS.to_le_bytes());
+        bytes[12..17].copy_from_slice(b".code");
+
+        let path = NcchFilePath::parse(&bytes).unwrap();
+        assert_eq!(path.open_type, 0);
+        assert_eq!(path.content_index, 3);
+        assert_eq!(path.kind, SELF_NCCH_EXEFS);
+        assert_eq!(path.filename, ".code");
+        assert!(NcchFilePath::parse(&bytes[..19]).is_none());
+
+        // The filename field is unused for RomFS and must allow all zeroes.
+        assert_eq!(parse_exefs_filename(&[0; 8]).as_deref(), Some(""));
+    }
 
     #[test]
     fn selfncch_rejects_code_and_exposes_only_named_metadata_sections() {
