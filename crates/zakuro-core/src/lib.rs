@@ -548,6 +548,12 @@ impl System {
     /// has to look at, when the library has code there. what it returns
     /// stands in for what one interpreted step would.
     fn run_recompiled(&mut self, deadline: Option<u64>) -> Option<Option<Exit>> {
+        // A 3GX plugin can patch executable bytes in guest memory at any time.
+        // Native recompiled blocks do not reread those bytes, so interpreting
+        // all game code is required while a plugin is active.
+        if self.services.plgldr.plugin_loaded {
+            return None;
+        }
         let library = self.recompiled.as_ref()?;
         if !library.has_code(self.cpu.regs[15] | self.cpu.cpsr.thumb as u32) {
             return None;
