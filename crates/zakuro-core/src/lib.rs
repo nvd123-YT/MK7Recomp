@@ -171,6 +171,9 @@ pub struct System {
     /// the title's cheats, from its file in the data folder.
     pub cheats: Vec<cheats::Cheat>,
     pub config: Config,
+    /// emulation speed reported through Citra's GetSystemInfo extension.
+    /// The native renderer currently paces at the console's fixed rate.
+    pub emulation_speed: u16,
 
     pub exited: bool,
     pub broke: bool,
@@ -282,6 +285,7 @@ impl System {
             dlc: Vec::new(),
             cheats: Vec::new(),
             config,
+            emulation_speed: 100,
             exited: false,
             broke: false,
             debug_output: String::new(),
