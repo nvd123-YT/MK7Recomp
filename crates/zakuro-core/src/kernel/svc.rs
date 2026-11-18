@@ -21,6 +21,10 @@ const MEMOP_PROTECT: u32 = 6;
 const MEMOP_OP_MASK: u32 = 0xFF;
 const MEMOP_LINEAR_FLAG: u32 = 0x1_0000;
 
+/// Luma's extended process-memory mapping SVC, including its v2 call marker.
+const MAP_PROCESS_MEMORY_EX_V2_MAGIC: u32 = 0xFFFF_FFF2;
+const MAP_PROCESS_MEMORY_EX_PRIVATE: u32 = 1;
+
 /// reports a handle a syscall could not resolve.
 fn invalid_handle(system: &mut System, handle: u32, what: &str) -> u32 {
     log::warn!(
@@ -90,6 +94,7 @@ pub fn dispatch(system: &mut System, number: u32) {
         0x2B => get_process_info(system),
         0x2D => connect_to_port(system),
         0x32 => send_sync_request(system),
+        0x33 => open_process(system),
         0x35 => get_process_id(system),
         0x37 => get_thread_id(system),
         0x38 => get_resource_limit(system),
@@ -103,6 +108,8 @@ pub fn dispatch(system: &mut System, number: u32) {
             // Data and instruction caches are coherent in this emulator.
             system.cpu.regs[0] = 0;
         }
+        0xA0 => map_process_memory_ex(system),
+        0xA1 => unmap_process_memory_ex(system),
         0xB3 => control_process(system),
         _ => {
             log::warn!(
@@ -1124,19 +1131,65 @@ fn get_system_info(system: &mut System) {
     system.cpu.regs[2] = (value >> 32) as u32;
 }
 
+/// whether handle names this runtime's single guest process.
+fn is_process_handle(system: &mut System, handle: u32) -> bool {
+    let Some(object) = system.kernel.resolve(handle) else {
+        return false;
+    };
+    matches!(system.kernel.objects.get(object), Some(KObject::Process))
+}
+
 /// svcGetProcessInfo, r1 = process handle, r2 = type.
+///
+/// In addition to the standard process fields, Luma exposes the executable
+/// segment layout to plugins. CTGP-7 uses these values to locate and checksum
+/// the live game .code image before it applies its patches.
 fn get_process_info(system: &mut System) {
+    let handle = system.cpu.regs[1];
     let kind = system.cpu.regs[2];
+    if !is_process_handle(system, handle) {
+        system.cpu.regs[0] = invalid_handle(system, handle, "svcGetProcessInfo");
+        return;
+    }
+
     let value: u64 = match kind {
         // total memory the process has committed.
         2 => system
             .memory
             .phys
-            .region_used(system.kernel.memory_region) as u64,
+            .region_used(crate::memory::MemoryRegion::Application) as u64
+                + system.memory.phys.region_used(crate::memory::MemoryRegion::System) as u64
+                + system.memory.phys.region_used(crate::memory::MemoryRegion::Base) as u64,
         // what turns a linear heap address into a physical one, titles
         // work out the addresses the GPU jumps to with it
         20 => 0x2000_0000u32.wrapping_sub(system.kernel.linear_base) as u64,
-        _ => 0,
+        // Luma GetProcessInfo extensions used by 3GX plugins.
+        0x1_0000 => {
+            let mut name = [0u8; 8];
+            if let Some(title) = &system.title {
+                let source = title.exheader.title.as_bytes();
+                let count = source.len().min(name.len());
+                name[..count].copy_from_slice(&source[..count]);
+            }
+            u64::from_le_bytes(name)
+        }
+        0x1_0001 => system.kernel.program_id,
+        0x1_0002 => system.title.as_ref().map_or(0, |title| {
+            u64::from(title.exheader.text.num_pages.saturating_mul(PAGE_SIZE))
+        }),
+        0x1_0003 => system.title.as_ref().map_or(0, |title| {
+            u64::from(title.exheader.rodata.num_pages.saturating_mul(PAGE_SIZE))
+        }),
+        0x1_0004 => system.title.as_ref().map_or(0, |title| {
+            u64::from(title.exheader.data.num_pages.saturating_mul(PAGE_SIZE))
+        }),
+        0x1_0005 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.text.address)),
+        0x1_0006 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.rodata.address)),
+        0x1_0007 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.data.address)),
+        _ => {
+            log::debug!("svcGetProcessInfo(handle=0x{handle:08X}, type={kind}) is not implemented");
+            0
+        }
     };
     system.cpu.regs[0] = 0;
     system.cpu.regs[1] = value as u32;
@@ -1172,9 +1225,151 @@ fn kernel_set_state(system: &mut System) {
 
 fn get_process_id(system: &mut System) {
     let handle = system.cpu.regs[1];
-    let _ = handle;
+    if !is_process_handle(system, handle) {
+        system.cpu.regs[0] = invalid_handle(system, handle, "svcGetProcessId");
+        return;
+    }
     system.cpu.regs[0] = 0;
     system.cpu.regs[1] = system.kernel.process_id;
+}
+
+/// svcOpenProcess, r1 = process ID. The runtime currently owns one guest
+/// process, so only that process ID can be opened.
+fn open_process(system: &mut System) {
+    let process_id = system.cpu.regs[1];
+    if process_id != system.kernel.process_id {
+        log::warn!("svcOpenProcess: process 0x{process_id:08X} does not exist");
+        system.cpu.regs[0] = errors::NOT_FOUND.0;
+        return;
+    }
+    let object = system.kernel.process_object();
+    let handle = system
+        .kernel
+        .handles
+        .create(&mut system.kernel.objects, object, "Process");
+    system.cpu.regs[0] = 0;
+    system.cpu.regs[1] = handle;
+}
+
+/// Luma svcMapProcessMemoryEx. Its custom SVC ABI puts the first four
+/// arguments in r0-r3 and stack arguments in r4-r7. Version 2 is selected by
+/// the magic value in r0; the actual destination handle is then r6.
+fn map_process_memory_ex(system: &mut System) {
+    let mut destination_process = system.cpu.regs[0];
+    let destination_address = system.cpu.regs[1];
+    let source_process = system.cpu.regs[2];
+    let source_address = system.cpu.regs[3];
+    let requested_size = system.cpu.regs[4];
+    let flags = if destination_process == MAP_PROCESS_MEMORY_EX_V2_MAGIC {
+        destination_process = system.cpu.regs[6];
+        system.cpu.regs[5]
+    } else {
+        0
+    };
+
+    if !is_process_handle(system, destination_process) {
+        system.cpu.regs[0] = invalid_handle(system, destination_process, "svcMapProcessMemoryEx destination");
+        return;
+    }
+    if !is_process_handle(system, source_process) {
+        system.cpu.regs[0] = invalid_handle(system, source_process, "svcMapProcessMemoryEx source");
+        return;
+    }
+    if destination_address & PAGE_MASK != 0 || source_address & PAGE_MASK != 0 {
+        system.cpu.regs[0] = errors::MISALIGNED_ADDRESS.0;
+        return;
+    }
+    if requested_size == 0 {
+        system.cpu.regs[0] = errors::MISALIGNED_SIZE.0;
+        return;
+    }
+    let Some(size) = requested_size.checked_add(PAGE_MASK).map(|size| size & !PAGE_MASK) else {
+        system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
+        return;
+    };
+    let Some(destination_end) = destination_address.checked_add(size) else {
+        system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
+        return;
+    };
+
+    let Some(source_mapping) = system.memory.mapping_at(source_address).copied() else {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    };
+    let source_offset = source_address - source_mapping.base;
+    if source_offset.checked_add(size).is_none_or(|end| end > source_mapping.size) {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    }
+    let Some(source_paddr) = source_mapping.paddr.checked_add(source_offset) else {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    };
+
+    // Citra's VM manager refuses to replace any mapped destination page.
+    let mut page = destination_address;
+    while page < destination_end {
+        if system.memory.mapping_at(page).is_some() {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        }
+        page += PAGE_SIZE;
+    }
+
+    let state = if flags & MAP_PROCESS_MEMORY_EX_PRIVATE != 0 {
+        MemoryState::Private
+    } else {
+        MemoryState::Shared
+    };
+    system.memory.map(
+        destination_address,
+        source_paddr,
+        size,
+        Permission::READ | Permission::WRITE | Permission::EXECUTE,
+        state,
+    );
+    system.cpu.regs[0] = 0;
+}
+
+/// Luma svcUnmapProcessMemoryEx, r0 = process, r1 = address, r2 = size.
+fn unmap_process_memory_ex(system: &mut System) {
+    let process = system.cpu.regs[0];
+    let address = system.cpu.regs[1];
+    let requested_size = system.cpu.regs[2];
+
+    if !is_process_handle(system, process) {
+        system.cpu.regs[0] = invalid_handle(system, process, "svcUnmapProcessMemoryEx");
+        return;
+    }
+    if address & PAGE_MASK != 0 {
+        system.cpu.regs[0] = errors::MISALIGNED_ADDRESS.0;
+        return;
+    }
+    if requested_size == 0 {
+        system.cpu.regs[0] = errors::MISALIGNED_SIZE.0;
+        return;
+    }
+    let Some(size) = requested_size.checked_add(PAGE_MASK).map(|size| size & !PAGE_MASK) else {
+        system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
+        return;
+    };
+    let Some(end) = address.checked_add(size) else {
+        system.cpu.regs[0] = errors::OUT_OF_RANGE.0;
+        return;
+    };
+
+    let mut page = address;
+    while page < end {
+        if system.memory.mapping_at(page).is_none() {
+            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            return;
+        }
+        page += PAGE_SIZE;
+    }
+    // Unmapping an alias must not free the source physical pages; ownership
+    // remains with the original mapping, as in Luma/Citra.
+    system.memory.unmap(address, size);
+    system.cpu.regs[0] = 0;
 }
 
 fn get_resource_limit(system: &mut System) {
@@ -1303,6 +1498,131 @@ pub const _CURRENT_PROCESS: u32 = CURRENT_PROCESS;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_process_returns_a_valid_handle_for_the_guest_process() {
+        let mut system = System::new(crate::Config::default());
+        let process_id = system.kernel.process_id;
+        system.cpu.regs[1] = process_id;
+        dispatch(&mut system, 0x33);
+
+        assert_eq!(system.cpu.regs[0], 0);
+        let handle = system.cpu.regs[1];
+        assert!(is_process_handle(&mut system, handle));
+
+        system.cpu.regs[1] = handle;
+        dispatch(&mut system, 0x35);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert_eq!(system.cpu.regs[1], process_id);
+    }
+
+    #[test]
+    fn map_process_memory_ex_v1_and_v2_share_live_bytes_and_unmap_cleanly() {
+        let mut system = System::new(crate::Config::default());
+        let process_id = system.kernel.process_id;
+        system.cpu.regs[1] = process_id;
+        dispatch(&mut system, 0x33);
+        assert_eq!(system.cpu.regs[0], 0);
+        let handle = system.cpu.regs[1];
+
+        let source = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE * 2)
+            .unwrap();
+        system.memory.map(
+            0x0010_0000,
+            source.addr,
+            source.size,
+            Permission::READ | Permission::WRITE | Permission::EXECUTE,
+            MemoryState::Code,
+        );
+        system.memory.write_bytes(0x0010_0000, b"CTGP live .code bytes");
+
+        // Version 1 uses the destination process handle directly and always
+        // maps the destination as Shared.
+        system.cpu.regs[..7].copy_from_slice(&[
+            handle,
+            0x0020_0000,
+            handle,
+            0x0010_0000,
+            PAGE_SIZE,
+            MAP_PROCESS_MEMORY_EX_PRIVATE,
+            0,
+        ]);
+        dispatch(&mut system, 0xA0);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert_eq!(system.memory.query(0x0020_0000).state, MemoryState::Shared as u32);
+        let mut bytes = [0; 21];
+        system.memory.read_bytes(0x0020_0000, &mut bytes);
+        assert_eq!(&bytes, b"CTGP live .code bytes");
+        system.memory.write_bytes(0x0020_0000, b"PATCHED live .code bytes");
+        let mut patched = [0; 24];
+        system.memory.read_bytes(0x0010_0000, &mut patched);
+        assert_eq!(&patched, b"PATCHED live .code bytes");
+
+        // V1 ignores the flags argument; the unmapper only drops the alias.
+        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, PAGE_SIZE]);
+        dispatch(&mut system, 0xA1);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert!(system.memory.mapping_at(0x0020_0000).is_none());
+        assert!(system.memory.mapping_at(0x0010_0000).is_some());
+
+        // Version 2 marks r0 with the magic and supplies the destination
+        // process handle in r6; its flags bit selects Private.
+        system.cpu.regs[..7].copy_from_slice(&[
+            MAP_PROCESS_MEMORY_EX_V2_MAGIC,
+            0x0020_0000,
+            handle,
+            0x0010_0000,
+            PAGE_SIZE,
+            MAP_PROCESS_MEMORY_EX_PRIVATE,
+            handle,
+        ]);
+        dispatch(&mut system, 0xA0);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert_eq!(system.memory.query(0x0020_0000).state, MemoryState::Private as u32);
+
+        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, PAGE_SIZE]);
+        dispatch(&mut system, 0xA1);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert!(system.memory.mapping_at(0x0020_0000).is_none());
+        assert!(system.memory.mapping_at(0x0010_0000).is_some());
+    }
+
+    #[test]
+    fn luma_process_info_reports_the_running_title_executable_layout() {
+        use zakuro_fs::testing::{ncch, write};
+
+        const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
+        let image = write(
+            "luma-process-info",
+            "game.cxi",
+            &ncch(PROGRAM_ID, Some(&[0xEA; 0x1800]), &[]),
+        );
+        let mut system = System::new(crate::Config::default());
+        system.title = Some(zakuro_fs::Title::load(&image).unwrap());
+        system.kernel.program_id = PROGRAM_ID;
+        system.cpu.regs[1] = system.kernel.process_id;
+        dispatch(&mut system, 0x33);
+        assert_eq!(system.cpu.regs[0], 0);
+        let handle = system.cpu.regs[1];
+
+        for (kind, expected) in [
+            (0x1_0001, PROGRAM_ID),
+            (0x1_0002, u64::from(PAGE_SIZE)),
+            (0x1_0005, 0x0010_0000),
+        ] {
+            system.cpu.regs[1] = handle;
+            system.cpu.regs[2] = kind;
+            dispatch(&mut system, 0x2B);
+            let actual = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+            assert_eq!(system.cpu.regs[0], 0);
+            assert_eq!(actual, expected, "Luma process-info type 0x{kind:X}");
+        }
+
+        std::fs::remove_file(image).unwrap();
+    }
 
     /// two reads of the clock in a row are as far apart as on the console,
     /// so a title spinning on it until a frame is over spins no longer.
