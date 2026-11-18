@@ -146,14 +146,9 @@ vec4 unpack_color(uint value) {
 // Transform derivatives analytically: implicit derivatives of a discontinuous
 // face index otherwise create extreme LOD changes and skybox flicker.
 vec4 sample_cube(vec3 direction) {
-    if (CUBE_ATLAS == 0u) {
-        // Use Vulkan's native cube lookup on devices with reliable cube sampling.
-        return texture(texture0_cube, direction);
-    }
-
-    // On Apple Vulkan devices, sample the decoded PICA 3x2 atlas directly.
-    // The face index is discontinuous, so calculate derivatives in face space
-    // before selecting a face to keep skybox LOD stable at face boundaries.
+    // Sample the decoded PICA 3x2 face atlas on every platform. The face index
+    // is discontinuous, so calculate derivatives in face space before selecting
+    // a face to prevent incorrect mip selection and skybox flicker at boundaries.
     vec3 dx = dFdx(direction);
     vec3 dy = dFdy(direction);
     vec3 magnitude = abs(direction);
