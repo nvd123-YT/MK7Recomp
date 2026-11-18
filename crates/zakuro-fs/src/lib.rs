@@ -128,6 +128,9 @@ pub struct Title {
     ncch_offset: u64,
     pub ncch: NcchHeader,
     pub exheader: ExHeader,
+    /// Whether this title's own NCCH .code entry is BLZ-compressed.
+    /// Kept separately because `exheader` is replaced by an installed update.
+    base_code_compressed: bool,
     pub exefs: ExeFs,
     exefs_offset: u64,
     pub romfs: Option<RomFs>,
@@ -247,6 +250,7 @@ impl Title {
 
         let exheader_raw = &ncch_data[NcchHeader::SIZE..NcchHeader::SIZE + ExHeader::HASHED_SIZE];
         let exheader = ExHeader::parse(exheader_raw)?;
+        let base_code_compressed = exheader.compress_code;
 
         let exefs_offset = ncch_offset + ncch.exefs_offset;
         let exefs = ExeFs::parse(&data[exefs_offset as usize..])?;
@@ -266,6 +270,7 @@ impl Title {
             ncch_offset,
             ncch,
             exheader,
+            base_code_compressed,
             exefs,
             exefs_offset,
             romfs,
@@ -333,6 +338,21 @@ impl Title {
         let start = (self.exefs_offset + exefs::HEADER_SIZE + entry.offset) as usize;
         let end = start.checked_add(entry.size as usize)?;
         self.image.data().get(start..end)
+    }
+
+    /// this title's own NCCH .code section, independent of any update attached
+    /// to the running game. The bytes are decompressed using this NCCH's own
+    /// ExHeader, not the update's active ExHeader.
+    pub fn ncch_code(&self) -> Result<Vec<u8>, FsError> {
+        let entry = self.exefs.find(".code").ok_or(FsError::NoCode)?;
+        let start = (self.exefs_offset + exefs::HEADER_SIZE + entry.offset) as usize;
+        let end = start.checked_add(entry.size as usize).ok_or(FsError::NoCode)?;
+        let raw = self.image.data().get(start..end).ok_or(FsError::NoCode)?;
+        if self.base_code_compressed {
+            lz77::decompress(raw)
+        } else {
+            Ok(raw.to_vec())
+        }
     }
 
     /// the executable image, decompressed if the exheader says it is BLZ'd,
