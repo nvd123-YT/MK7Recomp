@@ -1082,7 +1082,7 @@ struct PipelineKey {
 
 /// the fragment shader's specialization constants, as raster.frag numbers
 /// them, the last one making it the generic shader.
-const FRAGMENT_CONSTANTS: usize = 30;
+const FRAGMENT_CONSTANTS: usize = 31;
 
 /// the generic fragment shader's specialization, which reads what the
 /// others have as constants from the draw's registers.
@@ -1101,6 +1101,7 @@ fn generic(fragment: &[u32; FRAGMENT_CONSTANTS]) -> [u32; FRAGMENT_CONSTANTS] {
     generic[25] = fragment[25] & 0x400;
     generic[26] = fragment[26];
     generic[28] = fragment[28] & WRITES_DEPTH;
+    generic[30] = fragment[30];
     generic
 }
 
@@ -1123,7 +1124,7 @@ pub(crate) struct Dynamic {
 
 /// every generic pipeline a draw can need when the blend state is dynamic,
 /// with the vertex stages that draws have.
-fn generic_keys(shades: bool) -> Vec<PipelineKey> {
+fn generic_keys(shades: bool, cube_atlas_sampling: bool) -> Vec<PipelineKey> {
     let vertices: &[VertexStage] = if shades { &[VertexStage::Interpreted, VertexStage::Placed] } else { &[VertexStage::Placed] };
     let mut keys = Vec::new();
     for &vertex in vertices {
@@ -1135,6 +1136,7 @@ fn generic_keys(shades: bool) -> Vec<PipelineKey> {
                         fragment[25] = procedural;
                         fragment[26] = lighting;
                         fragment[28] = writes;
+                        fragment[30] = cube_atlas_sampling as u32;
                         keys.push(PipelineKey { blend: None, logic_op: None, mask: 0xF, depth, vertex, fragment });
                     }
                 }
@@ -1599,6 +1601,8 @@ pub struct Hardware {
     shade_shader: vk::ShaderModule,
     /// whether draws go to shade_shader.
     shades: bool,
+    /// use the explicit PICA cube-atlas sampler on Apple Vulkan devices.
+    cube_atlas_sampling: bool,
     /// whether programs are translated rather than interpreted.
     translates: bool,
     /// what a surface's memory was read into last, the next read's buffer.
@@ -1900,6 +1904,7 @@ impl Hardware {
                     (None, None) => properties.device_type != vk::PhysicalDeviceType::INTEGRATED_GPU,
                 },
                 // interpreting them all instead, to tell the two apart
+                cube_atlas_sampling: properties.vendor_id == 0x106B,
                 translates: std::env::var_os("ZAKURO_INTERPRET_SHADERS").is_none(),
                 scratch: Vec::new(),
                 translated: QuickMap::default(),
@@ -2022,7 +2027,7 @@ impl Hardware {
             // the generic pipelines, while the title starts. a draw that
             // needs one before it is made makes it itself, as before
             if dynamic.blend && !hardware.waits {
-                for key in generic_keys(hardware.shades) {
+                for key in generic_keys(hardware.shades, hardware.cube_atlas_sampling) {
                     let module = hardware.vertex_module(key.vertex);
                     hardware.compiler.send_generic(Job::Compile(key, module));
                 }
@@ -3010,7 +3015,9 @@ impl Hardware {
         // Cubemaps need two Vulkan views: the native six-layer view used for
         // ordinary TextureCube sampling, and the 3x2 atlas used by ShadowCube's
         // PICA depth-comparison shader.
-        let cube_view = if let Some(faces) = &bound.cube_faces {
+        let cube_view = if needs_cube_atlas {
+            None
+        } else if let Some(faces) = &bound.cube_faces {
             let key = std::array::from_fn(|face| Arc::as_ptr(&faces[face]) as *const u8 as usize);
             if let Some(texture) = self.cube_textures.get_mut(&key) {
                 texture.used = self.batch;
@@ -4187,8 +4194,9 @@ impl Hardware {
                             Filtering::of(bound)
                         }
                         None => {
+                            let texture0_type = (draw.registers[TEXTURE_UNIT_BASES[0] + 2] >> 28) & 7;
                             let needs_cube_atlas = unit == 0
-                                && ((draw.registers[TEXTURE_UNIT_BASES[0] + 2] >> 28) & 7) == 4;
+                                && (texture0_type == 4 || (self.cube_atlas_sampling && texture0_type == 1));
                             let (view, native_cube_view, picture) = self.texture(bound, needs_cube_atlas)?;
                             (views[unit], twin_views[unit]) = (view, view);
                             if let Some(native_cube_view) = native_cube_view {
@@ -4333,6 +4341,7 @@ impl Hardware {
         // what stands in for a translated program's pipeline, the
         // interpreter, has the program staged and bound all the same. what
         // is dynamic is set below rather than held by the pipeline
+        fragment[30] = self.cube_atlas_sampling as u32;
         let dynamic = self.dynamic;
         let key = PipelineKey {
             blend: blend.filter(|_| !dynamic.blend),
@@ -6547,7 +6556,9 @@ mod tests {
     /// for while the blend state is dynamic.
     #[test]
     fn the_generic_pipelines_made_at_the_start_are_all_a_draw_needs() {
-        let made: QuickSet<PipelineKey> = generic_keys(true).into_iter().collect();
+        let made: QuickSet<PipelineKey> = generic_keys(true, false).into_iter()
+            .chain(generic_keys(true, true))
+            .collect();
         let mut seed = 5u32;
         let mut random = move || {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -6557,6 +6568,7 @@ mod tests {
             let mut fragment: [u32; FRAGMENT_CONSTANTS] = std::array::from_fn(|_| random());
             // whether the draw is lit
             fragment[26] &= 1;
+            fragment[30] &= 1;
             for vertex in [VertexStage::Placed, VertexStage::Interpreted] {
                 let key = PipelineKey { blend: None, logic_op: None, mask: 0xF, depth: random() & 1 != 0, vertex, fragment };
                 // as pipeline_for asks for it
