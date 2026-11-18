@@ -1124,7 +1124,7 @@ pub(crate) struct Dynamic {
 
 /// every generic pipeline a draw can need when the blend state is dynamic,
 /// with the vertex stages that draws have.
-fn generic_keys(shades: bool, cube_atlas_sampling: bool) -> Vec<PipelineKey> {
+fn generic_keys(shades: bool) -> Vec<PipelineKey> {
     let vertices: &[VertexStage] = if shades { &[VertexStage::Interpreted, VertexStage::Placed] } else { &[VertexStage::Placed] };
     let mut keys = Vec::new();
     for &vertex in vertices {
@@ -1136,7 +1136,7 @@ fn generic_keys(shades: bool, cube_atlas_sampling: bool) -> Vec<PipelineKey> {
                         fragment[25] = procedural;
                         fragment[26] = lighting;
                         fragment[28] = writes;
-                        fragment[30] = cube_atlas_sampling as u32;
+                        fragment[30] = 1;
                         keys.push(PipelineKey { blend: None, logic_op: None, mask: 0xF, depth, vertex, fragment });
                     }
                 }
@@ -1601,8 +1601,6 @@ pub struct Hardware {
     shade_shader: vk::ShaderModule,
     /// whether draws go to shade_shader.
     shades: bool,
-    /// use the explicit PICA cube-atlas sampler on Apple Vulkan devices.
-    cube_atlas_sampling: bool,
     /// whether programs are translated rather than interpreted.
     translates: bool,
     /// what a surface's memory was read into last, the next read's buffer.
@@ -1904,7 +1902,6 @@ impl Hardware {
                     (None, None) => properties.device_type != vk::PhysicalDeviceType::INTEGRATED_GPU,
                 },
                 // interpreting them all instead, to tell the two apart
-                cube_atlas_sampling: properties.vendor_id == 0x106B,
                 translates: std::env::var_os("ZAKURO_INTERPRET_SHADERS").is_none(),
                 scratch: Vec::new(),
                 translated: QuickMap::default(),
@@ -2027,7 +2024,7 @@ impl Hardware {
             // the generic pipelines, while the title starts. a draw that
             // needs one before it is made makes it itself, as before
             if dynamic.blend && !hardware.waits {
-                for key in generic_keys(hardware.shades, hardware.cube_atlas_sampling) {
+                for key in generic_keys(hardware.shades) {
                     let module = hardware.vertex_module(key.vertex);
                     hardware.compiler.send_generic(Job::Compile(key, module));
                 }
@@ -4194,8 +4191,7 @@ impl Hardware {
                         }
                         None => {
                             let texture0_type = (draw.registers[TEXTURE_UNIT_BASES[0] + 2] >> 28) & 7;
-                            let needs_cube_atlas = unit == 0
-                                && (texture0_type == 4 || (self.cube_atlas_sampling && texture0_type == 1));
+                            let needs_cube_atlas = unit == 0 && matches!(texture0_type, 1 | 4);
                             let (view, native_cube_view, picture) = self.texture(bound, needs_cube_atlas)?;
                             (views[unit], twin_views[unit]) = (view, view);
                             if let Some(native_cube_view) = native_cube_view {
@@ -4340,7 +4336,7 @@ impl Hardware {
         // what stands in for a translated program's pipeline, the
         // interpreter, has the program staged and bound all the same. what
         // is dynamic is set below rather than held by the pipeline
-        fragment[30] = self.cube_atlas_sampling as u32;
+        fragment[30] = 1;
         let dynamic = self.dynamic;
         let key = PipelineKey {
             blend: blend.filter(|_| !dynamic.blend),
@@ -6555,9 +6551,7 @@ mod tests {
     /// for while the blend state is dynamic.
     #[test]
     fn the_generic_pipelines_made_at_the_start_are_all_a_draw_needs() {
-        let made: QuickSet<PipelineKey> = generic_keys(true, false).into_iter()
-            .chain(generic_keys(true, true))
-            .collect();
+        let made: QuickSet<PipelineKey> = generic_keys(true).into_iter().collect();
         let mut seed = 5u32;
         let mut random = move || {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -6567,7 +6561,7 @@ mod tests {
             let mut fragment: [u32; FRAGMENT_CONSTANTS] = std::array::from_fn(|_| random());
             // whether the draw is lit
             fragment[26] &= 1;
-            fragment[30] &= 1;
+            fragment[30] = 1;
             for vertex in [VertexStage::Placed, VertexStage::Interpreted] {
                 let key = PipelineKey { blend: None, logic_op: None, mask: 0xF, depth: random() & 1 != 0, vertex, fragment };
                 // as pipeline_for asks for it
