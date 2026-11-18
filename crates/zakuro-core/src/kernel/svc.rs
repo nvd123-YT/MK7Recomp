@@ -1728,7 +1728,7 @@ mod tests {
         let mut ro_bytes = [0; 17];
         system.memory.read_bytes(0x0020_2000, &mut ro_bytes);
         assert_eq!(&ro_bytes, b"read-only segment");
-        let mut data_bytes = [0; 13];
+        let mut data_bytes = [0; 12];
         system.memory.read_bytes(0x0020_3000, &mut data_bytes);
         assert_eq!(&data_bytes, b"data and BSS");
 
