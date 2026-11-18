@@ -361,12 +361,10 @@ fn code_fingerprint(bytes: &[u8]) -> u64 {
 fn log_code_images(title: &Title, runtime_code: &[u8]) {
     match title.ncch_code() {
         Ok(code) => log::info!(
-            "code image diagnostic: base NCCH title={:016X} product={} ncch_v={} remaster_v={} compressed={} bytes={} fnv1a64={:016X}",
+            "code image diagnostic: base NCCH title={:016X} product={} ncch_v={} decompressed_bytes={} fnv1a64={:016X}",
             title.program_id(),
             title.ncch.product_code,
             title.ncch.version,
-            title.exheader.remaster_version,
-            title.exheader.compress_code,
             code.len(),
             code_fingerprint(&code)
         ),
