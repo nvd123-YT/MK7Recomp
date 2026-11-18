@@ -1176,7 +1176,9 @@ fn get_process_info(system: &mut System) {
             u64::from(title.exheader.rodata.num_pages.saturating_mul(PAGE_SIZE))
         }),
         0x1_0004 => system.title.as_ref().map_or(0, |title| {
-            u64::from(title.exheader.data.num_pages.saturating_mul(PAGE_SIZE))
+            let data = title.exheader.data.num_pages.saturating_mul(PAGE_SIZE);
+            let bss = title.exheader.bss_size.saturating_add(PAGE_MASK) & !PAGE_MASK;
+            u64::from(data.saturating_add(bss))
         }),
         0x1_0005 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.text.address)),
         0x1_0006 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.rodata.address)),
