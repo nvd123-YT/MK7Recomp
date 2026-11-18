@@ -4979,7 +4979,7 @@ impl Hardware {
         if memory.is_some() {
             // the rows past the surface as memory has them, scaled up, the
             // copy's rows run as memory's do
-            self.texture(bound)?;
+            self.texture(bound, false)?;
             let key = Arc::as_ptr(&bound.texels) as *const u8 as usize;
             let from = self.textures.get(&key).ok_or("a texture reaching past the buffer drawn into it was not uploaded")?.image.image;
             self.end_rendering();
