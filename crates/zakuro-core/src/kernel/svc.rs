@@ -1154,12 +1154,7 @@ fn get_process_info(system: &mut System) {
 
     let value: u64 = match kind {
         // total memory the process has committed.
-        2 => system
-            .memory
-            .phys
-            .region_used(crate::memory::MemoryRegion::Application) as u64
-                + system.memory.phys.region_used(crate::memory::MemoryRegion::System) as u64
-                + system.memory.phys.region_used(crate::memory::MemoryRegion::Base) as u64,
+        2 => system.memory.phys.region_used(system.kernel.memory_region) as u64,
         // what turns a linear heap address into a physical one, titles
         // work out the addresses the GPU jumps to with it
         20 => 0x2000_0000u32.wrapping_sub(system.kernel.linear_base) as u64,
