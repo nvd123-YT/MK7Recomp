@@ -21,6 +21,23 @@ Azahar's 3GX loader and CSND service sources are licensed under GPL-3.0-or-later
 
 Copyright notices from the upstream sources remain applicable. The bootloader payload is reproduced from the Azahar/Citra implementation; the Rust loader, service state, and memory integration are an adaptation for this emulator.
 
+## Azahar / Citra PICA rendering
+
+The PICA200 shadow-texture behavior in `crates/zakuro-gpu/shaders/raster.frag`
+was adapted with reference to Azahar's PICA shader and register implementation,
+including:
+
+- `src/video_core/shader/generator/glsl_fs_shader_gen.cpp` (Shadow2D and ShadowCube coordinate transforms, depth comparison, and filtering)
+- `src/video_core/pica/regs_texturing.h` (PICA texture-type and shadow-register bitfields)
+- `src/video_core/renderer_opengl/gl_rasterizer.cpp`
+- `src/video_core/renderer_vulkan/vk_rasterizer.cpp` (special texture binding)
+
+The referenced Azahar shader and renderer sources are licensed under
+GPL-3.0-or-later; the PICA register header is GPL-2.0-or-later. These terms are
+compatible with this project's GPL-3.0-or-later licensing. The corresponding
+upstream copyright and license notices remain applicable to any copied or
+adapted source.
+
 ## ScarletNX CSND reference
 
 The CSND service behavior was also cross-checked against [ScarletNX](https://github.com/scarletnx/ScarletNX), whose CSND implementation is GPL-3.0-or-later and identifies Azahar as its upstream reference.
