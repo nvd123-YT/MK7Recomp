@@ -55,7 +55,6 @@ layout(constant_id = 28) const uint DEPTH_MODE = 0u;
 // without when they are off. it masks the rest as hardware.rs masks the
 // constants, so the two draw the same
 layout(constant_id = 29) const uint DYNAMIC = 0u;
-layout(constant_id = 30) const uint CUBE_ATLAS = 0u;
 
 layout(set = 0, binding = 0) uniform sampler2D texture0;
 layout(set = 0, binding = 1) uniform sampler2D texture1;
