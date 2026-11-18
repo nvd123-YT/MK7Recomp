@@ -1374,12 +1374,34 @@ mod tests {
     }
 
     #[test]
+    fn citra_host_tick_is_monotonic_and_emulation_speed_is_reported() {
+        let mut system = System::new(crate::Config::default());
+
+        system.cpu.regs[1] = 0x0002_0000; // CITRA_INFORMATION
+        system.cpu.regs[2] = 1; // HOST_TICK
+        dispatch(&mut system, 0x2A);
+        let first = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+        dispatch(&mut system, 0x2A);
+        let second = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+        assert!(second >= first);
+
+        system.cpu.regs[2] = 2; // EMULATION_SPEED
+        dispatch(&mut system, 0x2A);
+        assert_eq!(system.cpu.regs[1], 100);
+    }
+
+    #[test]
     fn kernel_set_state_accepts_ctgp_emulation_speed_reset() {
         let mut system = System::new(crate::Config::default());
         system.cpu.regs[..3].copy_from_slice(&[0x0002_0000, 65_535, 0]);
         dispatch(&mut system, 0x7C);
         assert_eq!(system.cpu.regs[0], 0);
+        assert_eq!(system.emulation_speed, 100);
         assert!(!system.unimplemented_svcs.contains(&0x7C));
+
+        system.cpu.regs[..3].copy_from_slice(&[0x0002_0000, 125, 0]);
+        dispatch(&mut system, 0x7C);
+        assert_eq!(system.emulation_speed, 125);
     }
 
     #[test]
