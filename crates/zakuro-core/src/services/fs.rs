@@ -113,7 +113,8 @@ fn read_exefs_filename(system: &mut System, address: u32) -> Option<String> {
     system.memory.read_bytes(address, &mut bytes);
     let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
     let filename = std::str::from_utf8(&bytes[..end]).ok()?;
-    (!filename.is_empty()).then(|| filename.to_owned())
+    // RomFS path types leave this field zeroed; preserve the empty name.
+    Some(filename.to_owned())
 }
 
 /// path encodings.
