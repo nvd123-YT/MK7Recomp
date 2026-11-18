@@ -24,6 +24,8 @@ const MEMOP_LINEAR_FLAG: u32 = 0x1_0000;
 /// Luma's extended process-memory mapping SVC, including its v2 call marker.
 const MAP_PROCESS_MEMORY_EX_V2_MAGIC: u32 = 0xFFFF_FFF2;
 const MAP_PROCESS_MEMORY_EX_PRIVATE: u32 = 1;
+/// Citra/Luma OS error 0xD9001818 from svcOpenProcess for an unknown PID.
+const PROCESS_NOT_FOUND: u32 = 0xD900_1818;
 
 /// reports a handle a syscall could not resolve.
 fn invalid_handle(system: &mut System, handle: u32, what: &str) -> u32 {
@@ -1236,7 +1238,7 @@ fn open_process(system: &mut System) {
     let process_id = system.cpu.regs[1];
     if process_id != system.kernel.process_id {
         log::warn!("svcOpenProcess: process 0x{process_id:08X} does not exist");
-        system.cpu.regs[0] = errors::NOT_FOUND.0;
+        system.cpu.regs[0] = PROCESS_NOT_FOUND;
         return;
     }
     let object = system.kernel.process_object();
@@ -1307,7 +1309,7 @@ fn map_process_memory_ex(system: &mut System) {
     let mut page = destination_address;
     while page < destination_end {
         if system.memory.mapping_at(page).is_some() {
-            system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+            system.cpu.regs[0] = errors::INVALID_ADDRESS_STATE.0;
             return;
         }
         page += PAGE_SIZE;
