@@ -1482,13 +1482,48 @@ mod executable_code_tests {
 
         const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
         let code = [0x11, 0x22, 0x33, 0x44];
-        let path = write("selfncch-exefs", "game.cxi", &ncch(PROGRAM_ID, Some(&code), &[]));
+        let icon = [0xA1, 0xA2, 0xA3];
+        let banner = [0xB1, 0xB2];
+        let logo = [0xC1, 0xC2, 0xC3, 0xC4];
+        let mut image = ncch(PROGRAM_ID, Some(&code), &[]);
+
+        // Add three named ExeFS sections to the fixture's 0x200-byte ExeFS
+        // header and place their data in its existing padding before RomFS.
+        for (index, (name, offset, bytes)) in [
+            ("icon", 0x10u32, icon.as_slice()),
+            ("banner", 0x20u32, banner.as_slice()),
+            ("logo", 0x30u32, logo.as_slice()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entry = 0x600 + (index + 1) * 0x10;
+            image[entry..entry + 8].fill(0);
+            image[entry..entry + name.len()].copy_from_slice(name.as_bytes());
+            image[entry + 8..entry + 12].copy_from_slice(&offset.to_le_bytes());
+            image[entry + 12..entry + 16].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+            let data = 0x800 + offset as usize;
+            image[data..data + bytes.len()].copy_from_slice(bytes);
+        }
+
+        let path = write("selfncch-exefs", "game.cxi", &image);
         let title = zakuro_fs::Title::load(&path).unwrap();
 
+        // SelfNCCH rejects .code, but it does expose the three named metadata
+        // sections as individual read-only files.
         assert!(self_ncch_exefs_file(&title, ".code").is_none());
-        assert!(self_ncch_exefs_file(&title, "icon").is_none());
-        assert!(self_ncch_exefs_file(&title, "banner").is_none());
-        assert!(self_ncch_exefs_file(&title, "logo").is_none());
+        for (name, expected) in [
+            ("icon", icon.as_slice()),
+            ("banner", banner.as_slice()),
+            ("logo", logo.as_slice()),
+        ] {
+            let file = self_ncch_exefs_file(&title, name).unwrap();
+            let FileBacking::Memory(actual) = file.backing else {
+                panic!("SelfNCCH ExeFS sections must be in-memory files");
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(file.path, format!("exefs:/{name}"));
+        }
 
         // The separate NCCH archive still exposes the selected title's .code.
         let file = ncch_kind_file(
@@ -1506,9 +1541,9 @@ mod executable_code_tests {
         };
         assert_eq!(actual, code);
 
-        // An ExeFS request for a different, absent filename must never
-        // accidentally receive the game's .code bytes.
-        assert!(ncch_kind_file(
+        // Opening a named ExeFS section through NCCH yields exactly that
+        // section, never the executable image by accident.
+        let file = ncch_kind_file(
             &title,
             &title,
             SELF_NCCH_EXEFS,
@@ -1517,7 +1552,11 @@ mod executable_code_tests {
             None,
             "icon",
         )
-        .is_none());
+        .unwrap();
+        let FileBacking::Memory(actual) = file.backing else {
+            panic!("NCCH ExeFS sections must be in-memory files");
+        };
+        assert_eq!(actual, icon);
 
         std::fs::remove_file(path).unwrap();
     }
