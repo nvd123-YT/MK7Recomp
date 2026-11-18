@@ -1641,8 +1641,6 @@ pub struct Hardware {
     upright_image: Option<Compute>,
     samples: Option<Local>,
     samplers: QuickMap<Filtering, vk::Sampler>,
-    /// the furthest a sampler's bias reaches, past which a unit's is cut.
-    max_bias: f32,
     ring: Buffer,
     used: u64,
     /// vertex arrays kept across batches, how much of it they take, and
@@ -1916,7 +1914,6 @@ impl Hardware {
                 upright_image: None,
                 samples: None,
                 samplers: QuickMap::default(),
-                max_bias: properties.limits.max_sampler_lod_bias,
                 used: 0,
                 heap: unmade(),
                 heap_used: 0,
@@ -4058,7 +4055,7 @@ impl Hardware {
         words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
         for (unit, base) in TEXTURE_UNIT_BASES.into_iter().enumerate() {
             // The fragment shader applies the PICA's explicit derivative-based LOD bias.
-            words.extend([r[base + 2], r[base], lod_biases[unit] as i32 as u32, 0]);
+            words.extend([r[base + 2], r[base], (lod_biases[unit] as f32 / 256.0).to_bits(), 0]);
         }
         let depth_flags = depth_map.w_buffer as u32 | (shaded.is_some() as u32) << 1;
         // the depth map goes through the viewport where it fits, and what
