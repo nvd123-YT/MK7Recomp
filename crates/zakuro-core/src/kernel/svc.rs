@@ -1647,19 +1647,46 @@ mod tests {
         system.memory.read_bytes(output, &mut handle_bytes);
         let handle = u32::from_le_bytes(handle_bytes);
 
-        let source = system
+        // The executable is virtually contiguous but its segments are backed
+        // by different physical allocations, just like the loader's .text,
+        // .rodata, .data and BSS mappings.
+        let text = system
             .memory
             .phys
             .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE * 2)
             .unwrap();
-        system.memory.map(
-            0x0010_0000,
-            source.addr,
-            source.size,
-            Permission::READ | Permission::WRITE | Permission::EXECUTE,
-            MemoryState::Code,
-        );
+        let _physical_gap_a = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        let rodata = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        let _physical_gap_b = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        let data_and_bss = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        assert_ne!(rodata.addr, text.addr + PAGE_SIZE * 2);
+        assert_ne!(data_and_bss.addr, rodata.addr + PAGE_SIZE);
+
+        let rwx = Permission::READ | Permission::WRITE | Permission::EXECUTE;
+        system.memory.map(0x0010_0000, text.addr, PAGE_SIZE * 2, rwx, MemoryState::Code);
+        system.memory.map(0x0010_2000, rodata.addr, PAGE_SIZE, rwx, MemoryState::Code);
+        system.memory.map(0x0010_3000, data_and_bss.addr, PAGE_SIZE, rwx, MemoryState::Private);
         system.memory.write_bytes(0x0010_0000, b"CTGP live .code bytes");
+        system.memory.write_bytes(0x0010_2000, b"read-only segment");
+        system.memory.write_bytes(0x0010_3000, b"data and BSS");
+
+        const TOTAL_SIZE: u32 = PAGE_SIZE * 4;
 
         // An occupied destination is a distinct invalid-address-state error.
         system.cpu.regs[..7].copy_from_slice(&[
@@ -1667,7 +1694,7 @@ mod tests {
             0x0010_0000,
             handle,
             0x0010_0000,
-            PAGE_SIZE,
+            TOTAL_SIZE,
             0,
             0,
         ]);
@@ -1675,33 +1702,56 @@ mod tests {
         assert_eq!(system.cpu.regs[0], errors::INVALID_ADDRESS_STATE.0);
 
         // Version 1 uses the destination process handle directly and always
-        // maps the destination as Shared.
+        // maps the destination as Shared. It must preserve the three source
+        // mapping boundaries and their non-contiguous physical backing.
         system.cpu.regs[..7].copy_from_slice(&[
             handle,
             0x0020_0000,
             handle,
             0x0010_0000,
-            PAGE_SIZE,
+            TOTAL_SIZE,
             MAP_PROCESS_MEMORY_EX_PRIVATE,
             0,
         ]);
         dispatch(&mut system, 0xA0);
         assert_eq!(system.cpu.regs[0], 0);
-        assert_eq!(system.memory.query(0x0020_0000).state, MemoryState::Shared as u32);
+        for offset in [0, PAGE_SIZE * 2, PAGE_SIZE * 3] {
+            assert_eq!(
+                system.memory.query(0x0020_0000 + offset).state,
+                MemoryState::Shared as u32
+            );
+        }
+
         let mut bytes = [0; 21];
         system.memory.read_bytes(0x0020_0000, &mut bytes);
         assert_eq!(&bytes, b"CTGP live .code bytes");
-        system.memory.write_bytes(0x0020_0000, b"PATCHED live .code bytes");
-        let mut patched = [0; 24];
-        system.memory.read_bytes(0x0010_0000, &mut patched);
-        assert_eq!(&patched, b"PATCHED live .code bytes");
+        let mut ro_bytes = [0; 17];
+        system.memory.read_bytes(0x0020_2000, &mut ro_bytes);
+        assert_eq!(&ro_bytes, b"read-only segment");
+        let mut data_bytes = [0; 13];
+        system.memory.read_bytes(0x0020_3000, &mut data_bytes);
+        assert_eq!(&data_bytes, b"data and BSS");
 
-        // V1 ignores the flags argument; the unmapper only drops the alias.
-        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, PAGE_SIZE]);
+        system.memory.write_bytes(0x0020_0000, b"PATCHED live .code bytes");
+        system.memory.write_bytes(0x0020_2000, b"PATCHED read-only");
+        let mut patched_text = [0; 24];
+        system.memory.read_bytes(0x0010_0000, &mut patched_text);
+        assert_eq!(&patched_text, b"PATCHED live .code bytes");
+        let mut patched_rodata = [0; 17];
+        system.memory.read_bytes(0x0010_2000, &mut patched_rodata);
+        assert_eq!(&patched_rodata, b"PATCHED read-only");
+
+        // V1 ignores the flags argument; unmapping the full alias removes all
+        // fragments without disturbing the original source mappings.
+        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, TOTAL_SIZE]);
         dispatch(&mut system, 0xA1);
         assert_eq!(system.cpu.regs[0], 0);
         assert!(system.memory.mapping_at(0x0020_0000).is_none());
+        assert!(system.memory.mapping_at(0x0020_2000).is_none());
+        assert!(system.memory.mapping_at(0x0020_3000).is_none());
         assert!(system.memory.mapping_at(0x0010_0000).is_some());
+        assert!(system.memory.mapping_at(0x0010_2000).is_some());
+        assert!(system.memory.mapping_at(0x0010_3000).is_some());
 
         // Version 2 marks r0 with the magic and supplies the destination
         // process handle in r6; its flags bit selects Private.
@@ -1710,15 +1760,20 @@ mod tests {
             0x0020_0000,
             handle,
             0x0010_0000,
-            PAGE_SIZE,
+            TOTAL_SIZE,
             MAP_PROCESS_MEMORY_EX_PRIVATE,
             handle,
         ]);
         dispatch(&mut system, 0xA0);
         assert_eq!(system.cpu.regs[0], 0);
-        assert_eq!(system.memory.query(0x0020_0000).state, MemoryState::Private as u32);
+        for offset in [0, PAGE_SIZE * 2, PAGE_SIZE * 3] {
+            assert_eq!(
+                system.memory.query(0x0020_0000 + offset).state,
+                MemoryState::Private as u32
+            );
+        }
 
-        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, PAGE_SIZE]);
+        system.cpu.regs[..3].copy_from_slice(&[handle, 0x0020_0000, TOTAL_SIZE]);
         dispatch(&mut system, 0xA1);
         assert_eq!(system.cpu.regs[0], 0);
         assert!(system.memory.mapping_at(0x0020_0000).is_none());
