@@ -1502,9 +1502,12 @@ mod tests {
     fn open_process_returns_a_valid_handle_for_the_guest_process() {
         let mut system = System::new(crate::Config::default());
         let process_id = system.kernel.process_id;
+        system.cpu.regs[1] = process_id.wrapping_add(1);
+        dispatch(&mut system, 0x33);
+        assert_eq!(system.cpu.regs[0], PROCESS_NOT_FOUND);
+
         system.cpu.regs[1] = process_id;
         dispatch(&mut system, 0x33);
-
         assert_eq!(system.cpu.regs[0], 0);
         let handle = system.cpu.regs[1];
         assert!(is_process_handle(&mut system, handle));
@@ -1537,6 +1540,19 @@ mod tests {
             MemoryState::Code,
         );
         system.memory.write_bytes(0x0010_0000, b"CTGP live .code bytes");
+
+        // An occupied destination is a distinct invalid-address-state error.
+        system.cpu.regs[..7].copy_from_slice(&[
+            handle,
+            0x0010_0000,
+            handle,
+            0x0010_0000,
+            PAGE_SIZE,
+            0,
+            0,
+        ]);
+        dispatch(&mut system, 0xA0);
+        assert_eq!(system.cpu.regs[0], errors::INVALID_ADDRESS_STATE.0);
 
         // Version 1 uses the destination process handle directly and always
         // maps the destination as Shared.
