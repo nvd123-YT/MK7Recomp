@@ -1082,7 +1082,7 @@ struct PipelineKey {
 
 /// the fragment shader's specialization constants, as raster.frag numbers
 /// them, the last one making it the generic shader.
-const FRAGMENT_CONSTANTS: usize = 31;
+const FRAGMENT_CONSTANTS: usize = 30;
 
 /// the generic fragment shader's specialization, which reads what the
 /// others have as constants from the draw's registers.
@@ -1101,7 +1101,6 @@ fn generic(fragment: &[u32; FRAGMENT_CONSTANTS]) -> [u32; FRAGMENT_CONSTANTS] {
     generic[25] = fragment[25] & 0x400;
     generic[26] = fragment[26];
     generic[28] = fragment[28] & WRITES_DEPTH;
-    generic[30] = fragment[30];
     generic
 }
 
@@ -1136,7 +1135,6 @@ fn generic_keys(shades: bool) -> Vec<PipelineKey> {
                         fragment[25] = procedural;
                         fragment[26] = lighting;
                         fragment[28] = writes;
-                        fragment[30] = 1;
                         keys.push(PipelineKey { blend: None, logic_op: None, mask: 0xF, depth, vertex, fragment });
                     }
                 }
@@ -4336,7 +4334,6 @@ impl Hardware {
         // what stands in for a translated program's pipeline, the
         // interpreter, has the program staged and bound all the same. what
         // is dynamic is set below rather than held by the pipeline
-        fragment[30] = 1;
         let dynamic = self.dynamic;
         let key = PipelineKey {
             blend: blend.filter(|_| !dynamic.blend),
@@ -6561,7 +6558,6 @@ mod tests {
             let mut fragment: [u32; FRAGMENT_CONSTANTS] = std::array::from_fn(|_| random());
             // whether the draw is lit
             fragment[26] &= 1;
-            fragment[30] = 1;
             for vertex in [VertexStage::Placed, VertexStage::Interpreted] {
                 let key = PipelineKey { blend: None, logic_op: None, mask: 0xF, depth: random() & 1 != 0, vertex, fragment };
                 // as pipeline_for asks for it
