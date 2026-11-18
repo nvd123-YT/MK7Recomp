@@ -2157,27 +2157,27 @@ fn bind_texture<M: GpuMemory>(
     let base = TEXTURE_UNIT_BASES[unit];
     let parameters = registers[base + 2];
     let texture_type = if unit == 0 { (parameters >> 28) & 7 } else { 0 };
+    let is_cube = unit == 0 && matches!(texture_type, 1 | 4);
     if unit == 0 && texture_type == 4 {
         let bit = 1u32 << texture_type;
         if REPORTED_TEXTURE0_TYPES.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
-            log::warn!(
-                "texture0 uses PICA ShadowCube; six-face depth comparison is not implemented yet (parameters {parameters:#010X})"
-            );
+            log::debug!("texture0 uses PICA ShadowCube with atlas-backed six-face depth comparison");
         }
     }
     let dimensions = registers[base + 1];
     let height = dimensions & 0x7FF;
     let width = (dimensions >> 16) & 0x7FF;
-    if width == 0 || (texture_type != 1 && height == 0) {
+    if width == 0 || (!is_cube && height == 0) {
         return Some(empty_texture());
     }
 
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
     let format = crate::texture::TextureFormat::from_raw(registers[format_register]);
 
-    // TextureCube uses six independently addressed square images. Assemble
-    // them into a cached mip-preserving atlas while keeping the GPU draw path.
-    if unit == 0 && texture_type == 1 {
+    // TextureCube and ShadowCube use six independently addressed square
+    // images. Assemble them into a cached mip-preserving atlas; ShadowCube
+    // comparison samples that same atlas without using the color cube view.
+    if is_cube {
         let levels = level_count(registers, base, width, width);
         let size = texture_bytes(format, width, width, levels);
         let raw_addresses: [u32; 6] = std::array::from_fn(|face| {
@@ -2295,7 +2295,7 @@ fn drawn_texture<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> Op
         return None;
     }
     let base = TEXTURE_UNIT_BASES[unit];
-    if unit == 0 && ((registers[base + 2] >> 28) & 7) == 1 {
+    if unit == 0 && matches!((registers[base + 2] >> 28) & 7, 1 | 4) {
         return None;
     }
     let dimensions = registers[base + 1];
@@ -2324,7 +2324,7 @@ fn texture_ranges<M: GpuMemory>(registers: &[u32], memory: &M, unit: usize) -> V
     let (height, width) = (dimensions & 0x7FF, (dimensions >> 16) & 0x7FF);
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
     let format = crate::texture::TextureFormat::from_raw(registers[format_register]);
-    if unit == 0 && ((registers[base + 2] >> 28) & 7) == 1 {
+    if unit == 0 && matches!((registers[base + 2] >> 28) & 7, 1 | 4) {
         if width == 0 {
             return Vec::new();
         }
