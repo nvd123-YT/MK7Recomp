@@ -19,6 +19,11 @@ This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other ga
 
 The application expects a legally obtained, decrypted dump of the game. It does not include the ROM, game code, textures, music, or other game assets.
 
+## Version 1.0.5 changes
+
+- Fixes strided GPU texture copies used by in-game display surfaces, resolving the corrupted/misaligned in-game displays seen in affected courses.
+- Adds regression coverage for differing source/destination strides and contiguous-to-strided transfers.
+
 ## Version 1.0.4 changes
 
 - Routes NCCH ExeFS requests for an installed update to that update's own `.code` content, while NCCH Code continues to expose the runtime-mapped update and modded executable image.
@@ -114,7 +119,7 @@ cargo test --release --workspace
 The desktop binary is written to target/release/mario-kart-7 (or .exe on Windows). The macOS package script bundles MoltenVK into the app:
 
 ~~~
-packaging/macos-app.sh target/release/mario-kart-7 1.0.4 mario-kart-7-macos-arm64.zip
+packaging/macos-app.sh target/release/mario-kart-7 1.0.5 mario-kart-7-macos-arm64.zip
 ~~~
 
 For a normal user, the prebuilt packages on the Releases page are the easiest option.
