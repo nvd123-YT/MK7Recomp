@@ -1074,22 +1074,28 @@ fn get_system_info(system: &mut System) {
     let kind = system.cpu.regs[1];
     let param = system.cpu.regs[2];
     let value: u64 = match (kind, param) {
-        // memory usage of each FCRAM region.
-        (0, 0) => system
-            .memory
-            .phys
-            .region_used(crate::memory::MemoryRegion::Application) as u64,
+        // svcGetSystemInfo(REGION_MEMORY_USAGE, region), where 0 is all
+        // FCRAM, then APPLICATION, SYSTEM and BASE are 1, 2 and 3.
+        (0, 0) => {
+            system.memory.phys.region_used(crate::memory::MemoryRegion::Application) as u64
+                + system.memory.phys.region_used(crate::memory::MemoryRegion::System) as u64
+                + system.memory.phys.region_used(crate::memory::MemoryRegion::Base) as u64
+        }
         (0, 1) => system
             .memory
             .phys
-            .region_used(crate::memory::MemoryRegion::System) as u64,
+            .region_used(crate::memory::MemoryRegion::Application) as u64,
         (0, 2) => system
+            .memory
+            .phys
+            .region_used(crate::memory::MemoryRegion::System) as u64,
+        (0, 3) => system
             .memory
             .phys
             .region_used(crate::memory::MemoryRegion::Base) as u64,
         (2, 0) => system.kernel.live_thread_count() as u64,
-        // kernel version.
-        (26, _) => 0,
+        // Five core processes are launched directly by the native kernel.
+        (26, _) => 5,
         // Citra/Azahar extension: CTGP-7 checks this identifier and accepts
         // 2 as the Azahar-compatible runtime. Upstream Citra reports 1;
         // returning 0 leaves CTGP unable to select its supported code path.
@@ -1312,6 +1318,30 @@ mod tests {
 
         assert_eq!(system.cpu.regs[0], 0);
         assert_eq!(system.memory.query(0x0010_0000).permission, 7);
+    }
+
+    #[test]
+    fn system_info_region_memory_usage_uses_all_then_application_system_base() {
+        let mut system = System::new(crate::Config::default());
+        for region in [
+            crate::memory::MemoryRegion::Application,
+            crate::memory::MemoryRegion::System,
+            crate::memory::MemoryRegion::Base,
+        ] {
+            system.memory.phys.allocate(region, PAGE_SIZE).unwrap();
+        }
+
+        fn query(system: &mut System, region: u32) -> u64 {
+            system.cpu.regs[1] = 0; // REGION_MEMORY_USAGE
+            system.cpu.regs[2] = region;
+            dispatch(system, 0x2A);
+            u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32)
+        }
+
+        assert_eq!(query(&mut system, 0), 3 * u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, 1), u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, 2), u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, 3), u64::from(PAGE_SIZE));
     }
 
     #[test]
