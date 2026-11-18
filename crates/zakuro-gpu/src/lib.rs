@@ -561,51 +561,102 @@ impl Gpu {
         self.transfers += 1;
     }
 
-    /// TextureCopy, a raw byte copy with a stride, no format conversion.
+    /// TextureCopy, a raw byte copy with independent source and destination
+    /// line widths and gaps. Widths and gaps are in 16-byte units; gaps are
+    /// not part of the total number of bytes copied.
     pub fn texture_copy<M: GpuMemory>(
         &mut self,
         memory: &mut M,
         input_paddr: u32,
         output_paddr: u32,
         size: u32,
-        input_gap: u32,
-        output_gap: u32,
+        input_parameters: u32,
+        output_parameters: u32,
     ) {
-        let input_width = (input_gap & 0xFFFF) * 16;
-        let input_skip = (input_gap >> 16) * 16;
-        // every line and the gaps between them
-        let span = |width: u32, skip: u32| if width == 0 { size } else { size + size.div_ceil(width) * skip };
-        let (input, output) = (memory.translate(input_paddr), memory.translate(output_paddr));
-        self.sync_memory(memory, input, span(input_width, input_skip));
-        let output_width = (output_gap & 0xFFFF) * 16;
-        let output_skip = (output_gap >> 16) * 16;
-        self.sync_memory(memory, output, span(output_width, output_skip));
-
-        log::debug!(
-            "texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{size:X}"
-        );
-
-        let (mut src, mut dst) = (input, output);
-
-        // a zero width means one contiguous run.
-        if input_width == 0 || output_width == 0 {
-            let mut buffer = vec![0u8; size as usize];
-            memory.read(src, &mut buffer);
-            memory.write(dst, &buffer);
-            self.transfers += 1;
+        // The transfer engine copies whole 16-byte blocks. Real hardware
+        // ignores the trailing bytes when size is not aligned.
+        let remaining_size = size & !15;
+        if remaining_size == 0 {
+            log::warn!("texture copy: size 0x{size:X} is smaller than one 16-byte block");
             return;
         }
 
-        let mut remaining = size;
-        let chunk = input_width.min(output_width);
-        let mut buffer = vec![0u8; chunk as usize];
-        while remaining >= chunk && chunk > 0 {
-            memory.read(src, &mut buffer);
-            memory.write(dst, &buffer);
-            src += input_width + input_skip;
-            dst += output_width + output_skip;
-            remaining -= chunk;
+        let input_gap = (input_parameters >> 16).saturating_mul(16);
+        let output_gap = (output_parameters >> 16).saturating_mul(16);
+
+        // A zero gap means one contiguous run, regardless of the width
+        // field. Treat it as one line so the other side can still be strided.
+        let input_width = if input_gap == 0 {
+            remaining_size
+        } else {
+            (input_parameters & 0xFFFF).saturating_mul(16)
+        };
+        let output_width = if output_gap == 0 {
+            remaining_size
+        } else {
+            (output_parameters & 0xFFFF).saturating_mul(16)
+        };
+
+        if input_width == 0 || output_width == 0 {
+            log::warn!(
+                "texture copy: invalid line width (input {input_width}, output {output_width})"
+            );
+            return;
         }
+
+        // Synchronize every source/destination span, including the gaps
+        // between rows, before the CPU performs the copy.
+        let span = |width: u32, gap: u32| -> u32 {
+            let gaps = (remaining_size.saturating_sub(1) / width) as u64;
+            (remaining_size as u64 + gaps * gap as u64).min(u32::MAX as u64) as u32
+        };
+        let (input, output) = (memory.translate(input_paddr), memory.translate(output_paddr));
+        self.sync_memory(memory, input, span(input_width, input_gap));
+        self.sync_memory(memory, output, span(output_width, output_gap));
+
+        log::debug!(
+            "texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{remaining_size:X}, \
+             input {input_width}+{input_gap}, output {output_width}+{output_gap}"
+        );
+
+        let mut src = input;
+        let mut dst = output;
+        let mut remaining_input = input_width;
+        let mut remaining_output = output_width;
+        let mut remaining = remaining_size;
+        let mut buffer = vec![0u8; input_width.min(output_width) as usize];
+
+        // Source and destination line boundaries are independent. A line on
+        // one side can end before the corresponding line on the other side.
+        while remaining > 0 {
+            let copy_size = remaining_input.min(remaining_output).min(remaining);
+            if copy_size == 0 {
+                // Widths are validated above; this guard also prevents an
+                // accidental infinite loop if the transfer state is corrupt.
+                log::warn!("texture copy: stopped on an empty line segment");
+                return;
+            }
+
+            let count = copy_size as usize;
+            memory.read(src, &mut buffer[..count]);
+            memory.write(dst, &buffer[..count]);
+
+            src = src.wrapping_add(copy_size);
+            dst = dst.wrapping_add(copy_size);
+            remaining_input -= copy_size;
+            remaining_output -= copy_size;
+            remaining -= copy_size;
+
+            if remaining_input == 0 {
+                remaining_input = input_width;
+                src = src.wrapping_add(input_gap);
+            }
+            if remaining_output == 0 {
+                remaining_output = output_width;
+                dst = dst.wrapping_add(output_gap);
+            }
+        }
+
         self.transfers += 1;
     }
 
@@ -1548,6 +1599,78 @@ mod tests {
                 gpu.write_internal(memory, renderer, REG_FIXED_ATTRIBUTE_DATA + i, word, 0xF);
             }
         }
+    }
+
+    #[test]
+    fn texture_copy_handles_different_source_and_destination_line_widths() {
+        let mut memory = FlatMemory(vec![0xCC; 0x400]);
+        for i in 0..0x80 {
+            memory.0[0x100 + i] = i as u8;
+        }
+
+        let mut gpu = Gpu::new();
+        // Copy 48 bytes from 32-byte source lines with a 16-byte gap into
+        // 16-byte destination lines with their own 16-byte gaps.
+        gpu.texture_copy(
+            &mut memory,
+            0x100,
+            0x200,
+            48,
+            2 | (1 << 16),
+            1 | (1 << 16),
+        );
+
+        assert_eq!(&memory.0[0x200..0x210], &(0..16).map(|n| n as u8).collect::<Vec<_>>());
+        assert_eq!(&memory.0[0x210..0x220], &[0xCC; 16], "destination gap is preserved");
+        assert_eq!(&memory.0[0x220..0x230], &(16..32).map(|n| n as u8).collect::<Vec<_>>());
+        assert_eq!(&memory.0[0x230..0x240], &[0xCC; 16], "second destination gap is preserved");
+        assert_eq!(&memory.0[0x240..0x250], &(48..64).map(|n| n as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn texture_copy_keeps_one_side_contiguous_when_the_other_has_gaps() {
+        let mut memory = FlatMemory(vec![0xCC; 0x300]);
+        for i in 0..64 {
+            memory.0[0x100 + i] = (0x40 + i) as u8;
+        }
+
+        let mut gpu = Gpu::new();
+        // The input's width field is zero and its gap is zero, so its data
+        // is contiguous. The output still has 16-byte lines and 16-byte gaps.
+        gpu.texture_copy(&mut memory, 0x100, 0x200, 32, 0, 1 | (1 << 16));
+
+        assert_eq!(&memory.0[0x200..0x210], &(0x40..0x50).map(|n| n as u8).collect::<Vec<_>>());
+        assert_eq!(&memory.0[0x210..0x220], &[0xCC; 16], "output gap is preserved");
+        assert_eq!(&memory.0[0x220..0x230], &(0x50..0x60).map(|n| n as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn texture_copy_keeps_the_other_side_contiguous_when_input_has_gaps() {
+        let mut memory = FlatMemory(vec![0xCC; 0x300]);
+        for i in 0..64 {
+            memory.0[0x100 + i] = (0x20 + i) as u8;
+        }
+
+        let mut gpu = Gpu::new();
+        // The output's width and gap are zero. Source rows are separated by
+        // 16 bytes, but destination bytes are packed together.
+        gpu.texture_copy(&mut memory, 0x100, 0x200, 32, 1 | (1 << 16), 0);
+
+        assert_eq!(&memory.0[0x200..0x220], &(0x20..0x30).chain(0x40..0x50).map(|n| n as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn texture_copy_ignores_a_trailing_partial_16_byte_block() {
+        let mut memory = FlatMemory(vec![0xCC; 0x200]);
+        for i in 0..48 {
+            memory.0[0x100 + i] = i as u8;
+        }
+
+        let mut gpu = Gpu::new();
+        gpu.texture_copy(&mut memory, 0x100, 0x180, 35, 0, 0);
+
+        assert_eq!(&memory.0[0x180..0x1A0], &(0..32).map(|n| n as u8).collect::<Vec<_>>());
+        assert_eq!(&memory.0[0x1A0..0x1A3], &[0xCC; 3], "unaligned trailing bytes are not copied");
     }
 
     /// halving tiled RGBA8 a tile at a time gives what averaging each
