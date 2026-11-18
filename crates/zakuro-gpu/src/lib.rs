@@ -270,24 +270,6 @@ impl Gpu {
             .unwrap_or(0)
     }
 
-    /// the LCD controller's solid-color override, if it is enabled.
-    /// The register is separate from the framebuffer and display-transfer
-    /// engines: the LCD displays this RGB value instead of scanning memory.
-    pub fn lcd_color_fill(&self, screen: usize) -> Option<[u8; 3]> {
-        let offset = match screen {
-            0 => LCD_COLOR_FILL_TOP,
-            1 => LCD_COLOR_FILL_BOTTOM,
-            _ => return None,
-        };
-        let register = 0x0040_0000 | offset as u32;
-        let raw = self.read_external(register);
-        (raw & (1 << 24) != 0).then_some([
-            raw as u8,
-            (raw >> 8) as u8,
-            (raw >> 16) as u8,
-        ])
-    }
-
     /// mirrors the LCD registers into our framebuffer state.
     fn on_external_write(&mut self, byte_offset: usize, value: u32) {
         for (screen, base) in [(0usize, LCD_TOP_BASE), (1, LCD_BOTTOM_BASE)] {
@@ -2470,27 +2452,5 @@ mod tests {
         assert_eq!(pixel(start), [0, 255, 0, 255], "the flipped output begins with the input's last line");
         assert_eq!(pixel(start + 2 * 3), [255, 0, 0, 255]);
         assert_eq!(&memory.0[0x200..start], &[0; 6], "nothing before where it starts");
-    }
-}
-
-#[cfg(test)]
-mod lcd_color_fill_tests {
-    use super::Gpu;
-
-    #[test]
-    fn reads_enabled_top_and_bottom_lcd_color_fills() {
-        let mut gpu = Gpu::new();
-        gpu.write_external(0x0040_2A04, 0x0100_0000 | 0x0033_2211);
-        gpu.write_external(0x0040_3204, 0x0100_0000 | 0x0066_5544);
-        assert_eq!(gpu.lcd_color_fill(0), Some([0x11, 0x22, 0x33]));
-        assert_eq!(gpu.lcd_color_fill(1), Some([0x44, 0x55, 0x66]));
-        assert_eq!(gpu.lcd_color_fill(2), None);
-    }
-
-    #[test]
-    fn disabled_lcd_color_fill_leaves_framebuffer_visible() {
-        let mut gpu = Gpu::new();
-        gpu.write_external(0x0040_2A04, 0x0033_2211);
-        assert_eq!(gpu.lcd_color_fill(0), None);
     }
 }
