@@ -1089,6 +1089,10 @@ fn get_system_info(system: &mut System) {
         (2, 0) => system.kernel.live_thread_count() as u64,
         // kernel version.
         (26, _) => 0,
+        // Citra/Azahar extension: CTGP-7 checks this identifier and accepts
+        // 2 as the Azahar-compatible runtime. Upstream Citra reports 1;
+        // returning 0 leaves CTGP unable to select its supported code path.
+        (0x0002_0000, 0) => 2,
         _ => {
             log::debug!("svcGetSystemInfo({kind}, {param}) is not implemented");
             0
@@ -1286,6 +1290,18 @@ mod tests {
 
         assert_eq!(system.cpu.regs[0], 0);
         assert_eq!(system.memory.query(0x0010_0000).permission, 7);
+    }
+
+    #[test]
+    fn get_system_info_reports_azahar_compatibility_for_ctgp() {
+        let mut system = System::new(crate::Config::default());
+        system.cpu.regs[1] = 0x0002_0000; // CITRA_INFORMATION
+        system.cpu.regs[2] = 0; // IS_CITRA
+        dispatch(&mut system, 0x2A);
+
+        assert_eq!(system.cpu.regs[0], 0);
+        assert_eq!(system.cpu.regs[1], 2, "CTGP-7 expects the Azahar compatibility identifier");
+        assert_eq!(system.cpu.regs[2], 0);
     }
 
     #[test]
