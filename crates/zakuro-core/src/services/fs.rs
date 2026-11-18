@@ -1025,7 +1025,7 @@ fn open_file(
                 MEDIA_NAND => open_system_archive(system, archive_path),
                 MEDIA_GAMECARD => {
                     let kind = system.memory.read32(path_ptr + 8);
-                    open_ncch_kind(system, kind, false)
+                    open_ncch_kind(system, kind, false, NcchCodeSource::SelectedNcch)
                 }
                 MEDIA_SDMC => {
                     let content_index = system.memory.read32(path_ptr + 4) as u16;
@@ -1064,7 +1064,7 @@ fn open_self_ncch(
         SELF_NCCH_ROMFS
     };
 
-    open_ncch_kind(system, kind, false)
+    open_ncch_kind(system, kind, false, NcchCodeSource::Runtime)
 }
 
 /// opens one of the system's shared data archives on NAND.
@@ -1100,6 +1100,22 @@ fn system_archive_data(path: NcchArchivePath, data_dir: Option<&std::path::Path>
 /// Opens the executable image exactly as it is mapped into the game's memory.
 /// ExeFS .code can be BLZ-compressed; returning its raw bytes here makes
 /// code-integrity checks disagree with the code the runtime actually runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NcchCodeSource {
+    /// The code currently used by the running title (including an installed update).
+    Runtime,
+    /// The .code section from the exact NCCH selected by the archive path.
+    SelectedNcch,
+}
+
+fn ncch_code_file(title: &zakuro_fs::Title) -> Option<OpenFile> {
+    let code = title.ncch_code().ok()?;
+    Some(OpenFile {
+        path: "exefs:/.code".into(),
+        backing: FileBacking::Memory(code),
+    })
+}
+
 fn executable_code_file(
     title: &zakuro_fs::Title,
     data_dir: Option<&std::path::Path>,
@@ -1120,6 +1136,7 @@ fn ncch_kind_file(
     selected: &zakuro_fs::Title,
     kind: u32,
     update: bool,
+    code_source: NcchCodeSource,
     data_dir: Option<&std::path::Path>,
 ) -> Option<OpenFile> {
     match kind {
@@ -1128,18 +1145,20 @@ fn ncch_kind_file(
             let path = if update || kind == SELF_NCCH_UPDATE_ROMFS { "patch:/" } else { "romfs:/" };
             Some(OpenFile { path: path.into(), backing })
         }
-        SELF_NCCH_CODE => executable_code_file(title, data_dir),
-        SELF_NCCH_EXEFS => {
-            // NCCHArchive::LoadSectionExeFS decompresses .code when the
-            // ExHeader marks it as BLZ-compressed. Returning the raw ExeFS
-            // entry here makes plugin integrity checks hash different bytes
-            // from the executable the game actually uses.
-            let data = selected.code().ok()?;
-            Some(OpenFile {
-                path: "exefs:/.code".into(),
-                backing: FileBacking::Memory(data),
-            })
-        }
+        SELF_NCCH_CODE => match code_source {
+            NcchCodeSource::Runtime => executable_code_file(title, data_dir),
+            NcchCodeSource::SelectedNcch => ncch_code_file(selected),
+        },
+        SELF_NCCH_EXEFS => match code_source {
+            NcchCodeSource::Runtime => {
+                let data = title.code().ok()?;
+                Some(OpenFile {
+                    path: "exefs:/.code".into(),
+                    backing: FileBacking::Memory(data),
+                })
+            }
+            NcchCodeSource::SelectedNcch => ncch_code_file(selected),
+        },
         other => {
             log::warn!("fs: SelfNCCH path type {other} is not implemented");
             None
@@ -1147,26 +1166,37 @@ fn ncch_kind_file(
     }
 }
 
-fn open_ncch_kind(system: &mut System, kind: u32, use_update: bool) -> Option<u32> {
+fn open_ncch_kind(
+    system: &mut System,
+    kind: u32,
+    use_update: bool,
+    code_source: NcchCodeSource,
+) -> Option<u32> {
     let data_dir = system.config.data_dir.clone();
     let title = system.title.as_ref()?;
     let update = use_update || kind == SELF_NCCH_UPDATE_ROMFS;
     let selected = if update { &title.update()?.title } else { title };
-    let file = ncch_kind_file(title, selected, kind, update, data_dir.as_deref())?;
+    let file = ncch_kind_file(title, selected, kind, update, code_source, data_dir.as_deref())?;
     match kind {
         SELF_NCCH_ROMFS | SELF_NCCH_UPDATE_ROMFS => {
             log::debug!("fs: opened {}, {} MiB", file.path, file.backing.size() / (1024 * 1024));
         }
-        SELF_NCCH_CODE => {
-            log::debug!("fs: opened the executable code image, {} bytes", file.backing.size());
-        }
-        SELF_NCCH_EXEFS => {
+        SELF_NCCH_CODE | SELF_NCCH_EXEFS => {
+            let source = match code_source {
+                NcchCodeSource::Runtime => "runtime",
+                NcchCodeSource::SelectedNcch => "selected NCCH",
+            };
+            let code_title = if code_source == NcchCodeSource::Runtime {
+                title.program_id()
+            } else {
+                selected.program_id()
+            };
             log::info!(
-                "fs: opened ExeFS .code for title {:016X}, {} bytes (remaster {}, BLZ-compressed={})",
-                selected.program_id(),
+                "fs: opened {} .code for title {:016X}, {} bytes (path type {})",
+                source,
+                code_title,
                 file.backing.size(),
-                selected.exheader.remaster_version,
-                selected.exheader.compress_code
+                kind
             );
         }
         _ => {}
@@ -1197,10 +1227,10 @@ fn open_sd_title(system: &mut System, title_id: u64, content_index: u16, kind: u
         )
     };
     if is_base_title {
-        return open_ncch_kind(system, kind, false);
+        return open_ncch_kind(system, kind, false, NcchCodeSource::SelectedNcch);
     }
     if is_update_title {
-        return open_ncch_kind(system, kind, true);
+        return open_ncch_kind(system, kind, true, NcchCodeSource::SelectedNcch);
     }
     let Some(dlc) = system.dlc.iter().find(|dlc| dlc.title_id == title_id) else {
         log::warn!("fs: {title_id:016X} is not on the SD card");
@@ -1366,14 +1396,30 @@ mod executable_code_tests {
         title.attach_update(update);
         let update_title = &title.update().unwrap().title;
 
-        let exefs = ncch_kind_file(&title, update_title, SELF_NCCH_EXEFS, true, None).unwrap();
+        let exefs = ncch_kind_file(
+            &title,
+            update_title,
+            SELF_NCCH_EXEFS,
+            true,
+            NcchCodeSource::SelectedNcch,
+            None,
+        )
+        .unwrap();
         let FileBacking::Memory(exefs_code) = exefs.backing else {
             panic!("the update ExeFS code must be exposed as in-memory bytes");
         };
         assert_eq!(exefs_code, update_code);
         assert_ne!(exefs_code, base_code);
 
-        let code = ncch_kind_file(&title, update_title, SELF_NCCH_CODE, true, None).unwrap();
+        let code = ncch_kind_file(
+            &title,
+            update_title,
+            SELF_NCCH_CODE,
+            true,
+            NcchCodeSource::Runtime,
+            None,
+        )
+        .unwrap();
         let FileBacking::Memory(runtime_code) = code.backing else {
             panic!("the runtime executable code must be exposed as in-memory bytes");
         };
@@ -1381,7 +1427,15 @@ mod executable_code_tests {
         assert_eq!(runtime_code, title.code().unwrap());
 
         // A base-title ExeFS request must continue to return the base .code.
-        let base_exefs = ncch_kind_file(&title, &title, SELF_NCCH_EXEFS, false, None).unwrap();
+        let base_exefs = ncch_kind_file(
+            &title,
+            &title,
+            SELF_NCCH_EXEFS,
+            false,
+            NcchCodeSource::SelectedNcch,
+            None,
+        )
+        .unwrap();
         let FileBacking::Memory(base_exefs_code) = base_exefs.backing else {
             panic!("the base ExeFS code must be exposed as in-memory bytes");
         };
