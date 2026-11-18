@@ -1496,6 +1496,9 @@ struct BoundTexture {
     /// the texture decoded, row by row from the top, none when it is drawn
     /// unless it reaches past the rows drawn. its smaller sizes follow.
     texels: Arc<[[u8; 4]]>,
+    /// the six faces of a native PICA cube texture, in +X,-X,+Y,-Y,+Z,-Z order
+    cube_faces: Option<[Arc<[[u8; 4]]>; 6]>,
+    cube_side: Option<u32>,
     drawn: Option<DrawnTexture>,
     /// bilinear rather than point sampling when magnifying.
     linear: bool,
@@ -2121,6 +2124,8 @@ fn empty_texture() -> BoundTexture {
     static TEXELS: std::sync::OnceLock<Arc<[[u8; 4]]>> = std::sync::OnceLock::new();
     BoundTexture {
         texels: TEXELS.get_or_init(|| Arc::from([[0u8; 4]].as_slice())).clone(),
+        cube_faces: None,
+        cube_side: None,
         drawn: None,
         linear: false,
         wrap_s: Wrap::Repeat,
@@ -2210,6 +2215,8 @@ fn bind_texture<M: GpuMemory>(
         let texels = cache.cube_atlas((addresses, format, width, levels), faces, format, width, levels);
         return Some(BoundTexture {
             texels,
+            cube_faces: Some(faces),
+            cube_side: Some(width),
             drawn: None,
             linear: parameters & 0x2 != 0,
             wrap_s: Wrap::ClampToEdge,
@@ -2260,6 +2267,8 @@ fn bind_texture<M: GpuMemory>(
     let config = registers[base + 2];
     Some(BoundTexture {
         texels,
+        cube_faces: None,
+        cube_side: None,
         drawn,
         linear: config & 0x2 != 0,
         wrap_t: Wrap::from_raw(config >> 8),
@@ -4184,6 +4193,8 @@ mod tests {
         let texture = |wrap: Wrap| BoundTexture {
             drawn: None,
             texels: vec![[0xFF; 4]; 8 * 8].into(),
+            cube_faces: None,
+            cube_side: None,
             linear: false,
             wrap_s: wrap,
             wrap_t: wrap,

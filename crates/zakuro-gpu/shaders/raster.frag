@@ -59,6 +59,7 @@ layout(constant_id = 29) const uint DYNAMIC = 0u;
 layout(set = 0, binding = 0) uniform sampler2D texture0;
 layout(set = 0, binding = 1) uniform sampler2D texture1;
 layout(set = 0, binding = 2) uniform sampler2D texture2;
+layout(set = 0, binding = 8) uniform samplerCube texture0_cube;
 
 struct Light {
     vec4 specular0;
@@ -144,87 +145,8 @@ vec4 unpack_color(uint value) {
 // Transform derivatives analytically: implicit derivatives of a discontinuous
 // face index otherwise create extreme LOD changes and skybox flicker.
 vec4 sample_cube(vec3 direction) {
-    vec3 dx = dFdx(direction);
-    vec3 dy = dFdy(direction);
-    vec3 magnitude = abs(direction);
-    float major = 1.0;
-    float major_dx = 0.0;
-    float major_dy = 0.0;
-    uint face = 0u;
-    vec2 axes = vec2(0.0);
-    vec2 axes_dx = vec2(0.0);
-    vec2 axes_dy = vec2(0.0);
-
-    if (magnitude.x > magnitude.y && magnitude.x > magnitude.z) {
-        major = direction.x;
-        major_dx = dx.x;
-        major_dy = dy.x;
-        if (direction.x > 0.0) {
-            face = 0u;
-            axes = vec2(-direction.z, -direction.y);
-            axes_dx = vec2(-dx.z, -dx.y);
-            axes_dy = vec2(-dy.z, -dy.y);
-        } else {
-            face = 1u;
-            axes = vec2(-direction.z, direction.y);
-            axes_dx = vec2(-dx.z, dx.y);
-            axes_dy = vec2(-dy.z, dy.y);
-        }
-    } else if (magnitude.y > magnitude.z) {
-        major = direction.y;
-        major_dx = dx.y;
-        major_dy = dy.y;
-        if (direction.y > 0.0) {
-            face = 2u;
-            axes = vec2(direction.x, direction.z);
-            axes_dx = vec2(dx.x, dx.z);
-            axes_dy = vec2(dy.x, dy.z);
-        } else {
-            face = 3u;
-            axes = vec2(-direction.x, direction.z);
-            axes_dx = vec2(-dx.x, dx.z);
-            axes_dy = vec2(-dy.x, dy.z);
-        }
-    } else {
-        major = direction.z;
-        major_dx = dx.z;
-        major_dy = dy.z;
-        if (direction.z > 0.0) {
-            face = 4u;
-            axes = vec2(direction.x, -direction.y);
-            axes_dx = vec2(dx.x, -dx.y);
-            axes_dy = vec2(dy.x, -dy.y);
-        } else {
-            face = 5u;
-            axes = vec2(direction.x, direction.y);
-            axes_dx = vec2(dx.x, dy.x);
-            axes_dy = vec2(dy.x, dy.y);
-        }
-    }
-
-    if (abs(major) < 1e-8) {
-        return texture(texture0, vec2(0.5, 0.5));
-    }
-    float denominator = major * major;
-    vec2 face_uv = axes / major * 0.5 + 0.5;
-    vec2 face_dx = (axes_dx * major - axes * major_dx) * (0.5 / denominator);
-    vec2 face_dy = (axes_dy * major - axes * major_dy) * (0.5 / denominator);
-    vec2 atlas_size = vec2(textureSize(texture0, 0));
-    float face_size = max(atlas_size.x / 3.0, 1.0);
-    float rho = max(length(vec2(face_dx.x / 3.0, face_dx.y / 2.0) * atlas_size),
-                    length(vec2(face_dy.x / 3.0, face_dy.y / 2.0) * atlas_size));
-    float requested_lod = log2(max(rho, 1.0)) + uintBitsToFloat(units[0].z);
-    float last_level = float(max(textureQueryLevels(texture0) - 1, 0));
-    float sampled_level = clamp(ceil(max(requested_lod, 0.0)), 0.0, last_level);
-    float half_texel = 0.5 * exp2(sampled_level) / face_size;
-    face_uv = clamp(face_uv, vec2(half_texel), vec2(1.0 - half_texel));
-
-    vec2 atlas_uv = vec2((float(face % 3u) + face_uv.x) / 3.0,
-                         (float(face / 3u) + face_uv.y) / 2.0);
-    vec2 st = vec2(atlas_uv.x, 1.0 - atlas_uv.y);
-    vec2 gradient_x = vec2(face_dx.x / 3.0, -face_dx.y / 2.0);
-    vec2 gradient_y = vec2(face_dy.x / 3.0, -face_dy.y / 2.0);
-    return textureGrad(texture0, st, gradient_x, gradient_y);
+    // Use Vulkan's native cube lookup for face selection, seam-aware filtering and LOD.
+    return texture(texture0_cube, direction);
 }
 
 // a texture unit's sample, with v = 0 at the bottom row as the PICA has it

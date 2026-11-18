@@ -227,7 +227,7 @@ struct Set {
 /// the bindings of the draws' descriptor set, three textures, the
 /// uniforms, the tables, then the program, its uniforms and the inputs of
 /// a draw the GPU shades.
-const BINDINGS: usize = 8;
+const BINDINGS: usize = 9;
 
 /// a vertex array a draw read, what memory gave to tell whether something
 /// wrote over it since, and where the heap has it once it was seen the
@@ -260,6 +260,8 @@ struct Recorded {
     logic_op: Option<LogicOp>,
     views: [vk::ImageView; 3],
     samplers: [vk::Sampler; 3],
+    cube_view: vk::ImageView,
+    cube_sampler: vk::Sampler,
     uniforms: u64,
     tables: u64,
     /// what the vertex shader reads, for a draw the GPU shades.
@@ -962,6 +964,8 @@ struct Texture {
     image: Image,
     /// holds the decoded texels the key points at, so the key stays theirs.
     _texels: Arc<[[u8; 4]]>,
+    /// retain the six source faces while a cached cube image exists.
+    _cube_faces: Option<[Arc<[[u8; 4]]>; 6]>,
     used: u64,
 }
 
@@ -1659,8 +1663,10 @@ pub struct Hardware {
     pushed: [Option<[u64; 3]>; BINDINGS],
     readback: Option<Buffer>,
     surfaces: Vec<Surface>,
-    /// by the address of the decoded texels.
+    /// by the address of the decoded 2D texels.
     textures: QuickMap<usize, Texture>,
+    /// by the six source faces, in PICA cube-face order.
+    cube_textures: QuickMap<[usize; 6], Texture>,
     /// textures copied from surfaces, by what they are.
     copies: QuickMap<DrawnTexture, Copied>,
     /// texture pack pictures, by the hash of the textures they replace.
@@ -1684,8 +1690,10 @@ pub struct Hardware {
     replacing_from: u64,
     /// the widest or highest image the GPU makes.
     max_image_size: u32,
-    /// what unused texture units sample.
+    /// what unused 2D texture units sample.
     blank: Image,
+    /// a valid cube-compatible descriptor when unit 0 is not a cube map.
+    blank_cube: Image,
     /// the tables' generation and where the batch copied them.
     tables: Option<((u64, u64, u64, Read), u64)>,
     /// a hash of each lighting table, with the generation it was taken
@@ -1790,17 +1798,17 @@ impl Hardware {
 
             // the fragment stages', then the program, what else it reads and
             // the inputs of the vertex shader
-            let bindings: Vec<_> = (0..8)
+            let bindings: Vec<_> = (0..BINDINGS as u32)
                 .map(|binding| {
                     vk::DescriptorSetLayoutBinding::default()
                         .binding(binding)
                         .descriptor_type(match binding {
-                            0..=2 => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            0..=2 | 8 => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                             3 => vk::DescriptorType::UNIFORM_BUFFER,
                             _ => vk::DescriptorType::STORAGE_BUFFER,
                         })
                         .descriptor_count(1)
-                        .stage_flags(if binding < 5 { vk::ShaderStageFlags::FRAGMENT } else { vk::ShaderStageFlags::VERTEX })
+                        .stage_flags(if binding < 5 || binding == 8 { vk::ShaderStageFlags::FRAGMENT } else { vk::ShaderStageFlags::VERTEX })
                 })
                 .collect();
             let set_layout = device
@@ -1863,6 +1871,7 @@ impl Hardware {
                 in_flight: VecDeque::with_capacity(IN_FLIGHT),
                 free: spares.into_iter().map(|(commands, fence)| Frame { commands, fence, ring: unmade(), pending: None }).collect(),
                 blank: Image { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
+                blank_cube: Image { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
                 _shared: shared,
                 direct,
                 device,
@@ -1926,6 +1935,7 @@ impl Hardware {
                 readback: None,
                 surfaces: Vec::new(),
                 textures: QuickMap::default(),
+                cube_textures: QuickMap::default(),
                 copies: QuickMap::default(),
                 replaced: HashMap::new(),
                 replaced_bytes: 0,
@@ -1996,6 +2006,13 @@ impl Hardware {
             hardware.heap = hardware.buffer(HEAP_SIZE, vk::BufferUsageFlags::STORAGE_BUFFER, false)?;
             hardware.begin()?;
             hardware.blank = hardware.image(
+                1,
+                1,
+                COLOR_FORMAT,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+            hardware.blank_cube = hardware.image_cube_levels(
                 1,
                 1,
                 COLOR_FORMAT,
@@ -2182,6 +2199,77 @@ impl Hardware {
                 .image(image)
                 .subresource_range(range)];
             self.device.cmd_pipeline_barrier2(self.commands, &vk::DependencyInfo::default().image_memory_barriers(&barrier));
+            Ok(Image { image, memory, view })
+        }
+    }
+
+    /// a cube-compatible six-layer texture with a native cube image view.
+    fn image_cube_levels(
+        &self,
+        side: u32,
+        levels: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+    ) -> Result<Image, String> {
+        unsafe {
+            let image = self.device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D { width: side, height: side, depth: 1 })
+                    .mip_levels(levels)
+                    .array_layers(6)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(usage)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            ).map_err(vk_error("create a cube image"))?;
+            let requirements = self.device.get_image_memory_requirements(image);
+            let memory = match self.allocate(requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+                Ok((memory, _)) => memory,
+                Err(error) => {
+                    self.device.destroy_image(image, None);
+                    return Err(error);
+                }
+            };
+            let range = vk::ImageSubresourceRange::default()
+                .aspect_mask(aspect)
+                .level_count(levels)
+                .layer_count(6);
+            let view = self.device.bind_image_memory(image, memory, 0)
+                .map_err(vk_error("bind cube image memory"))
+                .and_then(|()| self.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::CUBE)
+                        .format(format)
+                        .subresource_range(range),
+                    None,
+                ).map_err(vk_error("create a cube image view")));
+            let view = match view {
+                Ok(view) => view,
+                Err(error) => {
+                    self.device.destroy_image(image, None);
+                    self.device.free_memory(memory, None);
+                    return Err(error);
+                }
+            };
+            let barrier = [vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(image)
+                .subresource_range(range)];
+            self.device.cmd_pipeline_barrier2(
+                self.commands,
+                &vk::DependencyInfo::default().image_memory_barriers(&barrier),
+            );
             Ok(Image { image, memory, view })
         }
     }
@@ -2918,6 +3006,81 @@ impl Hardware {
         if let Some((view, smallest)) = bound.replacement.as_ref().and_then(|material| self.replacement(material, size)) {
             return Ok((view, Some(smallest)));
         }
+
+        if let Some(faces) = &bound.cube_faces {
+            // An exact key: each cache value retains the six Arc allocations.
+            let key = std::array::from_fn(|face| Arc::as_ptr(&faces[face]) as *const u8 as usize);
+            if let Some(texture) = self.cube_textures.get_mut(&key) {
+                texture.used = self.batch;
+                return Ok((texture.image.view, None));
+            }
+            self.mark(Work::Upload, false);
+            self.end_rendering();
+            let side = bound.cube_side.ok_or("cube texture is missing its face size")?;
+            let image = self.image_cube_levels(
+                side,
+                bound.levels,
+                COLOR_FORMAT,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                vk::ImageAspectFlags::COLOR,
+            )?;
+            let face_pixels = faces[0].len();
+            if faces.iter().any(|face| face.len() != face_pixels) {
+                self.destroy_image(&image);
+                return Err("cube texture faces have different decoded lengths".to_owned());
+            }
+            let face_bytes = face_pixels as u64 * 4;
+            let total_bytes = face_bytes * 6;
+            let offset = self.stage(total_bytes, 16)?;
+            let staging = self.ring(offset, total_bytes);
+            for (face_index, face) in faces.iter().enumerate() {
+                let start = face_index * face_pixels * 4;
+                let output = &mut staging[start..start + face_pixels * 4];
+                for (out, texel) in output.chunks_exact_mut(4).zip(face.iter()) {
+                    out.copy_from_slice(texel);
+                }
+            }
+
+            let mut regions = Vec::with_capacity((bound.levels * 6) as usize);
+            let mut mip_offset = 0u64;
+            for level in 0..bound.levels {
+                let mip_side = (side >> level).max(1);
+                let mip_bytes = (mip_side * mip_side) as u64 * 4;
+                for face in 0..6u32 {
+                    regions.push(vk::BufferImageCopy::default()
+                        .buffer_offset(offset + face as u64 * face_bytes + mip_offset)
+                        .image_subresource(
+                            vk::ImageSubresourceLayers::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .mip_level(level)
+                                .base_array_layer(face)
+                                .layer_count(1),
+                        )
+                        .image_extent(vk::Extent3D { width: mip_side, height: mip_side, depth: 1 }));
+                }
+                mip_offset += mip_bytes;
+            }
+            unsafe {
+                self.unfenced = true;
+                self.device.cmd_copy_buffer_to_image(
+                    self.commands,
+                    self.ring.buffer,
+                    image.image,
+                    vk::ImageLayout::GENERAL,
+                    &regions,
+                );
+            }
+            self.uploads = true;
+            let view = image.view;
+            self.cube_textures.insert(key, Texture {
+                image,
+                _texels: bound.texels.clone(),
+                _cube_faces: Some(faces.clone()),
+                used: self.batch,
+            });
+            return Ok((view, None));
+        }
+
         let key = Arc::as_ptr(&bound.texels) as *const u8 as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.batch;
@@ -2939,10 +3102,9 @@ impl Hardware {
         for (out, texel) in staging.as_chunks_mut::<4>().0.iter_mut().zip(bound.texels.iter()) {
             *out = *texel;
         }
-        // the sizes one after the other, each half the last
         let regions: Vec<vk::BufferImageCopy> = (0..bound.levels)
             .scan(offset, |start, level| {
-                let (width, height) = (bound.width >> level, bound.height >> level);
+                let (width, height) = ((bound.width >> level).max(1), (bound.height >> level).max(1));
                 let region = vk::BufferImageCopy::default()
                     .buffer_offset(*start)
                     .image_subresource(
@@ -2953,17 +3115,20 @@ impl Hardware {
                 Some(region)
             })
             .collect();
-        // SAFETY: recording, the regions lie inside the ring and the image
         unsafe {
             self.unfenced = true;
             self.device.cmd_copy_buffer_to_image(self.commands, self.ring.buffer, image.image, vk::ImageLayout::GENERAL, &regions)
         };
         self.uploads = true;
         let view = image.view;
-        self.textures.insert(key, Texture { image, _texels: bound.texels.clone(), used: self.batch });
+        self.textures.insert(key, Texture {
+            image,
+            _texels: bound.texels.clone(),
+            _cube_faces: None,
+            used: self.batch,
+        });
         Ok((view, None))
     }
-
     /// the image of a texture pack's picture for a texture of size, and
     /// the smallest of its sizes to draw with, uploaded once it has been
     /// read, none until then, or while the pictures take most of the room
@@ -3991,6 +4156,8 @@ impl Hardware {
         let mut views = [self.blank.view; 3];
         let mut twin_views = [self.blank.view; 3];
         let mut samplers = [vk::Sampler::null(); 3];
+        let mut cube_view = self.blank_cube.view;
+        let mut cube_sampler = self.sampler(Filtering::OFF)?;
         let mut lod_biases = [0i16; 3];
         let mut enabled = 0;
         for (unit, bound) in draw.textures.iter().enumerate() {
@@ -4008,7 +4175,11 @@ impl Hardware {
                         }
                         None => {
                             let (view, picture) = self.texture(bound)?;
-                            (views[unit], twin_views[unit]) = (view, view);
+                            if bound.cube_faces.is_some() {
+                                cube_view = view;
+                            } else {
+                                (views[unit], twin_views[unit]) = (view, view);
+                            }
                             match picture {
                                 Some(smallest) => Filtering::picture(bound, smallest),
                                 None => Filtering::of(bound),
@@ -4016,7 +4187,12 @@ impl Hardware {
                         }
                     };
                     lod_biases[unit] = filtering.bias;
-                    samplers[unit] = self.sampler(filtering)?;
+                    let sampler = self.sampler(filtering)?;
+                    // Keep the regular sampler2D descriptor valid too.
+                    samplers[unit] = sampler;
+                    if bound.cube_faces.is_some() {
+                        cube_sampler = sampler;
+                    }
                     enabled |= 1 << unit;
                 }
                 None => samplers[unit] = self.sampler(Filtering::OFF)?,
@@ -4241,6 +4417,8 @@ impl Hardware {
             logic_op,
             views,
             samplers,
+            cube_view,
+            cube_sampler,
             uniforms: uniform_offset,
             tables,
             shaded,
@@ -4266,6 +4444,10 @@ impl Hardware {
                 .image_view(r.views[unit])
                 .image_layout(vk::ImageLayout::GENERAL)]
         });
+        let cube_info = [vk::DescriptorImageInfo::default()
+            .sampler(r.cube_sampler)
+            .image_view(r.cube_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
         let uniform_info = [vk::DescriptorBufferInfo::default().buffer(self.ring.buffer).offset(r.uniforms).range(UNIFORM_SIZE)];
         let tables_info = [vk::DescriptorBufferInfo::default().buffer(self.ring.buffer).offset(r.tables).range(TABLES_SIZE)];
         let vertex_infos = r.shaded.map(|staged| {
@@ -4284,6 +4466,7 @@ impl Hardware {
         for (slot, (&view, &sampler)) in bound.iter_mut().zip(r.views.iter().zip(&r.samplers)) {
             *slot = Some([vk::Handle::as_raw(view), vk::Handle::as_raw(sampler), 0]);
         }
+        bound[8] = Some([vk::Handle::as_raw(r.cube_view), vk::Handle::as_raw(r.cube_sampler), 0]);
         bound[3] = Some([vk::Handle::as_raw(self.ring.buffer), r.uniforms, UNIFORM_SIZE]);
         bound[4] = Some([vk::Handle::as_raw(self.ring.buffer), r.tables, TABLES_SIZE]);
         if let Some(infos) = &vertex_infos {
@@ -4302,6 +4485,7 @@ impl Hardware {
             writes[count] = match (binding, &vertex_infos) {
                 (0..=2, _) => write.descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image_infos[binding]),
                 (3, _) => write.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&uniform_info),
+                (8, _) => write.descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&cube_info),
                 (4, _) => write.descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&tables_info),
                 (_, Some(infos)) => write.descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&infos[binding - 5]),
                 (_, None) => unreachable!("bound only for a draw the GPU shades"),
@@ -5436,6 +5620,15 @@ impl Hardware {
                 self.destroy_image(&texture.image);
             }
         }
+        let stale_cubes: Vec<[usize; 6]> = self.cube_textures.iter()
+            .filter(|(_, texture)| batch - texture.used > 600)
+            .map(|(&key, _)| key)
+            .collect();
+        for key in stale_cubes {
+            if let Some(texture) = self.cube_textures.remove(&key) {
+                self.destroy_image(&texture.image);
+            }
+        }
         for twin in [false, true] {
             let stale: Vec<DrawnTexture> = self.copies(twin).iter().filter(|(_, c)| batch - c.used > 600).map(|(&k, _)| k).collect();
             for key in stale {
@@ -5835,7 +6028,7 @@ impl Drop for Hardware {
                 save_pipeline_cache(&self.device, self.pipeline_cache, path);
             }
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
-            for texture in self.textures.values() {
+            for texture in self.textures.values().chain(self.cube_textures.values()) {
                 self.destroy_image(&texture.image);
             }
             for copy in self.copies.values().chain(self.twin_copies.values()) {
@@ -5855,6 +6048,7 @@ impl Drop for Hardware {
                 }
             }
             self.destroy_image(&self.blank);
+            self.destroy_image(&self.blank_cube);
             let captures = self.surfaces.iter().flat_map(|s| [&s.capture, &s.screen]).filter_map(|c| c.as_ref().map(|c| &c.buffer));
             let rings = self.free.iter().chain(&self.in_flight).map(|frame| &frame.ring);
             let buffers = [Some(&self.ring), Some(&self.heap), self.readback.as_ref()].into_iter().flatten().chain(rings);
