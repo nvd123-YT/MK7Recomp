@@ -1069,6 +1069,16 @@ fn get_system_tick(system: &mut System) {
 /// ticks between two svcGetSystemTick calls in a row on the console.
 pub(crate) const SYSTEM_TICK_COST: u64 = 150;
 
+/// host monotonic time in nanoseconds, like Citra's HOST_TICK value.
+fn host_tick() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 /// svcGetSystemInfo, r1 = type, r2 = parameter.
 fn get_system_info(system: &mut System) {
     let kind = system.cpu.regs[1];
@@ -1096,10 +1106,11 @@ fn get_system_info(system: &mut System) {
         (2, 0) => system.kernel.live_thread_count() as u64,
         // Five core processes are launched directly by the native kernel.
         (26, _) => 5,
-        // Citra/Azahar extension: CTGP-7 checks this identifier and accepts
-        // 2 as the Azahar-compatible runtime. Upstream Citra reports 1;
-        // returning 0 leaves CTGP unable to select its supported code path.
+        // Citra/Azahar extension used by CTGP-7 and other homebrew.
+        // 2 identifies the Azahar-compatible runtime; upstream Citra reports 1.
         (0x0002_0000, 0) => 2,
+        (0x0002_0000, 1) => host_tick(),
+        (0x0002_0000, 2) => u64::from(system.emulation_speed),
         _ => {
             log::debug!("svcGetSystemInfo({kind}, {param}) is not implemented");
             0
@@ -1140,7 +1151,13 @@ fn kernel_set_state(system: &mut System) {
     let value = system.cpu.regs[1];
     match state {
         KERNEL_STATE_CITRA_EMULATION_SPEED => {
-            log::debug!("svcKernelSetState: CTGP requested emulation speed {value}%");
+            let requested = value as u16;
+            // Citra/Azahar use 0xFFFF as a reset-to-normal sentinel.
+            system.emulation_speed = if requested == u16::MAX { 100 } else { requested };
+            log::debug!(
+                "svcKernelSetState: emulation speed is now {}%",
+                system.emulation_speed
+            );
         }
         KERNEL_STATE_REBOOT => {
             log::warn!("svcKernelSetState requested a reboot; reboot is not implemented");
