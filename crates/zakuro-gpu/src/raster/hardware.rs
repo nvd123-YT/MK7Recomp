@@ -3096,7 +3096,7 @@ impl Hardware {
             .mag_filter(filter(filtering.magnify))
             .min_filter(filter(filtering.minify))
             .mipmap_mode(between)
-            .mip_lod_bias((filtering.bias as f32 / 256.0).clamp(-self.max_bias, self.max_bias))
+            .mip_lod_bias(0.0)
             .address_mode_u(mode(filtering.s))
             .address_mode_v(mode(filtering.t))
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
@@ -3991,6 +3991,7 @@ impl Hardware {
         let mut views = [self.blank.view; 3];
         let mut twin_views = [self.blank.view; 3];
         let mut samplers = [vk::Sampler::null(); 3];
+        let mut lod_biases = [0i16; 3];
         let mut enabled = 0;
         for (unit, bound) in draw.textures.iter().enumerate() {
             match bound {
@@ -4014,6 +4015,7 @@ impl Hardware {
                             }
                         }
                     };
+                    lod_biases[unit] = filtering.bias;
                     samplers[unit] = self.sampler(filtering)?;
                     enabled |= 1 << unit;
                 }
@@ -4054,8 +4056,9 @@ impl Hardware {
         }
         let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
         words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
-        for base in TEXTURE_UNIT_BASES {
-            words.extend([r[base + 2], r[base], 0, 0]);
+        for (unit, base) in TEXTURE_UNIT_BASES.into_iter().enumerate() {
+            // The fragment shader applies the PICA's explicit derivative-based LOD bias.
+            words.extend([r[base + 2], r[base], lod_biases[unit] as i32 as u32, 0]);
         }
         let depth_flags = depth_map.w_buffer as u32 | (shaded.is_some() as u32) << 1;
         // the depth map goes through the viewport where it fits, and what

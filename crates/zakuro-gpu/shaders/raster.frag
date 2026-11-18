@@ -140,25 +140,45 @@ vec4 unpack_color(uint value) {
     return unpackUnorm4x8(value);
 }
 
+// Azahar's PICA LOD formula: the largest component of the screen-space
+// derivatives of texture coordinates measured in texels.
+float pica_lod(vec2 coordinates) {
+    vec2 derivatives = max(abs(dFdx(coordinates)), abs(dFdy(coordinates)));
+    return log2(max(derivatives.x, derivatives.y));
+}
+
 // a texture unit's sample, with v = 0 at the bottom row as the PICA has it
 // and the border color outside the texture where the unit clamps to it
-vec4 sample_unit(uint unit, vec2 uv) {
+vec4 sample_unit(uint unit, vec2 uv, bool implicit_lod) {
     uint config = units[unit].x;
     uint wrap_t = (config >> 8) & 7u;
     uint wrap_s = (config >> 12) & 7u;
     // precise as the combiners are. the coordinate itself the driver may
     // still interpolate a hair apart from one shader to another
     precise vec2 st = vec2(uv.x, 1.0 - uv.y);
+    // Use the same explicit LOD calculation as Azahar for ordinary 2D
+    // textures. Projection2D retains implicit LOD, as in Azahar's TODO path.
+    vec2 dimensions;
+    if (unit == 0u) {
+        dimensions = vec2(textureSize(texture0, 0));
+    } else if (unit == 1u) {
+        dimensions = vec2(textureSize(texture1, 0));
+    } else {
+        dimensions = vec2(textureSize(texture2, 0));
+    }
+    float bias = float(int(units[unit].z)) / 256.0;
+    float level = pica_lod(st * dimensions) + bias;
+
     // sampled before the border is decided on for each fragment, so that a
     // texture pack's picture picks which of its sizes to draw with from all
     // of a fragment's neighbours
     vec4 sampled;
     if (unit == 0u) {
-        sampled = texture(texture0, st);
+        sampled = implicit_lod ? texture(texture0, st) : textureLod(texture0, st, level);
     } else if (unit == 1u) {
-        sampled = texture(texture1, st);
+        sampled = textureLod(texture1, st, level);
     } else {
-        sampled = texture(texture2, st);
+        sampled = textureLod(texture2, st, level);
     }
     bool border_s = (wrap_s & 3u) == 1u && (st.x < 0.0 || st.x >= 1.0);
     bool border_t = (wrap_t & 3u) == 1u && (st.y < 0.0 || st.y >= 1.0);
@@ -655,13 +675,13 @@ void main() {
         // a projected texture, type 3 in bits 28-30 of the unit's
         // configuration, divides its coordinates by set 0's w
         bool projected = ((units[0].x >> 28) & 7u) == 3u;
-        textures[0] = sample_unit(0u, projected ? in_texcoords01.xy / in_view.w : in_texcoords01.xy);
+        textures[0] = sample_unit(0u, projected ? in_texcoords01.xy / in_view.w : in_texcoords01.xy, projected);
     }
     if ((texture_config & 2u) != 0u) {
-        textures[1] = sample_unit(1u, in_texcoords01.zw);
+        textures[1] = sample_unit(1u, in_texcoords01.zw, false);
     }
     if ((texture_config & 4u) != 0u) {
-        textures[2] = sample_unit(2u, (texture_config & (1u << 13)) != 0u ? in_texcoords01.zw : in_texcoord2);
+        textures[2] = sample_unit(2u, (texture_config & (1u << 13)) != 0u ? in_texcoords01.zw : in_texcoord2, false);
     }
     if ((texture_config & (1u << 10)) != 0u) {
         uint set = min((texture_config >> 8) & 3u, 2u);
