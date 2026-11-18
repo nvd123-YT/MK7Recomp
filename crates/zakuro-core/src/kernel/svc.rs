@@ -1592,11 +1592,9 @@ mod tests {
         use zakuro_fs::testing::{ncch, write};
 
         const PROGRAM_ID: u64 = 0x0004_0000_0003_0800;
-        let image = write(
-            "luma-process-info",
-            "game.cxi",
-            &ncch(PROGRAM_ID, Some(&[0xEA; 0x1800]), &[]),
-        );
+        let mut image_bytes = ncch(PROGRAM_ID, Some(&[0xEA; 0x1800]), &[]);
+        image_bytes[0x23C..0x240].copy_from_slice(&0x1001u32.to_le_bytes());
+        let image = write("luma-process-info", "game.cxi", &image_bytes);
         let mut system = System::new(crate::Config::default());
         system.title = Some(zakuro_fs::Title::load(&image).unwrap());
         system.kernel.program_id = PROGRAM_ID;
@@ -1608,6 +1606,7 @@ mod tests {
         for (kind, expected) in [
             (0x1_0001, PROGRAM_ID),
             (0x1_0002, u64::from(PAGE_SIZE)),
+            (0x1_0004, 0x2000), // 0x1001 bytes of BSS rounds up to two pages.
             (0x1_0005, 0x0010_0000),
         ] {
             system.cpu.regs[1] = handle;
