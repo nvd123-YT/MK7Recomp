@@ -1141,12 +1141,49 @@ fn is_process_handle(system: &mut System, handle: u32) -> bool {
     matches!(system.kernel.objects.get(object), Some(KObject::Process))
 }
 
-/// svcGetProcessInfo, r1 = process handle, r2 = type.
+/// whether a guest output buffer is fully mapped and writable.
+fn process_output_is_writable(memory: &crate::memory::Memory, address: u32, size: usize) -> bool {
+    let Ok(size) = u32::try_from(size) else {
+        return false;
+    };
+    let Some(end) = address.checked_add(size) else {
+        return false;
+    };
+    let mut cursor = address;
+    while cursor < end {
+        let Some(mapping) = memory.mapping_at(cursor) else {
+            return false;
+        };
+        if !mapping.permission.contains(Permission::WRITE) {
+            return false;
+        }
+        let Some(mapping_end) = mapping.base.checked_add(mapping.size) else {
+            return false;
+        };
+        if mapping_end <= cursor {
+            return false;
+        }
+        cursor = end.min(mapping_end);
+    }
+    true
+}
+
+/// writes an SVC result through its guest output pointer, as libctru expects.
+fn write_process_output(system: &mut System, address: u32, bytes: &[u8]) -> bool {
+    if !process_output_is_writable(&system.memory, address, bytes.len()) {
+        return false;
+    }
+    system.memory.write_bytes(address, bytes);
+    true
+}
+
+/// svcGetProcessInfo(r0 = output pointer, r1 = process handle, r2 = type).
 ///
 /// In addition to the standard process fields, Luma exposes the executable
 /// segment layout to plugins. CTGP-7 uses these values to locate and checksum
 /// the live game .code image before it applies its patches.
 fn get_process_info(system: &mut System) {
+    let output = system.cpu.regs[0];
     let handle = system.cpu.regs[1];
     let kind = system.cpu.regs[2];
     if !is_process_handle(system, handle) {
@@ -1190,9 +1227,11 @@ fn get_process_info(system: &mut System) {
             0
         }
     };
+    if !write_process_output(system, output, &value.to_le_bytes()) {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    }
     system.cpu.regs[0] = 0;
-    system.cpu.regs[1] = value as u32;
-    system.cpu.regs[2] = (value >> 32) as u32;
 }
 
 /// Citra/Azahar's extension SVC used by CTGP-7 to set emulation speed.
@@ -1222,23 +1261,34 @@ fn kernel_set_state(system: &mut System) {
     system.cpu.regs[0] = 0;
 }
 
+/// svcGetProcessId(r0 = output pointer, r1 = process handle).
 fn get_process_id(system: &mut System) {
+    let output = system.cpu.regs[0];
     let handle = system.cpu.regs[1];
     if !is_process_handle(system, handle) {
         system.cpu.regs[0] = invalid_handle(system, handle, "svcGetProcessId");
         return;
     }
+    let process_id = system.kernel.process_id;
+    if !write_process_output(system, output, &process_id.to_le_bytes()) {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    }
     system.cpu.regs[0] = 0;
-    system.cpu.regs[1] = system.kernel.process_id;
 }
 
-/// svcOpenProcess, r1 = process ID. The runtime currently owns one guest
-/// process, so only that process ID can be opened.
+/// svcOpenProcess(r0 = handle output pointer, r1 = process ID). The runtime
+/// currently owns one guest process, so only that process ID can be opened.
 fn open_process(system: &mut System) {
+    let output = system.cpu.regs[0];
     let process_id = system.cpu.regs[1];
     if process_id != system.kernel.process_id {
         log::warn!("svcOpenProcess: process 0x{process_id:08X} does not exist");
         system.cpu.regs[0] = PROCESS_NOT_FOUND;
+        return;
+    }
+    if !process_output_is_writable(&system.memory, output, 4) {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
         return;
     }
     let object = system.kernel.process_object();
@@ -1246,8 +1296,8 @@ fn open_process(system: &mut System) {
         .kernel
         .handles
         .create(&mut system.kernel.objects, object, "Process");
+    system.memory.write_bytes(output, &handle.to_le_bytes());
     system.cpu.regs[0] = 0;
-    system.cpu.regs[1] = handle;
 }
 
 /// Luma svcMapProcessMemoryEx. Its custom SVC ABI puts the first four
@@ -1498,24 +1548,61 @@ pub const _CURRENT_PROCESS: u32 = CURRENT_PROCESS;
 mod tests {
     use super::*;
 
+    fn map_process_svc_output(system: &mut System) -> u32 {
+        let block = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        let address = 0x0030_0000;
+        system.memory.map(
+            address,
+            block.addr,
+            PAGE_SIZE,
+            Permission::RW,
+            MemoryState::Private,
+        );
+        address
+    }
+
     #[test]
-    fn open_process_returns_a_valid_handle_for_the_guest_process() {
+    fn open_process_and_get_process_id_write_their_output_pointers() {
         let mut system = System::new(crate::Config::default());
+        let output = map_process_svc_output(&mut system);
         let process_id = system.kernel.process_id;
+
+        // An unknown process ID fails without writing an output handle.
+        system.cpu.regs[0] = output;
         system.cpu.regs[1] = process_id.wrapping_add(1);
         dispatch(&mut system, 0x33);
         assert_eq!(system.cpu.regs[0], PROCESS_NOT_FOUND);
 
+        // OpenProcess writes its handle through r0, not back into r1.
+        system.cpu.regs[0] = output;
         system.cpu.regs[1] = process_id;
         dispatch(&mut system, 0x33);
         assert_eq!(system.cpu.regs[0], 0);
-        let handle = system.cpu.regs[1];
+        let mut bytes = [0u8; 4];
+        system.memory.read_bytes(output, &mut bytes);
+        let handle = u32::from_le_bytes(bytes);
         assert!(is_process_handle(&mut system, handle));
 
+        // GetProcessId likewise writes through its output pointer.
+        system.cpu.regs[0] = output + 4;
         system.cpu.regs[1] = handle;
         dispatch(&mut system, 0x35);
         assert_eq!(system.cpu.regs[0], 0);
-        assert_eq!(system.cpu.regs[1], process_id);
+        system.memory.read_bytes(output + 4, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), process_id);
+    }
+
+    #[test]
+    fn process_svc_rejects_unmapped_output_buffers() {
+        let mut system = System::new(crate::Config::default());
+        system.cpu.regs[0] = 0x0030_0000;
+        system.cpu.regs[1] = system.kernel.process_id;
+        dispatch(&mut system, 0x33);
+        assert_eq!(system.cpu.regs[0], errors::INVALID_ADDRESS.0);
     }
 
     #[test]
@@ -1616,10 +1703,14 @@ mod tests {
         let mut system = System::new(crate::Config::default());
         system.title = Some(zakuro_fs::Title::load(&image).unwrap());
         system.kernel.program_id = PROGRAM_ID;
+        let output = map_process_svc_output(&mut system);
+        system.cpu.regs[0] = output;
         system.cpu.regs[1] = system.kernel.process_id;
         dispatch(&mut system, 0x33);
         assert_eq!(system.cpu.regs[0], 0);
-        let handle = system.cpu.regs[1];
+        let mut handle_bytes = [0u8; 4];
+        system.memory.read_bytes(output, &mut handle_bytes);
+        let handle = u32::from_le_bytes(handle_bytes);
 
         for (kind, expected) in [
             (0x1_0001, PROGRAM_ID),
@@ -1627,10 +1718,13 @@ mod tests {
             (0x1_0004, 0x2000), // 0x1001 bytes of BSS rounds up to two pages.
             (0x1_0005, 0x0010_0000),
         ] {
+            system.cpu.regs[0] = output + 8;
             system.cpu.regs[1] = handle;
             system.cpu.regs[2] = kind;
             dispatch(&mut system, 0x2B);
-            let actual = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+            let mut actual_bytes = [0u8; 8];
+            system.memory.read_bytes(output + 8, &mut actual_bytes);
+            let actual = u64::from_le_bytes(actual_bytes);
             assert_eq!(system.cpu.regs[0], 0);
             assert_eq!(actual, expected, "Luma process-info type 0x{kind:X}");
         }
