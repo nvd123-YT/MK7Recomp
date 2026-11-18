@@ -3012,9 +3012,8 @@ impl Hardware {
             return Ok((view, None, Some(smallest)));
         }
 
-        // Cubemaps need two Vulkan views: the native six-layer view used for
-        // ordinary TextureCube sampling, and the 3x2 atlas used by ShadowCube's
-        // PICA depth-comparison shader.
+        // Native cube views are used on non-Apple GPUs. Apple and ShadowCube
+        // draws instead use the decoded 3x2 PICA face atlas.
         let cube_view = if needs_cube_atlas {
             None
         } else if let Some(faces) = &bound.cube_faces {
