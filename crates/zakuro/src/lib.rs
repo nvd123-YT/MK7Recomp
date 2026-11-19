@@ -1245,6 +1245,15 @@ impl App {
                     self.library.scan(&folder);
                 }
             }
+            Action::OpenDataFolder => {
+                match &self.data_dir {
+                    Some(folder) => match std::fs::create_dir_all(folder) {
+                        Ok(()) => show_folder(folder),
+                        Err(error) => self.menus.message = Some(format!("The data folder can't be opened: {error}")),
+                    },
+                    None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
+                }
+            }
             Action::SaveState => self.save_state(),
             Action::LoadState => self.load_state(),
             Action::HostRoom => self.host_room(),
