@@ -1135,12 +1135,6 @@ fn get_system_info(system: &mut System) {
 
 /// whether handle names this runtime's single guest process.
 fn is_process_handle(system: &mut System, handle: u32) -> bool {
-    // Luma reserves 0xFFFF8001 as CUR_PROCESS_HANDLE. It is not an entry in
-    // the normal handle table, but process-info and process-memory SVCs must
-    // resolve it to the process making the call.
-    if handle == CURRENT_PROCESS {
-        return true;
-    }
     let Some(object) = system.kernel.resolve(handle) else {
         return false;
     };
