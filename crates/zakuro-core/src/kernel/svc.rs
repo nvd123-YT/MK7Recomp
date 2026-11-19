@@ -1135,6 +1135,12 @@ fn get_system_info(system: &mut System) {
 
 /// whether handle names this runtime's single guest process.
 fn is_process_handle(system: &mut System, handle: u32) -> bool {
+    // Luma reserves 0xFFFF8001 as CUR_PROCESS_HANDLE. It is not an entry in
+    // the normal handle table, but process-info and process-memory SVCs must
+    // resolve it to the process making the call.
+    if handle == CURRENT_PROCESS {
+        return true;
+    }
     let Some(object) = system.kernel.resolve(handle) else {
         return false;
     };
@@ -1592,6 +1598,70 @@ mod tests {
             MemoryState::Private,
         );
         address
+    }
+
+    #[test]
+    fn current_process_pseudo_handle_works_with_process_services_and_memory_mapping() {
+        let mut system = System::new(crate::Config::default());
+        let output = map_process_svc_output(&mut system);
+        let process_id = system.kernel.process_id;
+
+        assert!(is_process_handle(&mut system, CURRENT_PROCESS));
+
+        // Luma process queries accept CUR_PROCESS_HANDLE without opening a
+        // normal process handle first.
+        system.cpu.regs[0] = output;
+        system.cpu.regs[1] = CURRENT_PROCESS;
+        dispatch(&mut system, 0x35);
+        assert_eq!(system.cpu.regs[0], 0);
+        let mut pid_bytes = [0u8; 4];
+        system.memory.read_bytes(output, &mut pid_bytes);
+        assert_eq!(u32::from_le_bytes(pid_bytes), process_id);
+
+        system.cpu.regs[0] = output + 8;
+        system.cpu.regs[1] = CURRENT_PROCESS;
+        system.cpu.regs[2] = 0x1_0001; // title ID
+        dispatch(&mut system, 0x2B);
+        assert_eq!(system.cpu.regs[0], 0);
+        let mut title_id_bytes = [0u8; 8];
+        system.memory.read_bytes(output + 8, &mut title_id_bytes);
+        assert_eq!(u64::from_le_bytes(title_id_bytes), system.kernel.program_id);
+
+        // Luma's MapProcessMemoryEx permits the current-process pseudo-handle
+        // as either endpoint, not only a handle returned by svcOpenProcess.
+        let source = system
+            .memory
+            .phys
+            .allocate(crate::memory::MemoryRegion::Application, PAGE_SIZE)
+            .unwrap();
+        system.memory.map(
+            0x0010_0000,
+            source.addr,
+            PAGE_SIZE,
+            Permission::RW,
+            MemoryState::Private,
+        );
+        system.memory.write_bytes(0x0010_0000, b"current-process");
+        system.cpu.regs[..7].copy_from_slice(&[
+            CURRENT_PROCESS,
+            0x0020_0000,
+            CURRENT_PROCESS,
+            0x0010_0000,
+            PAGE_SIZE,
+            0,
+            0,
+        ]);
+        dispatch(&mut system, 0xA0);
+        assert_eq!(system.cpu.regs[0], 0);
+        let mut mapped = [0u8; 15];
+        system.memory.read_bytes(0x0020_0000, &mut mapped);
+        assert_eq!(&mapped, b"current-process");
+
+        system.cpu.regs[..3].copy_from_slice(&[CURRENT_PROCESS, 0x0020_0000, PAGE_SIZE]);
+        dispatch(&mut system, 0xA1);
+        assert_eq!(system.cpu.regs[0], 0);
+        assert!(system.memory.mapping_at(0x0020_0000).is_none());
+        assert!(system.memory.mapping_at(0x0010_0000).is_some());
     }
 
     #[test]
