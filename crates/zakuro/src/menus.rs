@@ -26,6 +26,8 @@ pub enum Action {
     DownloadCompiler(Vec<Wanted>),
     /// show the mods folder of the game with this program id.
     Mods(u64),
+    /// open the application's saves, logs and tools folder.
+    OpenDataFolder,
     /// stop recompiling the game with this id, or waiting to.
     CancelRecompile(u64),
     /// leave only the game recompiling now, none of those waiting.
@@ -93,6 +95,8 @@ pub struct Menus {
     /// the multiplayer window, and the password typed in it.
     pub multiplayer_open: bool,
     pub room_password: String,
+    /// text used to narrow the library to matching games.
+    search: String,
     /// the icons of the games offered for Download Play.
     dlp_icons: HashMap<u64, egui::TextureHandle>,
     /// a report on the game, to copy from the message it goes with, and
@@ -105,6 +109,15 @@ pub struct Menus {
     pub compiler_offer: Option<Vec<Wanted>>,
     icons: HashMap<PathBuf, egui::TextureHandle>,
     background: Background,
+}
+
+/// whether a library entry matches the case-insensitive search text.
+fn matches_library_entry(name: &str, publisher: &str, path: &Path, program_id: u64, query: &str) -> bool {
+    query.is_empty()
+        || name.to_lowercase().contains(query)
+        || publisher.to_lowercase().contains(query)
+        || path.to_string_lossy().to_lowercase().contains(query)
+        || format!("{program_id:016X}").to_lowercase().contains(query)
 }
 
 /// the room the player is in, as the multiplayer window shows it.
@@ -255,6 +268,16 @@ impl Menus {
                     }
                 });
             });
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [280.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Search games by name, file, or title ID…"),
+                );
+                if !self.search.is_empty() && ui.small_button("Clear").clicked() {
+                    self.search.clear();
+                }
+            });
             ui.add_space(6.0);
         });
         let background = match self.background.get(ui.ctx(), settings.background.as_deref()) {
@@ -291,8 +314,18 @@ impl Menus {
                 ui.label("No .3ds, .cci, .cxi or .cia files in that folder.");
                 return;
             }
+            let query = self.search.trim().to_lowercase();
+            let games: Vec<&Game> = library
+                .games
+                .iter()
+                .filter(|game| matches_library_entry(&game.name, &game.publisher, &game.path, game.program_id, &query))
+                .collect();
+            if games.is_empty() {
+                ui.label(format!("No games match “{}”.", self.search.trim()));
+                return;
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for game in &library.games {
+                for game in games {
                     let job = jobs.iter().find(|job| job.program_id == game.program_id);
                     // over a picture, each game gets a backing to keep it
                     // readable
@@ -720,6 +753,12 @@ impl Menus {
                     if ui.button("Choose…").clicked() {
                         actions.push(Action::ChooseFolder);
                     }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Open data folder").on_hover_text("Find your saves, save states, logs and downloaded tools.").clicked() {
+                        actions.push(Action::OpenDataFolder);
+                    }
+                    ui.label(RichText::new("Saves · logs · local tools").weak());
                 });
 
                 ui.separator();
@@ -1321,6 +1360,17 @@ mod tests {
         assert_eq!(ids(idle(games(), std::slice::from_ref(&job), &[wanted(2, "b")])), [3]);
         let job = Job::at_stage(1, Stage::Failed("no".to_owned()));
         assert_eq!(ids(idle(games(), std::slice::from_ref(&job), &[])), [1, 2, 3]);
+    }
+
+    #[test]
+    fn library_search_matches_name_publisher_file_path_and_title_id() {
+        let path = Path::new("/Games/Mario Kart 7 USA.3ds");
+        assert!(matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, "kart"));
+        assert!(matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, "NINTENDO"));
+        assert!(matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, "usa.3ds"));
+        assert!(matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, "00030800"));
+        assert!(matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, ""));
+        assert!(!matches_library_entry("Mario Kart 7", "Nintendo", path, 0x0004_0000_0003_0800, "luigi"));
     }
 
     #[test]
