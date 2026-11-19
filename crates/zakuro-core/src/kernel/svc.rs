@@ -1118,6 +1118,13 @@ fn get_system_info(system: &mut System) {
         (2, 0) => system.kernel.live_thread_count() as u64,
         // Five core processes are launched directly by the native kernel.
         (26, _) => 5,
+        // Luma CFW information queried by homebrew, including CTGP-7.
+        // Match Azahar: 0x80 reports the real application region size and
+        // 0x201 reports whether the configured system is a New 3DS.
+        (0x0001_0000, 0x80) => {
+            u64::from(system.memory.phys.region_size(crate::memory::MemoryRegion::Application))
+        }
+        (0x0001_0000, 0x201) => u64::from(system.config.new3ds),
         // Citra/Azahar extension used by CTGP-7 and other homebrew.
         // 2 identifies the Azahar-compatible runtime; upstream Citra reports 1.
         (0x0002_0000, 0) => {
@@ -1951,8 +1958,13 @@ mod tests {
         assert_eq!(query(&mut system, output, 0, 2), u64::from(PAGE_SIZE));
         assert_eq!(query(&mut system, output, 0, 3), u64::from(PAGE_SIZE));
 
-        // Azahar accepts unknown Luma CFW-info parameters and writes zero.
-        assert_eq!(query(&mut system, output, 0x0001_0000, 0x201), 0);
+        // Luma CFW info reports the configured model and real app region.
+        system.config.new3ds = true;
+        assert_eq!(query(&mut system, output, 0x0001_0000, 0x201), 1);
+        assert_eq!(
+            query(&mut system, output, 0x0001_0000, 0x80),
+            u64::from(system.memory.phys.region_size(crate::memory::MemoryRegion::Application))
+        );
     }
 
     #[test]
