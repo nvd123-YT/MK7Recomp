@@ -1643,7 +1643,8 @@ mod tests {
         system.cpu.regs[1] = system.kernel.process_id;
         dispatch(&mut system, 0x33);
         assert_eq!(system.cpu.regs[0], 0);
-        assert!(is_process_handle(&mut system, system.cpu.regs[1]));
+        let handle = system.cpu.regs[1];
+        assert!(is_process_handle(&mut system, handle));
     }
 
     #[test]
