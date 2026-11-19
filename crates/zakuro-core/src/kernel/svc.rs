@@ -1088,8 +1088,11 @@ fn host_tick() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// svcGetSystemInfo, r1 = type, r2 = parameter.
+/// svcGetSystemInfo(r0 = output pointer, r1 = type, r2 = parameter).
+/// Like the 3DS kernel and Azahar, the 64-bit result is written through r0;
+/// r0 is then replaced with the SVC result code.
 fn get_system_info(system: &mut System) {
+    let output = system.cpu.regs[0];
     let kind = system.cpu.regs[1];
     let param = system.cpu.regs[2];
     let value: u64 = match (kind, param) {
@@ -1128,9 +1131,11 @@ fn get_system_info(system: &mut System) {
             0
         }
     };
+    if !write_process_output(system, output, &value.to_le_bytes()) {
+        system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
+        return;
+    }
     system.cpu.regs[0] = 0;
-    system.cpu.regs[1] = value as u32;
-    system.cpu.regs[2] = (value >> 32) as u32;
 }
 
 /// whether handle names this runtime's single guest process.
@@ -1921,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn system_info_region_memory_usage_uses_all_then_application_system_base() {
+    fn get_system_info_writes_results_through_its_output_pointer() {
         let mut system = System::new(crate::Config::default());
         for region in [
             crate::memory::MemoryRegion::Application,
@@ -1930,50 +1935,68 @@ mod tests {
         ] {
             system.memory.phys.allocate(region, PAGE_SIZE).unwrap();
         }
+        let output = map_process_svc_output(&mut system);
 
-        fn query(system: &mut System, region: u32) -> u64 {
-            system.cpu.regs[1] = 0; // REGION_MEMORY_USAGE
-            system.cpu.regs[2] = region;
+        fn query(system: &mut System, output: u32, kind: u32, param: u32) -> u64 {
+            system.cpu.regs[..3].copy_from_slice(&[output, kind, param]);
             dispatch(system, 0x2A);
-            u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32)
+            assert_eq!(system.cpu.regs[0], 0, "svcGetSystemInfo({kind}, {param})");
+            let mut bytes = [0u8; 8];
+            system.memory.read_bytes(output, &mut bytes);
+            u64::from_le_bytes(bytes)
         }
 
-        assert_eq!(query(&mut system, 0), 3 * u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, 1), u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, 2), u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, 3), u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, output, 0, 0), 3 * u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, output, 0, 1), u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, output, 0, 2), u64::from(PAGE_SIZE));
+        assert_eq!(query(&mut system, output, 0, 3), u64::from(PAGE_SIZE));
+
+        // Azahar accepts unknown Luma CFW-info parameters and writes zero.
+        assert_eq!(query(&mut system, output, 0x0001_0000, 0x201), 0);
     }
 
     #[test]
     fn get_system_info_reports_azahar_compatibility_for_ctgp() {
         let mut system = System::new(crate::Config::default());
-        system.cpu.regs[1] = 0x0002_0000; // CITRA_INFORMATION
-        system.cpu.regs[2] = 0; // IS_CITRA
+        let output = map_process_svc_output(&mut system);
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0002_0000, 0]); // CITRA_INFORMATION / EMULATOR_ID
         dispatch(&mut system, 0x2A);
 
         assert_eq!(system.cpu.regs[0], 0);
-        assert_eq!(system.cpu.regs[1], 2, "CTGP-7 expects the Azahar compatibility identifier");
-        assert_eq!(system.cpu.regs[2], 0);
+        let mut bytes = [0u8; 8];
+        system.memory.read_bytes(output, &mut bytes);
+        assert_eq!(u64::from_le_bytes(bytes), 2, "CTGP-7 expects the Azahar compatibility identifier");
     }
 
     #[test]
     fn citra_host_tick_is_monotonic_and_emulation_speed_is_reported() {
         let mut system = System::new(crate::Config::default());
+        let output = map_process_svc_output(&mut system);
 
-        system.cpu.regs[1] = 0x0002_0000; // CITRA_INFORMATION
-        system.cpu.regs[2] = 1; // HOST_TICK
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0002_0000, 1]); // HOST_TICK
         dispatch(&mut system, 0x2A);
-        let first = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
-        system.cpu.regs[1] = 0x0002_0000; // restore CITRA_INFORMATION after the previous result
-        system.cpu.regs[2] = 1; // restore HOST_TICK
+        let mut bytes = [0u8; 8];
+        system.memory.read_bytes(output, &mut bytes);
+        let first = u64::from_le_bytes(bytes);
+
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0002_0000, 1]);
         dispatch(&mut system, 0x2A);
-        let second = u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32);
+        system.memory.read_bytes(output, &mut bytes);
+        let second = u64::from_le_bytes(bytes);
         assert!(second >= first);
 
-        system.cpu.regs[1] = 0x0002_0000; // restore CITRA_INFORMATION after HOST_TICK
-        system.cpu.regs[2] = 2; // EMULATION_SPEED
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0002_0000, 2]); // EMULATION_SPEED
         dispatch(&mut system, 0x2A);
-        assert_eq!(system.cpu.regs[1], 100);
+        system.memory.read_bytes(output, &mut bytes);
+        assert_eq!(u64::from_le_bytes(bytes), 100);
+    }
+
+    #[test]
+    fn get_system_info_rejects_an_unmapped_output_pointer() {
+        let mut system = System::new(crate::Config::default());
+        system.cpu.regs[..3].copy_from_slice(&[0x0030_0000, 0, 0]);
+        dispatch(&mut system, 0x2A);
+        assert_eq!(system.cpu.regs[0], errors::INVALID_ADDRESS.0);
     }
 
     #[test]
