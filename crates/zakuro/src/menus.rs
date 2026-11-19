@@ -26,6 +26,12 @@ pub enum Action {
     DownloadCompiler(Vec<Wanted>),
     /// show the mods folder of the game with this program id.
     Mods(u64),
+    /// open the application's saves, logs and tools folder.
+    OpenDataFolder,
+    /// open this game's savedata archive folder.
+    OpenGameSaves(u64),
+    /// open this game's save-state folder.
+    OpenGameStates(u64),
     /// stop recompiling the game with this id, or waiting to.
     CancelRecompile(u64),
     /// leave only the game recompiling now, none of those waiting.
@@ -481,6 +487,22 @@ impl Menus {
                         actions.push(Action::LoadState);
                     }
                 });
+                if let Some(program_id) = program_id {
+                    ui.horizontal(|ui| {
+                        if ui.add_sized([98.0, 26.0], egui::Button::new("Open save data"))
+                            .on_hover_text("Open Mario Kart 7's savedata archive on your computer.")
+                            .clicked()
+                        {
+                            actions.push(Action::OpenGameSaves(program_id));
+                        }
+                        if ui.add_sized([98.0, 26.0], egui::Button::new("Open save states"))
+                            .on_hover_text("Open the folder containing this game's numbered save-state slots.")
+                            .clicked()
+                        {
+                            actions.push(Action::OpenGameStates(program_id));
+                        }
+                    });
+                }
                 ui.add_space(4.0);
                 if wide(ui, "Settings") {
                     self.settings_open = true;
@@ -720,6 +742,12 @@ impl Menus {
                     if ui.button("Choose…").clicked() {
                         actions.push(Action::ChooseFolder);
                     }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Open data folder").on_hover_text("Find your saves, save states, logs and downloaded tools.").clicked() {
+                        actions.push(Action::OpenDataFolder);
+                    }
+                    ui.label(RichText::new("Saves · logs · local tools").weak());
                 });
 
                 ui.separator();
