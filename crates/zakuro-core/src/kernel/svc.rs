@@ -1095,6 +1095,7 @@ fn get_system_info(system: &mut System) {
     let output = system.cpu.regs[0];
     let kind = system.cpu.regs[1];
     let param = system.cpu.regs[2];
+    let mut result = 0;
     let value: u64 = match (kind, param) {
         // svcGetSystemInfo(REGION_MEMORY_USAGE, region), where 0 is all
         // FCRAM, then APPLICATION, SYSTEM and BASE are 1, 2 and 3.
@@ -1125,6 +1126,14 @@ fn get_system_info(system: &mut System) {
             u64::from(system.memory.phys.region_size(crate::memory::MemoryRegion::Application))
         }
         (0x0001_0000, 0x201) => if system.config.new3ds { 1 } else { 0 },
+        // Azahar's separate New 3DS probe returns success only on New 3DS.
+        // Homebrew checks the result code; the output value itself is zero.
+        (0x0001_0001, _) => {
+            if !system.config.new3ds {
+                result = errors::INVALID_ENUM_VALUE.0;
+            }
+            0
+        }
         // Citra/Azahar extension used by CTGP-7 and other homebrew.
         // 2 identifies the Azahar-compatible runtime; upstream Citra reports 1.
         (0x0002_0000, 0) => {
@@ -1142,7 +1151,7 @@ fn get_system_info(system: &mut System) {
         system.cpu.regs[0] = errors::INVALID_ADDRESS.0;
         return;
     }
-    system.cpu.regs[0] = 0;
+    system.cpu.regs[0] = result;
 }
 
 /// whether handle names this runtime's single guest process.
@@ -1965,6 +1974,27 @@ mod tests {
             query(&mut system, output, 0x0001_0000, 0x80),
             u64::from(system.memory.phys.region_size(crate::memory::MemoryRegion::Application))
         );
+    }
+
+    #[test]
+    fn get_system_info_reports_new_3ds_compatibility_result() {
+        let mut system = System::new(crate::Config::default());
+        let output = map_process_svc_output(&mut system);
+
+        system.config.new3ds = false;
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0001_0001, 0]);
+        dispatch(&mut system, 0x2A);
+        assert_eq!(system.cpu.regs[0], errors::INVALID_ENUM_VALUE.0);
+        let mut bytes = [0u8; 8];
+        system.memory.read_bytes(output, &mut bytes);
+        assert_eq!(u64::from_le_bytes(bytes), 0);
+
+        system.config.new3ds = true;
+        system.cpu.regs[..3].copy_from_slice(&[output, 0x0001_0001, 0]);
+        dispatch(&mut system, 0x2A);
+        assert_eq!(system.cpu.regs[0], 0);
+        system.memory.read_bytes(output, &mut bytes);
+        assert_eq!(u64::from_le_bytes(bytes), 0);
     }
 
     #[test]
