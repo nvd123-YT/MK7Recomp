@@ -1879,10 +1879,13 @@ mod tests {
             u64::from(system.cpu.regs[1]) | (u64::from(system.cpu.regs[2]) << 32)
         }
 
-        assert_eq!(query(&mut system, output, 0, 0), 3 * u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, output, 0, 1), u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, output, 0, 2), u64::from(PAGE_SIZE));
-        assert_eq!(query(&mut system, output, 0, 3), u64::from(PAGE_SIZE));
+        let application_used = u64::from(system.memory.phys.region_used(crate::memory::MemoryRegion::Application));
+        let system_used = u64::from(system.memory.phys.region_used(crate::memory::MemoryRegion::System));
+        let base_used = u64::from(system.memory.phys.region_used(crate::memory::MemoryRegion::Base));
+        assert_eq!(query(&mut system, output, 0, 0), application_used + system_used + base_used);
+        assert_eq!(query(&mut system, output, 0, 1), application_used);
+        assert_eq!(query(&mut system, output, 0, 2), system_used);
+        assert_eq!(query(&mut system, output, 0, 3), base_used);
 
         system.config.new3ds = true;
         assert_eq!(query(&mut system, output, 0x0001_0000, 0x201), 1);
