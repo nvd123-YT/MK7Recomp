@@ -1124,7 +1124,7 @@ fn get_system_info(system: &mut System) {
         (0x0001_0000, 0x80) => {
             u64::from(system.memory.phys.region_size(crate::memory::MemoryRegion::Application))
         }
-        (0x0001_0000, 0x201) => u64::from(system.config.new3ds),
+        (0x0001_0000, 0x201) => if system.config.new3ds { 1 } else { 0 },
         // Citra/Azahar extension used by CTGP-7 and other homebrew.
         // 2 identifies the Azahar-compatible runtime; upstream Citra reports 1.
         (0x0002_0000, 0) => {
