@@ -324,6 +324,22 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
     let mut original = [0u8; 8];
     system.memory.read_bytes(game_entry, &mut original);
     let mut boot = BOOTLOADER;
+    // Patch the bootloader's own comparison before inserting the plugin's
+    // executable-check instructions. A checker may legitimately contain the
+    // same CMP opcode, so searching the completed trampoline is ambiguous.
+    let ignore_executable_check = std::env::var("ZAKURO_3GX_IGNORE_EXE_CHECK")
+        .is_ok_and(|value| value == "1");
+    if ignore_executable_check {
+        if !force_executable_check_success(&mut boot) {
+            system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
+            system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
+            system.memory.unmap(PLUGIN_HEAP_ADDRESS, heap_size);
+            system.memory.phys.free(block);
+            return Err(LoadError::MapFailed);
+        }
+        log::warn!("3GX executable-check result override is enabled for this test session");
+    }
+
     let checksum_size = (plugin.code.len() + plugin.rodata.len() + plugin.data.len()) as u32;
     patch_bootloader(
         &mut boot,
@@ -339,18 +355,6 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
         NO_FLASH_FOR_EMULATOR,
         load_func,
     );
-    let ignore_executable_check = std::env::var("ZAKURO_3GX_IGNORE_EXE_CHECK")
-        .is_ok_and(|value| value == "1");
-    if ignore_executable_check {
-        if !force_executable_check_success(&mut boot) {
-            system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
-            system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
-            system.memory.unmap(PLUGIN_HEAP_ADDRESS, heap_size);
-            system.memory.phys.free(block);
-            return Err(LoadError::MapFailed);
-        }
-        log::warn!("3GX executable-check result override is enabled for this test session");
-    }
     if !system.memory.write_physical(block.addr + boot_offset, &boot) {
         system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
         system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
@@ -587,6 +591,42 @@ mod tests {
         assert_eq!(
             words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R1).count(),
             0
+        );
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn executable_check_override_runs_before_checker_instructions_are_inserted() {
+        let mut boot = BOOTLOADER;
+        assert!(force_executable_check_success(&mut boot));
+
+        // CTGP's embedded checker contains this same opcode. It must remain
+        // intact while only the bootloader's comparison is changed.
+        patch_bootloader(
+            &mut boot,
+            0,
+            0,
+            0,
+            &[0; 4],
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            0,
+            0,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            NO_FLASH_FOR_EMULATOR,
+            &[CHECK_RESULT_COMPARE_R0_R1],
+        );
+
+        let words: Vec<u32> = boot
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R1).count(),
+            1
         );
         assert_eq!(
             words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
