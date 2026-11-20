@@ -104,6 +104,7 @@ fn ctgp_launch_config(program_id: u64, version: u16, was_plugin_loader_enabled: 
     config[1] = match version {
         1040 => 1,       // REV0_11
         2048 | 2112 => 2, // REV1
+        3152 => 3,       // REV2 (Mario Kart 7 v1.2)
         _ => 0,
     };
     config[2] = was_plugin_loader_enabled as u32;
@@ -679,10 +680,10 @@ mod tests {
     }
 
     #[test]
-    fn ctgp_direct_launch_config_matches_official_launcher_settings() {
+    fn ctgp_direct_launch_config_selects_known_game_revisions() {
         let usa = ctgp_launch_config(0x0004_0000_0003_0800, 3152, true);
         assert_eq!(usa[0], 2); // America
-        assert_eq!(usa[1], 0); // The official launcher defaults unknown revisions to zero.
+        assert_eq!(usa[1], 3); // USA v1.2 uses CTGP's REV2 code path.
         assert_eq!(usa[2], 1);
         assert_eq!(usa[7], 0x7777_7777);
         assert!(usa.iter().enumerate().all(|(index, value)| {
