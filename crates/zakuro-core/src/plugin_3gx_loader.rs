@@ -102,9 +102,8 @@ fn ctgp_launch_config(program_id: u64, version: u16, was_plugin_loader_enabled: 
         _ => 0,
     };
     config[1] = match version {
-        1040 => 1,        // Rev0 v1.1
-        2048 | 2112 => 2, // Rev1
-        3088 | 3152 => 3, // Rev2 (v1.2)
+        1040 => 1,       // REV0_11
+        2048 | 2112 => 2, // REV1
         _ => 0,
     };
     config[2] = was_plugin_loader_enabled as u32;
@@ -683,7 +682,7 @@ mod tests {
     fn ctgp_direct_launch_config_matches_official_launcher_settings() {
         let usa = ctgp_launch_config(0x0004_0000_0003_0800, 3152, true);
         assert_eq!(usa[0], 2); // America
-        assert_eq!(usa[1], 3); // v1.2 / Rev2
+        assert_eq!(usa[1], 0); // The official launcher defaults unknown revisions to zero.
         assert_eq!(usa[2], 1);
         assert_eq!(usa[7], 0x7777_7777);
         assert!(usa.iter().enumerate().all(|(index, value)| {
@@ -699,12 +698,6 @@ mod tests {
         assert_eq!(europe[0], 1);
         assert_eq!(europe[1], 2);
 
-        let usa_v12 = ctgp_launch_config(0x0004_0000_0003_0800, 3152, true);
-        assert_eq!(usa_v12[0], 2);
-        assert_eq!(usa_v12[1], 3);
-
-        let korea_v12 = ctgp_launch_config(0x0004_0000_0003_0A00, 3088, true);
-        assert_eq!(korea_v12[1], 3);
     }
 
     #[test]
