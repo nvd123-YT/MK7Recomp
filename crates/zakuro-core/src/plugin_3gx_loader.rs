@@ -106,7 +106,7 @@ fn ctgp_launch_config(program_id: u64, version: u16, was_plugin_loader_enabled: 
         2048 | 2112 => 2, // REV1
         _ => 0,
     };
-    config[2] = u32::from(was_plugin_loader_enabled);
+    config[2] = was_plugin_loader_enabled as u32;
     config[7] = 0x7777_7777;
     config
 }
