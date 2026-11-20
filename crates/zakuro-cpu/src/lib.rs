@@ -328,8 +328,13 @@ impl Cpu {
             || self.regs[3] == self.regs[5].wrapping_add(1)
             || self.regs[3] == self.regs[7].wrapping_sub(1)
             || self.regs[3] == self.regs[7];
+        // Once the byte loop completes, CTGP selects the expected hash
+        // entry from its region/revision table. This short block runs once,
+        // unlike the byte loop, so log every instruction through the compare.
+        let post_hash_selection = (0x0700_B470..=0x0700_B4D4).contains(&pc);
         let plugin_check = (0x0700_B2D0..GAME_HASH_LOOP_START).contains(&pc)
-            || (in_game_hash_loop && at_first_or_last_hash_byte);
+            || (in_game_hash_loop && at_first_or_last_hash_byte)
+            || post_hash_selection;
         let at_load_check_entry = pc == LOAD_CHECK_START;
         let at_load_check_first_or_last_iteration =
             pc == LOAD_CHECK_LOOP
