@@ -189,6 +189,16 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
     }
 }
 
+/// the host folder containing a title's save archive.
+fn game_save_data_dir(data_dir: &Path, program_id: u64) -> PathBuf {
+    data_dir.join("user").join("savedata").join(format!("{program_id:016X}"))
+}
+
+/// the folder containing a title's numbered save states.
+fn game_state_dir(data_dir: &Path, program_id: u64) -> PathBuf {
+    data_dir.join("states").join(format!("{program_id:016X}"))
+}
+
 /// opens a folder in the system's file manager.
 fn show_folder(folder: &Path) {
     let program = if cfg!(windows) {
@@ -1245,6 +1255,39 @@ impl App {
                     self.library.scan(&folder);
                 }
             }
+            Action::OpenDataFolder => {
+                match &self.data_dir {
+                    Some(folder) => match std::fs::create_dir_all(folder) {
+                        Ok(()) => show_folder(folder),
+                        Err(error) => self.menus.message = Some(format!("The data folder can't be opened: {error}")),
+                    },
+                    None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
+                }
+            }
+            Action::OpenGameSaves(program_id) => {
+                match &self.data_dir {
+                    Some(data_dir) => {
+                        let folder = game_save_data_dir(data_dir, program_id);
+                        match std::fs::create_dir_all(&folder) {
+                            Ok(()) => show_folder(&folder),
+                            Err(error) => self.menus.message = Some(format!("Mario Kart 7's save-data folder can't be opened: {error}")),
+                        }
+                    }
+                    None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
+                }
+            }
+            Action::OpenGameStates(program_id) => {
+                match &self.data_dir {
+                    Some(data_dir) => {
+                        let folder = game_state_dir(data_dir, program_id);
+                        match std::fs::create_dir_all(&folder) {
+                            Ok(()) => show_folder(&folder),
+                            Err(error) => self.menus.message = Some(format!("Mario Kart 7's save-state folder can't be opened: {error}")),
+                        }
+                    }
+                    None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
+                }
+            }
             Action::SaveState => self.save_state(),
             Action::LoadState => self.load_state(),
             Action::HostRoom => self.host_room(),
@@ -1875,6 +1918,20 @@ const _: RendererKind = RendererKind::Software;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_folders_are_scoped_to_the_mario_kart_7_title_id() {
+        let root = Path::new("/appdata/mario-kart-7");
+        let title_id = 0x0004_0000_0003_0800;
+        assert_eq!(
+            game_save_data_dir(root, title_id),
+            root.join("user/savedata/0004000000030800")
+        );
+        assert_eq!(
+            game_state_dir(root, title_id),
+            root.join("states/0004000000030800")
+        );
+    }
 
     /// a frame goes unshown only while the game runs behind with a
     /// presenter that waits for the display, a few in a row at most.
