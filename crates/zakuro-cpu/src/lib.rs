@@ -304,6 +304,26 @@ impl Cpu {
         Exit::Timeout
     }
 
+    /// Logs the small CTGP-7 executable-validation routine when explicitly
+    /// requested. This is deliberately scoped to its checker so normal CPU
+    /// tracing and performance are unaffected.
+    #[inline]
+    fn trace_ctgp_checker(&self, pc: u32, opcode: u32) {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("ZAKURO_CTGP_TRACE").is_some())
+            || !(0x0700_B2D0..=0x0700_B3F4).contains(&pc)
+        {
+            return;
+        }
+        log::info!(
+            "CTGP checker pc={pc:08X} op={opcode:08X}              r0={:08X} r1={:08X} r2={:08X} r3={:08X}              r4={:08X} r5={:08X} r6={:08X} r7={:08X}              r8={:08X} r9={:08X} r10={:08X} r11={:08X} r12={:08X}              sp={:08X} lr={:08X} cpsr={:08X}",
+            self.regs[0], self.regs[1], self.regs[2], self.regs[3],
+            self.regs[4], self.regs[5], self.regs[6], self.regs[7],
+            self.regs[8], self.regs[9], self.regs[10], self.regs[11],
+            self.regs[12], self.regs[13], self.regs[14], self.cpsr.to_bits()
+        );
+    }
+
     /// executes exactly one instruction. always inlined, a call for every
     /// instruction the interpreter runs costs it about a tenth, and the
     /// compiler's choice flips with unrelated changes to its callers.
@@ -324,6 +344,7 @@ impl Cpu {
         } else {
             let addr = self.regs[PC];
             let opcode = bus.fetch32(addr);
+            self.trace_ctgp_checker(addr, opcode);
             self.regs[PC] = addr.wrapping_add(8);
             let exit = arm::execute(self, bus, opcode);
             if self.branched {
