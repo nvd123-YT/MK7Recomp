@@ -235,6 +235,9 @@ pub mod errors {
     /// 0xE0E01BF5
     pub const INVALID_ADDRESS: ResultCode =
         ResultCode::new(Level::Usage, Summary::InvalidArgument, Module::Os, 1013);
+    /// 0xE0E01BF4, a destination range that is already mapped or otherwise unavailable.
+    pub const INVALID_ADDRESS_STATE: ResultCode =
+        ResultCode::new(Level::Usage, Summary::InvalidState, Module::Os, 1012);
     /// 0xE0E01BF1
     pub const MISALIGNED_ADDRESS: ResultCode =
         ResultCode::new(Level::Usage, Summary::InvalidArgument, Module::Os, 1009);

@@ -304,6 +304,71 @@ impl Cpu {
         Exit::Timeout
     }
 
+    /// traces the 3GX decrypt/check trampoline and CTGP-7's own validation
+    /// routine only when explicitly requested. The embedded 3GX routine loops
+    /// over the whole plugin, so log only its entry and first/last iterations.
+    #[inline]
+    fn trace_ctgp_checker(&self, pc: u32, opcode: u32, thumb: bool) {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("ZAKURO_CTGP_TRACE").is_some()) {
+            return;
+        }
+
+        const LOAD_CHECK_START: u32 = 0x06FF_F11C;
+        const LOAD_CHECK_LOOP: u32 = 0x06FF_F130;
+        const LOAD_CHECK_CMP: u32 = 0x06FF_F160;
+        const LOAD_CHECK_END: u32 = 0x06FF_F16C;
+        // CTGP hashes the full 5.7 MiB game image in this loop. Keep the
+        // useful setup/decision trace, but sample only the first and last
+        // bytes so an enabled diagnostic trace cannot emit millions of lines.
+        const GAME_HASH_LOOP_START: u32 = 0x0700_B468;
+        const GAME_HASH_LOOP_END: u32 = 0x0700_B4E8;
+        let in_game_hash_loop = (GAME_HASH_LOOP_START..=GAME_HASH_LOOP_END).contains(&pc);
+        let at_first_or_last_hash_byte = self.regs[3] == self.regs[5]
+            || self.regs[3] == self.regs[5].wrapping_add(1)
+            || self.regs[3] == self.regs[7].wrapping_sub(1)
+            || self.regs[3] == self.regs[7];
+        // Once the byte loop completes, CTGP selects the expected hash
+        // entry from its region/revision table. This short block runs once,
+        // unlike the byte loop, so log every instruction through the compare.
+        let post_hash_selection = (0x0700_B470..=0x0700_B4D4).contains(&pc);
+        let plugin_check = (0x0700_B2D0..GAME_HASH_LOOP_START).contains(&pc)
+            || (in_game_hash_loop && at_first_or_last_hash_byte)
+            || post_hash_selection;
+        let at_load_check_entry = pc == LOAD_CHECK_START;
+        let at_load_check_first_or_last_iteration =
+            pc == LOAD_CHECK_LOOP
+                && (self.regs[0] == 0x0700_0100
+                    || self.regs[0].wrapping_add(4) == self.regs[1]);
+        let at_load_check_return =
+            (LOAD_CHECK_CMP..=LOAD_CHECK_END).contains(&pc) && self.regs[0] == self.regs[1];
+
+        if !(plugin_check
+            || at_load_check_entry
+            || at_load_check_first_or_last_iteration
+            || at_load_check_return)
+        {
+            return;
+        }
+
+        let phase = if at_load_check_entry
+            || at_load_check_first_or_last_iteration
+            || at_load_check_return
+        {
+            "3GX-LOAD-CHECK"
+        } else {
+            "CTGP-GAME-CHECK"
+        };
+        log::info!(
+            "CTGP checker phase={phase} mode={} pc={pc:08X} op={opcode:08X} r0={:08X} r1={:08X} r2={:08X} r3={:08X} r4={:08X} r5={:08X} r6={:08X} r7={:08X} r8={:08X} r9={:08X} r10={:08X} r11={:08X} r12={:08X} sp={:08X} lr={:08X} cpsr={:08X}",
+            if thumb { "THUMB" } else { "ARM" },
+            self.regs[0], self.regs[1], self.regs[2], self.regs[3],
+            self.regs[4], self.regs[5], self.regs[6], self.regs[7],
+            self.regs[8], self.regs[9], self.regs[10], self.regs[11],
+            self.regs[12], self.regs[13], self.regs[14], self.cpsr.to_bits()
+        );
+    }
+
     /// executes exactly one instruction. always inlined, a call for every
     /// instruction the interpreter runs costs it about a tenth, and the
     /// compiler's choice flips with unrelated changes to its callers.
@@ -313,6 +378,7 @@ impl Cpu {
         if self.cpsr.thumb {
             let addr = self.regs[PC];
             let opcode = bus.fetch16(addr) as u32;
+            self.trace_ctgp_checker(addr, opcode, true);
             self.regs[PC] = addr.wrapping_add(4);
             let exit = thumb::execute(self, bus, opcode);
             if self.branched {
@@ -324,6 +390,7 @@ impl Cpu {
         } else {
             let addr = self.regs[PC];
             let opcode = bus.fetch32(addr);
+            self.trace_ctgp_checker(addr, opcode, false);
             self.regs[PC] = addr.wrapping_add(8);
             let exit = arm::execute(self, bus, opcode);
             if self.branched {

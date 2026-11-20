@@ -147,7 +147,12 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
         app_bytes / (1024 * 1024)
     );
 
-    if let Some(linked) = &system.config.linked {
+    if system.services.plgldr.plugin_loaded {
+        // 3GX plugins patch the live guest .code image. A recompiled library
+        // runs native blocks which do not observe those writes, so the entire
+        // game must stay interpreted for plugin patches to take effect.
+        log::warn!("a 3GX plugin is loaded; interpreting all game code so in-memory plugin patches take effect (recompiled code is disabled)");
+    } else if let Some(linked) = &system.config.linked {
         if linked.program_id() != title.program_id() {
             log::warn!(
                 "the code linked in is for title {:016X}, not {:016X}, interpreting everything",
@@ -243,6 +248,9 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
 /// and told where the modules already loaded are, as at boot. the game goes
 /// on from where it was. an error says why it can't.
 pub fn swap_recompiled(system: &mut System, path: &std::path::Path) -> Result<(), String> {
+    if system.services.plgldr.plugin_loaded {
+        return Err("a 3GX plugin is loaded; recompiled code is disabled so its in-memory patches can take effect".to_owned());
+    }
     if system.config.linked.is_some() || !system.config.find_recompiled {
         return Err("the game runs code linked in, or a library given to it, or nothing but the interpreter".to_owned());
     }
@@ -547,6 +555,17 @@ fn map_stack(system: &mut System, stack_size: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_3gx_plugin_prevents_recompiled_code_from_being_swapped_in() {
+        let mut system = System::new(Config::default());
+        system.services.plgldr.plugin_loaded = true;
+
+        let error = swap_recompiled(&mut system, std::path::Path::new("unused.3dsrecomp"))
+            .expect_err("recompiled code must not be enabled with a live 3GX plugin");
+        assert!(error.contains("3GX plugin"));
+        assert!(error.contains("in-memory patches"));
+    }
 
     /// the id of the game the tests make, which no real game has.
     const PROGRAM_ID: u64 = 0x0004_0000_0FF3_DE01;
