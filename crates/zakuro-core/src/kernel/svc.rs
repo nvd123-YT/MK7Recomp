@@ -1146,6 +1146,9 @@ fn get_system_info(system: &mut System) {
             0
         }
     };
+    if kind == 0x0001_0000 && param == 0x201 {
+        log::info!("CTGP diagnostic: svcGetSystemInfo(0x10000, 0x201) -> result=0x{result:08X} value=0x{value:016X}");
+    }
     system.cpu.regs[0] = result;
     system.cpu.regs[1] = value as u32;
     system.cpu.regs[2] = (value >> 32) as u32;
@@ -1217,6 +1220,9 @@ fn get_process_info(system: &mut System) {
             0
         }
     };
+    if matches!(kind, 0x1_0004 | 0x1_0005 | 0x1_0007) {
+        log::info!("CTGP diagnostic: svcGetProcessInfo(type=0x{kind:08X}) -> 0x{value:016X}");
+    }
     system.cpu.regs[0] = 0;
     system.cpu.regs[1] = value as u32;
     system.cpu.regs[2] = (value >> 32) as u32;
