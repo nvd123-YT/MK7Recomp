@@ -37,13 +37,13 @@ fn ctgp_3gx_executable_check_decrypts_and_returns_the_expected_checksum() {
             pop {r6-r11, pc}
         ",
         |cpu, bus| {
-            let input = [
+            let input: [u32; 4] = [
                 0x94D2_35A3,
                 0x1234_5678,
                 0xCAFE_BABE,
                 0x0BAD_F00D,
             ];
-            let args = [0x78C8_0FC9, 0xCEA7_E683, 0xC93E_1F87, 0];
+            let args: [u32; 4] = [0x78C8_0FC9, 0xCEA7_E683, 0xC93E_1F87, 0];
 
             for (i, word) in input.iter().enumerate() {
                 bus.write_bytes(DATA_BASE + (i as u32 * 4), &word.to_le_bytes());
