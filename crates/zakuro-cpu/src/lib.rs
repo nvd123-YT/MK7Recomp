@@ -308,7 +308,7 @@ impl Cpu {
     /// requested. This is deliberately scoped to its checker so normal CPU
     /// tracing and performance are unaffected.
     #[inline]
-    fn trace_ctgp_checker(&self, pc: u32, opcode: u32) {
+    fn trace_ctgp_checker(&self, pc: u32, opcode: u32, thumb: bool) {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*ENABLED.get_or_init(|| std::env::var_os("ZAKURO_CTGP_TRACE").is_some())
             || !(0x0700_B2D0..=0x0700_B3F4).contains(&pc)
@@ -316,7 +316,8 @@ impl Cpu {
             return;
         }
         log::info!(
-            "CTGP checker pc={pc:08X} op={opcode:08X}              r0={:08X} r1={:08X} r2={:08X} r3={:08X}              r4={:08X} r5={:08X} r6={:08X} r7={:08X}              r8={:08X} r9={:08X} r10={:08X} r11={:08X} r12={:08X}              sp={:08X} lr={:08X} cpsr={:08X}",
+            "CTGP checker mode={} pc={pc:08X} op={opcode:08X} r0={:08X} r1={:08X} r2={:08X} r3={:08X} r4={:08X} r5={:08X} r6={:08X} r7={:08X} r8={:08X} r9={:08X} r10={:08X} r11={:08X} r12={:08X} sp={:08X} lr={:08X} cpsr={:08X}",
+            if thumb { "THUMB" } else { "ARM" },
             self.regs[0], self.regs[1], self.regs[2], self.regs[3],
             self.regs[4], self.regs[5], self.regs[6], self.regs[7],
             self.regs[8], self.regs[9], self.regs[10], self.regs[11],
@@ -333,6 +334,7 @@ impl Cpu {
         if self.cpsr.thumb {
             let addr = self.regs[PC];
             let opcode = bus.fetch16(addr) as u32;
+            self.trace_ctgp_checker(addr, opcode, true);
             self.regs[PC] = addr.wrapping_add(4);
             let exit = thumb::execute(self, bus, opcode);
             if self.branched {
@@ -344,7 +346,7 @@ impl Cpu {
         } else {
             let addr = self.regs[PC];
             let opcode = bus.fetch32(addr);
-            self.trace_ctgp_checker(addr, opcode);
+            self.trace_ctgp_checker(addr, opcode, false);
             self.regs[PC] = addr.wrapping_add(8);
             let exit = arm::execute(self, bus, opcode);
             if self.branched {
