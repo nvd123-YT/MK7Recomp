@@ -318,7 +318,7 @@ impl Cpu {
         const LOAD_CHECK_LOOP: u32 = 0x06FF_F130;
         const LOAD_CHECK_CMP: u32 = 0x06FF_F160;
         const LOAD_CHECK_END: u32 = 0x06FF_F16C;
-        let plugin_check = (0x0700_B2D0..=0x0700_B3F4).contains(&pc);
+        let plugin_check = (0x0700_B2D0..=0x0700_B4E8).contains(&pc);
         let at_load_check_entry = pc == LOAD_CHECK_START;
         let at_load_check_first_or_last_iteration =
             pc == LOAD_CHECK_LOOP
