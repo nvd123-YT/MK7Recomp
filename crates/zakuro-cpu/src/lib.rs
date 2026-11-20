@@ -318,7 +318,18 @@ impl Cpu {
         const LOAD_CHECK_LOOP: u32 = 0x06FF_F130;
         const LOAD_CHECK_CMP: u32 = 0x06FF_F160;
         const LOAD_CHECK_END: u32 = 0x06FF_F16C;
-        let plugin_check = (0x0700_B2D0..=0x0700_B4E8).contains(&pc);
+        // CTGP hashes the full 5.7 MiB game image in this loop. Keep the
+        // useful setup/decision trace, but sample only the first and last
+        // bytes so an enabled diagnostic trace cannot emit millions of lines.
+        const GAME_HASH_LOOP_START: u32 = 0x0700_B468;
+        const GAME_HASH_LOOP_END: u32 = 0x0700_B4E8;
+        let in_game_hash_loop = (GAME_HASH_LOOP_START..=GAME_HASH_LOOP_END).contains(&pc);
+        let at_first_or_last_hash_byte = self.regs[3] == self.regs[5]
+            || self.regs[3] == self.regs[5].wrapping_add(1)
+            || self.regs[3] == self.regs[7].wrapping_sub(1)
+            || self.regs[3] == self.regs[7];
+        let plugin_check = (0x0700_B2D0..GAME_HASH_LOOP_START).contains(&pc)
+            || (in_game_hash_loop && at_first_or_last_hash_byte);
         let at_load_check_entry = pc == LOAD_CHECK_START;
         let at_load_check_first_or_last_iteration =
             pc == LOAD_CHECK_LOOP
