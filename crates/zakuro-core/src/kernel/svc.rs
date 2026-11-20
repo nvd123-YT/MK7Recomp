@@ -1151,11 +1151,13 @@ fn get_system_info(system: &mut System) {
     system.cpu.regs[2] = (value >> 32) as u32;
 }
 
-/// Luma reports the page-rounded total for the writable region:
-/// .data bytes plus BSS, rounded once after adding both sizes. This mirrors
-/// Luma's loader calculation for CodeSetHeader::rw_size_total.
-fn luma_rw_region_size(data_size: u32, bss_size: u32) -> u32 {
-    data_size.saturating_add(bss_size).saturating_add(PAGE_MASK) & !PAGE_MASK
+/// Azahar/Citra expose the process codeset's RW segment size. Its
+/// .data allocation is already page-rounded by the exheader, and BSS gets
+/// its own separately page-rounded allocation immediately afterwards.
+fn azahar_rw_region_size(data_pages: u32, bss_size: u32) -> u32 {
+    data_pages
+        .saturating_mul(PAGE_SIZE)
+        .saturating_add(bss_size.saturating_add(PAGE_MASK) & !PAGE_MASK)
 }
 
 /// whether handle names this runtime's single guest process.
@@ -1202,7 +1204,10 @@ fn get_process_info(system: &mut System) {
             u64::from(title.exheader.rodata.num_pages.saturating_mul(PAGE_SIZE))
         }),
         0x1_0004 => system.title.as_ref().map_or(0, |title| {
-            u64::from(luma_rw_region_size(title.exheader.data.size, title.exheader.bss_size))
+            u64::from(azahar_rw_region_size(
+                title.exheader.data.num_pages,
+                title.exheader.bss_size,
+            ))
         }),
         0x1_0005 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.text.address)),
         0x1_0006 => system.title.as_ref().map_or(0, |title| u64::from(title.exheader.rodata.address)),
@@ -1554,12 +1559,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn luma_rw_region_size_rounds_data_and_bss_together() {
-        // Separately rounding these two unaligned segments would over-report
-        // one page. Luma rounds the combined .data + BSS byte count instead.
-        assert_eq!(luma_rw_region_size(0x1801, 0x17FF), 0x3000);
-        assert_eq!(luma_rw_region_size(0x2000, 0), 0x2000);
-        assert_eq!(luma_rw_region_size(0, 0), 0);
+    fn azahar_rw_region_size_matches_separate_data_and_bss_mappings() {
+        // The .data allocation uses exheader pages; BSS is rounded up on
+        // its own because the loader maps it as a separate adjacent segment.
+        assert_eq!(azahar_rw_region_size(2, 0x1801), 0x4000);
+        assert_eq!(azahar_rw_region_size(2, 0), 0x2000);
+        assert_eq!(azahar_rw_region_size(0, 0), 0);
     }
 
     fn map_process_svc_output(system: &mut System) -> u32 {
