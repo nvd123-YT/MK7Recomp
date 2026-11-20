@@ -32,6 +32,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --workspace
       - run: cargo test --release --workspace
+      - name: Package the macOS test app
+        if: runner.os == 'macOS'
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          sh packaging/macos-app.sh target/release/mario-kart-7 "$version" mario-kart-7-macos-arm64.zip
+      - name: Keep the macOS app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: mario-kart-7-macos-arm64
+          path: mario-kart-7-macos-arm64.zip
       - name: Keep the Windows program
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
