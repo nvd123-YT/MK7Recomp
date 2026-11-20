@@ -91,6 +91,26 @@ fn plugin_roots(sdmc_root: &Path, data_dir: &Path) -> [PathBuf; 4] {
     ]
 }
 
+/// Builds the launch settings that CTGP-7's official homebrew launcher
+/// passes to Luma through plg:ldr before starting the game.
+fn ctgp_launch_config(program_id: u64, version: u16, was_plugin_loader_enabled: bool) -> [u32; 32] {
+    let mut config = [0; 32];
+    config[0] = match program_id as u32 {
+        0x0003_0600 => 3, // Japan
+        0x0003_0700 => 1, // Europe
+        0x0003_0800 => 2, // America
+        _ => 0,
+    };
+    config[1] = match version {
+        1040 => 1,       // REV0_11
+        2048 | 2112 => 2, // REV1
+        _ => 0,
+    };
+    config[2] = u32::from(was_plugin_loader_enabled);
+    config[7] = 0x7777_7777;
+    config
+}
+
 /// Looks for title-specific plugins first, then a default plugin. Returns the
 /// bootloader entry point when a plugin was successfully installed.
 pub fn load_for_title(system: &mut System, title: &Title, game_entry: u32) -> Option<u32> {
@@ -144,9 +164,33 @@ pub fn load_for_title(system: &mut System, title: &Title, game_entry: u32) -> Op
     ];
     for ctgp_plugin in ctgp_plugin_paths {
         if ctgp_plugin.is_file() {
+            // The official CTGP launcher normally supplies this 32-word block
+            // through plg:ldr SetLoadSettings. A direct game launch bypasses
+            // that process, so reproduce its region/revision settings unless
+            // the caller already supplied explicit plugin parameters.
+            let previous_config = system.services.plgldr.config;
+            let supplied_config = system.services.plgldr.use_user_load_parameters;
+            if !supplied_config {
+                let version = title.update().map_or(0, |update| update.version);
+                let was_enabled = system.services.plgldr.enabled;
+                system.services.plgldr.config =
+                    ctgp_launch_config(title.program_id(), version, was_enabled);
+                log::info!(
+                    "CTGP-7 launcher config: region={} revision={} was_plugin_loader_enabled={} marker=0x{:08X}",
+                    system.services.plgldr.config[0],
+                    system.services.plgldr.config[1],
+                    system.services.plgldr.config[2],
+                    system.services.plgldr.config[7],
+                );
+            }
             match load_path(system, title, game_entry, &ctgp_plugin, false) {
                 Ok(()) => return Some(BOOTLOADER_ADDRESS),
-                Err(error) => log::warn!("CTGP-7 plugin {} was not loaded: {error}", ctgp_plugin.display()),
+                Err(error) => {
+                    if !supplied_config {
+                        system.services.plgldr.config = previous_config;
+                    }
+                    log::warn!("CTGP-7 plugin {} was not loaded: {error}", ctgp_plugin.display());
+                }
             }
         }
     }
@@ -632,6 +676,27 @@ mod tests {
             words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
             1
         );
+    }
+
+    #[test]
+    fn ctgp_direct_launch_config_matches_official_launcher_settings() {
+        let usa = ctgp_launch_config(0x0004_0000_0003_0800, 3152, true);
+        assert_eq!(usa[0], 2); // America
+        assert_eq!(usa[1], 0); // The official launcher defaults unknown revisions to zero.
+        assert_eq!(usa[2], 1);
+        assert_eq!(usa[7], 0x7777_7777);
+        assert!(usa.iter().enumerate().all(|(index, value)| {
+            matches!(index, 0 | 1 | 2 | 7) || *value == 0
+        }));
+
+        let japan = ctgp_launch_config(0x0004_0000_0003_0600, 1040, false);
+        assert_eq!(japan[0], 3);
+        assert_eq!(japan[1], 1);
+        assert_eq!(japan[2], 0);
+
+        let europe = ctgp_launch_config(0x0004_0000_0003_0700, 2112, false);
+        assert_eq!(europe[0], 1);
+        assert_eq!(europe[1], 2);
     }
 
     #[test]
