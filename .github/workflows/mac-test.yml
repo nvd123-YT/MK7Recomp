@@ -1,16 +1,10 @@
-# Builds the Apple-silicon macOS release package as a temporary Actions artifact.
+# Builds the Apple-silicon macOS package for pull requests or manual validation.
 name: Mario Kart 7 Recompiled macOS Test Build
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Build Vulkan Fragment Shaders"]
-    types: [completed]
-    branches: [main]
 
 permissions:
   contents: read

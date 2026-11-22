@@ -267,9 +267,20 @@ fn write_state_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| "the save-state path has no parent folder".to_owned())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let partial = path.with_extension("state.new");
-    std::fs::write(&partial, bytes)
-        .and_then(|()| std::fs::rename(&partial, path))
-        .map_err(|error| error.to_string())
+    std::fs::write(&partial, bytes).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&partial, path) {
+        if cfg!(windows) && path.exists() {
+            // Windows rename does not replace an existing destination. The
+            // previous bytes were backed up before this helper was called.
+            std::fs::remove_file(path).map_err(|remove_error| {
+                format!("could not replace the existing save state ({error}); removing it also failed: {remove_error}")
+            })?;
+            std::fs::rename(&partial, path).map_err(|replace_error| replace_error.to_string())?;
+        } else {
+            return Err(error.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// opens a folder in the system's file manager.

@@ -1,14 +1,9 @@
-# Builds desktop packages on main for testing; publishes only from version tags.
+# Builds desktop packages only for version tags or an explicit manual run.
 name: Mario Kart 7 Recompiled Release
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  workflow_run:
-    workflows: ["Build Vulkan Fragment Shaders"]
-    types: [completed]
-    branches: [main]
   create:
   workflow_dispatch:
     inputs:

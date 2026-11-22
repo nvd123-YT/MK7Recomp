@@ -135,9 +135,10 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 
 ## GitHub Actions and releases
 
-- **CI** runs on pushes and pull requests. It builds and tests the Rust workspace on Windows, macOS, and Linux. It also keeps a Windows executable as a temporary Actions artifact.
-- **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs on pushes to `main` and when a version tag is created or pushed. A push to `main` uploads temporary Actions artifacts only; it never publishes a GitHub Release. Version tags publish after all platform builds succeed. Manual branch builds can also set `publish` to `false`.
-- To test a branch without publishing, open **Actions → Mario Kart 7 Recompiled Release → Run workflow**, enter the branch name (such as `main`) in `tag`, and set `publish` to `false`. The packages remain temporary Actions artifacts.
+- **CI** runs on pushes and pull requests. It builds and tests the Rust workspace on Windows, macOS, and Linux. It also keeps a Windows executable as a temporary Actions artifact. Main-branch pushes run this CI without launching duplicate package builds.
+- **macOS Test Build** runs for pull requests or when started manually from Actions. The normal CI matrix already builds and tests the macOS target on main pushes.
+- **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages when a version tag is created/pushed or when you start it manually. Main pushes do not start release builds automatically.
+- To publish version `1.0.6`, create/push tag `v1.0.6` or manually run **Actions → Mario Kart 7 Recompiled Release** after the tag exists. For a non-publishing branch test, enter the branch name (such as `main`) in `tag` and set `publish` to `false`.
 
 ### Creating version 1.0.6 on GitHub
 
