@@ -15,7 +15,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-curl -fsSL -o "$work/moltenvk.tar" "$moltenvk_url"
+# MoltenVK is fetched from GitHub at package time; retry transient GitHub/DNS failures.
+curl --fail --silent --show-error --location \
+    --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+    --connect-timeout 20 --max-time 240 \
+    -o "$work/moltenvk.tar" "$moltenvk_url"
 echo "$moltenvk_sha256  $work/moltenvk.tar" | shasum -a 256 -c -
 tar xf "$work/moltenvk.tar" -C "$work" MoltenVK/LICENSE MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 
