@@ -54,7 +54,7 @@
         "hardware_rasterizer": "true",
         "resolution": "2",
         "mods_enabled": "true",
-        "plugins_3gx_enabled": "true",
+        "plugins_3gx_enabled": "false",
         "texture_packs": "true",
         "frame_interpolation": "false",
         "recompiled": "true",
@@ -242,7 +242,7 @@
       "id": "plugins_3gx_enabled",
       "label": "3GX plugins",
       "group": "Compatibility",
-      "help": "Load Luma/Citra 3GX plugins, including CTGP-7. Turn off to isolate issues caused by plugin loading.",
+      "help": "Disabled by default. Enable only when you want to load Luma/Citra 3GX plugins, including CTGP-7.",
       "choices": [
         {
           "label": "On",
@@ -258,7 +258,7 @@
         }
       ],
       "defaults": {
-        "plugins_3gx_enabled": "true"
+        "plugins_3gx_enabled": "false"
       }
     },
     {

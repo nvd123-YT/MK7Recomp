@@ -79,6 +79,8 @@ The CTGP-7 plugin has not yet been run end-to-end in this build. Its launcher fl
 
 The title-specific recompiled output stays on the user's computer. It is not included in this repository, CI artifacts, or GitHub Releases.
 
+3GX plugin loading (including CTGP-7) is **disabled by default** in the runtime and RecompLauncher settings. Enable it manually in Settings only when you intend to use a plugin.
+
 ## RecompLauncher
 
 Mario Kart 7 Recompiled is listed on [RecompLauncher](https://recomplauncher.com/game/mk7recomp). It accepts your decrypted `.3ds`, `.cci`, `.cxi` or `.cia` dump, runs the local preparation step, and launches the game without opening the normal library window. The launcher exposes supported graphics, display, emulation and audio settings. It also backs up the game's save archives, extra data, system save data, save states, cheats and settings. RecompLauncher keeps the newest ten local backups and offers cloud saves to signed-in players; individual files larger than 64 MB are not backed up by its save service.
