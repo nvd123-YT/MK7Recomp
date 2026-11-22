@@ -137,8 +137,8 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 
 - **CI** runs on pushes and pull requests. It builds and tests the Rust workspace on Windows, macOS, and Linux. It also keeps a Windows executable as a temporary Actions artifact. Main-branch pushes run this CI without launching duplicate package builds.
 - **macOS Test Build** runs for pull requests or when started manually from Actions. The normal CI matrix already builds and tests the macOS target on main pushes.
-- **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages when a version tag is created/pushed or when you start it manually. Main pushes do not start release builds automatically.
-- To publish version `1.0.6`, create/push tag `v1.0.6` or manually run **Actions → Mario Kart 7 Recompiled Release** after the tag exists. For a non-publishing branch test, enter the branch name (such as `main`) in `tag` and set `publish` to `false`.
+- **Release** is manual-only. Run **Actions → Mario Kart 7 Recompiled Release**, enter an existing tag such as `v1.0.6`, and set `publish` to `true` to build all four desktop packages and publish the GitHub Release. Main pushes and tag creation do not start release builds automatically.
+- For a non-publishing branch test, enter the branch name (such as `main`) in `tag` and set `publish` to `false`.
 
 ### Creating version 1.0.6 on GitHub
 
