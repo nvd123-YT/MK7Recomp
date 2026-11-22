@@ -199,6 +199,79 @@ fn game_state_dir(data_dir: &Path, program_id: u64) -> PathBuf {
     data_dir.join("states").join(format!("{program_id:016X}"))
 }
 
+/// backs up an existing numbered state before its contents are replaced.
+fn backup_state(path: &Path, slot: u8) -> Result<Option<PathBuf>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("could not read the previous save state: {error}"))?;
+    write_state_backup(path, slot, &bytes).map(Some)
+}
+
+/// writes one timestamped backup, then caps the history for this slot.
+fn write_state_backup(path: &Path, slot: u8, bytes: &[u8]) -> Result<PathBuf, String> {
+    let folder = path.parent().ok_or_else(|| "the save-state path has no parent folder".to_owned())?.join("backups");
+    std::fs::create_dir_all(&folder).map_err(|error| format!("could not create the save-backup folder: {error}"))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut backup = folder.join(format!("slot-{slot}-{timestamp:039}.state"));
+    let mut suffix = 1u32;
+    while backup.exists() {
+        backup = folder.join(format!("slot-{slot}-{timestamp:039}-{suffix:04}.state"));
+        suffix += 1;
+    }
+    std::fs::write(&backup, bytes).map_err(|error| format!("could not write the save backup: {error}"))?;
+    trim_state_backups(path, slot, 10);
+    Ok(backup)
+}
+
+/// lists a slot's backups in timestamp order.
+fn state_backups(path: &Path, slot: u8) -> Vec<PathBuf> {
+    let Some(parent) = path.parent() else { return Vec::new() };
+    let folder = parent.join("backups");
+    let prefix = format!("slot-{slot}-");
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    let mut backups: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate.is_file()
+                && candidate.extension().and_then(|extension| extension.to_str()) == Some("state")
+                && candidate.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+    backups.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    backups
+}
+
+/// keeps the ten newest recovery copies for a slot.
+fn trim_state_backups(path: &Path, slot: u8, keep: usize) {
+    let backups = state_backups(path, slot);
+    let remove = backups.len().saturating_sub(keep);
+    for backup in backups.into_iter().take(remove) {
+        if let Err(error) = std::fs::remove_file(&backup) {
+            log::warn!("could not remove old save backup {}: {error}", backup.display());
+        }
+    }
+}
+
+/// returns the newest backup belonging to the selected save-state slot.
+fn latest_state_backup(path: &Path, slot: u8) -> Option<PathBuf> {
+    state_backups(path, slot).pop()
+}
+
+/// writes a complete state beside its destination before replacing the slot.
+fn write_state_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "the save-state path has no parent folder".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let partial = path.with_extension("state.new");
+    std::fs::write(&partial, bytes)
+        .and_then(|()| std::fs::rename(&partial, path))
+        .map_err(|error| error.to_string())
+}
+
 /// opens a folder in the system's file manager.
 fn show_folder(folder: &Path) {
     let program = if cfg!(windows) {
@@ -887,6 +960,23 @@ impl App {
                     self.keyboard.release();
                     return;
                 }
+                KeyCode::F2 => {
+                    self.settings.mute = !self.settings.mute;
+                    self.settings.save();
+                    self.apply_volume();
+                    self.menus.toast = Some((
+                        format!("Sound {}", if self.settings.mute { "muted" } else { "unmuted" }),
+                        Instant::now(),
+                    ));
+                }
+                KeyCode::F3 => {
+                    self.settings.show_fps = !self.settings.show_fps;
+                    self.settings.save();
+                    self.menus.toast = Some((
+                        format!("FPS counter {}", if self.settings.show_fps { "on" } else { "off" }),
+                        Instant::now(),
+                    ));
+                }
                 KeyCode::F1 => {
                     self.paused = !self.paused;
                     log::info!("{}", if self.paused { "paused" } else { "resumed" });
@@ -895,6 +985,14 @@ impl App {
                 KeyCode::F10 if self.active.layout.other_screen() != self.active.layout => self.set_layout(self.active.layout.other_screen()),
                 KeyCode::F11 => self.toggle_fullscreen(),
                 KeyCode::F5 if self.game.is_some() => self.save_state(),
+                KeyCode::F6 if self.game.is_some() => {
+                    self.menus.slot = if self.menus.slot <= 1 { 9 } else { self.menus.slot - 1 };
+                    self.menus.toast = Some((format!("Save slot {}", self.menus.slot), Instant::now()));
+                }
+                KeyCode::F7 if self.game.is_some() => {
+                    self.menus.slot = self.menus.slot % 9 + 1;
+                    self.menus.toast = Some((format!("Save slot {}", self.menus.slot), Instant::now()));
+                }
                 KeyCode::F8 if self.game.is_some() => self.load_state(),
                 _ => {}
             }
@@ -1288,8 +1386,21 @@ impl App {
                     None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
                 }
             }
+            Action::OpenStateBackups(program_id) => {
+                match &self.data_dir {
+                    Some(data_dir) => {
+                        let folder = game_state_dir(data_dir, program_id).join("backups");
+                        match std::fs::create_dir_all(&folder) {
+                            Ok(()) => show_folder(&folder),
+                            Err(error) => self.menus.message = Some(format!("Mario Kart 7's save-backup folder can't be opened: {error}")),
+                        }
+                    }
+                    None => self.menus.message = Some("The application data folder isn't available on this system.".to_owned()),
+                }
+            }
             Action::SaveState => self.save_state(),
             Action::LoadState => self.load_state(),
+            Action::RestoreStateBackup => self.restore_state_backup(),
             Action::HostRoom => self.host_room(),
             Action::JoinRoom => {
                 let address = self.settings.room_address.clone();
@@ -1691,21 +1802,61 @@ impl App {
         let Some(game) = &mut self.game else { return };
         let started = Instant::now();
         let saved = game.system.save_state().and_then(|bytes| {
-            let parent = path.parent().expect("a state's file is in a folder");
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            // written beside it first, a state cut short never takes the
-            // place of a whole one
-            let partial = path.with_extension("state.new");
-            std::fs::write(&partial, &bytes).and_then(|()| std::fs::rename(&partial, &path)).map_err(|error| error.to_string())
+            let backup = backup_state(&path, slot)?;
+            write_state_file(&path, &bytes)?;
+            Ok(backup)
         });
         match saved {
-            Ok(()) => {
+            Ok(backup) => {
                 log::info!("saved the state to {} in {:?}", path.display(), started.elapsed());
-                self.menus.toast = Some((format!("Saved to slot {slot}"), Instant::now()));
+                let message = if backup.is_some() {
+                    format!("Saved to slot {slot}; previous save backed up")
+                } else {
+                    format!("Saved to slot {slot}")
+                };
+                self.menus.toast = Some((message, Instant::now()));
             }
             Err(error) => self.menus.message = Some(format!("The state could not be saved, {error}")),
         }
         // the time it took is not the game's to make up
+        self.next_frame = Instant::now();
+    }
+
+    /// restores the newest recovery copy into both the selected slot and the running game.
+    fn restore_state_backup(&mut self) {
+        let slot = self.menus.slot;
+        let Some(path) = self.state_path(slot) else { return };
+        let Some(backup) = latest_state_backup(&path, slot) else {
+            self.menus.message = Some(format!("No backup exists for save slot {slot}."));
+            return;
+        };
+        let bytes = match std::fs::read(&backup) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.menus.message = Some(format!("The backup could not be read: {error}"));
+                return;
+            }
+        };
+        let Some(game) = &mut self.game else { return };
+        let restored = (|| -> Result<(), String> {
+            let current = game.system.save_state()?;
+            write_state_backup(&path, slot, &current)?;
+            write_state_file(&path, &bytes)?;
+            game.system.load_state(&bytes).map_err(|error| format!("The backup could not be loaded: {error}"))?;
+            Ok(())
+        })();
+        match restored {
+            Ok(()) => {
+                log::info!("restored save slot {slot} from {}", backup.display());
+                self.menus.toast = Some((format!("Restored backup to slot {slot}"), Instant::now()));
+                self.menus.menu_open = false;
+                self.overlay_corner = None;
+                if let Some(audio) = &self.audio {
+                    audio.clear();
+                }
+            }
+            Err(error) => self.menus.message = Some(error),
+        }
         self.next_frame = Instant::now();
     }
 
@@ -1761,6 +1912,8 @@ impl App {
             .flatten()
             .and_then(|path| std::fs::metadata(path).ok()?.modified().ok())
             .map(ago);
+        let backup_available = self.menus.menu_open
+            && self.state_path(self.menus.slot).is_some_and(|path| latest_state_backup(&path, self.menus.slot).is_some());
         let program_id = self.program_id();
         let (Some(gui), Some(window)) = (&mut self.gui, &self.window) else { return Overlay::default() };
         let show_fps = self.settings.show_fps;
@@ -1785,7 +1938,7 @@ impl App {
         let overlay = gui.frame(window, |ui| {
             match &game {
                 Some((name, fps, recompiled)) => {
-                    actions.extend(menus.game(ui, name, program_id, show_fps.then_some(*fps), *recompiled, fast, jobs, waiting.len(), saved.as_deref()));
+                    actions.extend(menus.game(ui, name, program_id, show_fps.then_some(*fps), *recompiled, fast, jobs, waiting.len(), saved.as_deref(), backup_available));
                     if let Some(text) = &corner {
                         menus::corner(ui.ctx(), text);
                     }
@@ -1918,6 +2071,58 @@ const _: RendererKind = RendererKind::Software;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_state_backups_are_isolated_by_slot_and_latest_is_selected() {
+        let root = std::env::temp_dir().join(format!("mk7-state-backups-{}", std::process::id()));
+        let folder = root.join("backups");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&folder).unwrap();
+        let state = root.join("1.state");
+        let first = folder.join(format!("slot-1-{:039}.state", 1));
+        let second = folder.join(format!("slot-1-{:039}.state", 2));
+        let other_slot = folder.join(format!("slot-2-{:039}.state", 3));
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        std::fs::write(&other_slot, b"other").unwrap();
+
+        assert_eq!(latest_state_backup(&state, 1), Some(second.clone()));
+        assert_eq!(std::fs::read(latest_state_backup(&state, 1).unwrap()).unwrap(), b"second");
+        assert_eq!(latest_state_backup(&state, 2), Some(other_slot));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overwriting_a_save_state_keeps_the_previous_bytes_in_a_backup() {
+        let root = std::env::temp_dir().join(format!("mk7-state-overwrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("1.state");
+        std::fs::write(&state, b"old state").unwrap();
+
+        let backup = backup_state(&state, 1).unwrap().unwrap();
+        std::fs::write(&state, b"new state").unwrap();
+        assert_eq!(std::fs::read(backup).unwrap(), b"old state");
+        assert_eq!(std::fs::read(&state).unwrap(), b"new state");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn state_backup_history_keeps_only_the_newest_ten() {
+        let root = std::env::temp_dir().join(format!("mk7-state-retention-{}", std::process::id()));
+        let folder = root.join("backups");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&folder).unwrap();
+        let state = root.join("1.state");
+        for index in 0..12 {
+            std::fs::write(folder.join(format!("slot-1-{index:039}.state")), [index as u8]).unwrap();
+        }
+        trim_state_backups(&state, 1, 10);
+        let backups = state_backups(&state, 1);
+        assert_eq!(backups.len(), 10);
+        assert_eq!(backups.first().unwrap().file_name().unwrap().to_string_lossy(), format!("slot-1-{:039}.state", 2));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn save_folders_are_scoped_to_the_mario_kart_7_title_id() {

@@ -32,6 +32,8 @@ pub enum Action {
     OpenGameSaves(u64),
     /// open this game's save-state folder.
     OpenGameStates(u64),
+    /// open this game's save-state recovery backups.
+    OpenStateBackups(u64),
     /// stop recompiling the game with this id, or waiting to.
     CancelRecompile(u64),
     /// leave only the game recompiling now, none of those waiting.
@@ -43,6 +45,8 @@ pub enum Action {
     /// save the game's state to the slot chosen, or load it from there.
     SaveState,
     LoadState,
+    /// restore the newest backup of the selected save-state slot.
+    RestoreStateBackup,
     /// open a room and join it, join another's, or leave the one joined.
     HostRoom,
     JoinRoom,
@@ -413,6 +417,7 @@ impl Menus {
         jobs: &[Job],
         waiting: usize,
         saved: Option<&str>,
+        backup_available: bool,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let ctx = ui.ctx().clone();
@@ -475,6 +480,7 @@ impl Menus {
                     ui.add(egui::DragValue::new(&mut self.slot).range(1..=9).prefix("Slot "));
                     ui.label(RichText::new(saved.unwrap_or("empty")).weak());
                 });
+                ui.label(RichText::new("F2 mute · F3 FPS · F6/F7 slots · F5 save · F8 load").weak().small());
                 ui.horizontal(|ui| {
                     if ui.add_sized([98.0, 28.0], egui::Button::new("Save state")).on_hover_text("F5 saves to this slot while playing.").clicked() {
                         actions.push(Action::SaveState);
@@ -487,6 +493,13 @@ impl Menus {
                         actions.push(Action::LoadState);
                     }
                 });
+                if ui
+                    .add_enabled(backup_available, egui::Button::new("Restore previous backup").min_size(Vec2::new(200.0, 26.0)))
+                    .on_hover_text("Restore the newest recovery copy for this slot. The current running state is backed up first.")
+                    .clicked()
+                {
+                    actions.push(Action::RestoreStateBackup);
+                }
                 if let Some(program_id) = program_id {
                     ui.horizontal(|ui| {
                         if ui.add_sized([98.0, 26.0], egui::Button::new("Open save data"))
@@ -502,6 +515,12 @@ impl Menus {
                             actions.push(Action::OpenGameStates(program_id));
                         }
                     });
+                    if ui.add_sized([200.0, 26.0], egui::Button::new("Open save backups"))
+                        .on_hover_text("Browse timestamped recovery copies of overwritten save-state slots.")
+                        .clicked()
+                    {
+                        actions.push(Action::OpenStateBackups(program_id));
+                    }
                 }
                 ui.add_space(4.0);
                 if wide(ui, "Settings") {

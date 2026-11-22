@@ -19,6 +19,13 @@ This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other ga
 
 The application expects a legally obtained, decrypted dump of the game. It does not include the ROM, game code, textures, music, or other game assets.
 
+## Version 1.0.6 changes
+
+- Adds timestamped backups of replaced save-state slots, automatically retaining the newest ten backups per slot.
+- Adds one-click restoration of the newest backup; the current running state is backed up first, so restoration can be undone.
+- Adds F6/F7 save-slot cycling, F5/F8 quick save/load, F2 mute toggle, and F3 FPS-counter toggle.
+- Adds pause-menu shortcuts to browse save files and their recovery backups.
+
 ## Version 1.0.5 changes
 
 - Fixes strided GPU texture copies used by in-game display surfaces, resolving the corrupted/misaligned in-game displays seen in affected courses.
@@ -121,7 +128,7 @@ cargo test --release --workspace
 The desktop binary is written to target/release/mario-kart-7 (or .exe on Windows). The macOS package script bundles MoltenVK into the app:
 
 ~~~
-packaging/macos-app.sh target/release/mario-kart-7 1.0.5 mario-kart-7-macos-arm64.zip
+packaging/macos-app.sh target/release/mario-kart-7 1.0.6 mario-kart-7-macos-arm64.zip
 ~~~
 
 For a normal user, the prebuilt packages on the Releases page are the easiest option.
@@ -132,14 +139,14 @@ For a normal user, the prebuilt packages on the Releases page are the easiest op
 - **Release** builds Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 packages. It runs on pushes to `main` and when a version tag is created or pushed. A push to `main` uploads temporary Actions artifacts only; it never publishes a GitHub Release. Version tags publish after all platform builds succeed. Manual branch builds can also set `publish` to `false`.
 - To test a branch without publishing, open **Actions → Mario Kart 7 Recompiled Release → Run workflow**, enter the branch name (such as `main`) in `tag`, and set `publish` to `false`. The packages remain temporary Actions artifacts.
 
-### Creating version 1.0.4 on GitHub
+### Creating version 1.0.6 on GitHub
 
 1. Open the repository and select **Releases → Draft a new release**.
-2. In **Choose a tag**, type `v1.0.4`, then select **Create new tag: v1.0.4**.
-3. Set **Target** to `main` so the release tag points to the 1.0.4 implementation.
+2. In **Choose a tag**, type `v1.0.6`, then select **Create new tag: v1.0.6**.
+3. Set **Target** to `main` so the release tag points to the 1.0.6 implementation.
 4. Select **Save draft**. Creating the tag on the Releases page triggers the release build. The workflow will attach all four platform packages and publish the draft when they are ready.
 
-The Rust workspace version is `1.0.4`. The matching release tag is `v1.0.4`; leave all previous version tags unchanged.
+The Rust workspace version is `1.0.6`. The matching release tag is `v1.0.6`; leave all previous version tags unchanged.
 
 ## Attribution and legal notes
 
