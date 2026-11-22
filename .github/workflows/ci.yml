@@ -27,7 +27,7 @@ jobs:
           KEEP_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          echo "Keeping newest CI run: $KEEP_RUN_ID"
+          echo "Keeping this newest CI run: $KEEP_RUN_ID"
           gh api "repos/$REPOSITORY/actions/runs?per_page=100" --jq '.workflow_runs[] | select(.status != "completed") | .id' |
           while read -r run_id; do
             if [ "$run_id" = "$KEEP_RUN_ID" ]; then
