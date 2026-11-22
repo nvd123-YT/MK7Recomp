@@ -17,6 +17,11 @@ use crate::System;
 const BOOTLOADER_ADDRESS: u32 = PLUGIN_HEADER_ADDRESS - 0x1000;
 const BOOTLOADER_SIZE: u32 = 0x1000;
 const PLUGIN_HEADER_SIZE: u32 = 0x100;
+// The 3DS-only startup flash writes to a hardware LED register that the
+// desktop runtime does not map. Always skip that cosmetic hardware effect.
+const NO_FLASH_FOR_EMULATOR: u32 = 1;
+const CHECK_RESULT_COMPARE_R0_R1: u32 = 0xE150_0001;
+const CHECK_RESULT_COMPARE_R0_R0: u32 = 0xE150_0000;
 const BOOTLOADER: [u8; 412] = [
 0xff, 0x1f, 0x2d, 0xe9, 0x00, 0x00, 0x0f, 0xe1, 0x01, 0x00, 0x2d, 0xe9, 0xf0, 0x00, 0x8f, 0xe2,
  0x04, 0x10, 0x90, 0xe5, 0x00, 0x00, 0x90, 0xe5, 0xd4, 0x20, 0x8f, 0xe2, 0x0f, 0xe0, 0xa0, 0xe1,
@@ -86,6 +91,26 @@ fn plugin_roots(sdmc_root: &Path, data_dir: &Path) -> [PathBuf; 4] {
     ]
 }
 
+/// Builds the launch settings that CTGP-7's official homebrew launcher
+/// passes to Luma through plg:ldr before starting the game.
+fn ctgp_launch_config(program_id: u64, version: u16, was_plugin_loader_enabled: bool) -> [u32; 32] {
+    let mut config = [0; 32];
+    config[0] = match program_id as u32 {
+        0x0003_0600 => 3, // Japan
+        0x0003_0700 => 1, // Europe
+        0x0003_0800 => 2, // America
+        _ => 0,
+    };
+    config[1] = match version {
+        1040 => 1,       // REV0_11
+        2048 | 2112 | 3152 => 2, // REV1 / USA v1.2 checksum-table entry
+        _ => 0,
+    };
+    config[2] = was_plugin_loader_enabled as u32;
+    config[7] = 0x7777_7777;
+    config
+}
+
 /// Looks for title-specific plugins first, then a default plugin. Returns the
 /// bootloader entry point when a plugin was successfully installed.
 pub fn load_for_title(system: &mut System, title: &Title, game_entry: u32) -> Option<u32> {
@@ -139,9 +164,33 @@ pub fn load_for_title(system: &mut System, title: &Title, game_entry: u32) -> Op
     ];
     for ctgp_plugin in ctgp_plugin_paths {
         if ctgp_plugin.is_file() {
+            // The official CTGP launcher normally supplies this 32-word block
+            // through plg:ldr SetLoadSettings. A direct game launch bypasses
+            // that process, so reproduce its region/revision settings unless
+            // the caller already supplied explicit plugin parameters.
+            let previous_config = system.services.plgldr.config;
+            let supplied_config = system.services.plgldr.use_user_load_parameters;
+            if !supplied_config {
+                let version = title.update().map_or(0, |update| update.version);
+                let was_enabled = system.services.plgldr.enabled;
+                system.services.plgldr.config =
+                    ctgp_launch_config(title.program_id(), version, was_enabled);
+                log::info!(
+                    "CTGP-7 launcher config: region={} revision={} was_plugin_loader_enabled={} marker=0x{:08X}",
+                    system.services.plgldr.config[0],
+                    system.services.plgldr.config[1],
+                    system.services.plgldr.config[2],
+                    system.services.plgldr.config[7],
+                );
+            }
             match load_path(system, title, game_entry, &ctgp_plugin, false) {
                 Ok(()) => return Some(BOOTLOADER_ADDRESS),
-                Err(error) => log::warn!("CTGP-7 plugin {} was not loaded: {error}", ctgp_plugin.display()),
+                Err(error) => {
+                    if !supplied_config {
+                        system.services.plgldr.config = previous_config;
+                    }
+                    log::warn!("CTGP-7 plugin {} was not loaded: {error}", ctgp_plugin.display());
+                }
             }
         }
     }
@@ -319,6 +368,22 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
     let mut original = [0u8; 8];
     system.memory.read_bytes(game_entry, &mut original);
     let mut boot = BOOTLOADER;
+    // Patch the bootloader's own comparison before inserting the plugin's
+    // executable-check instructions. A checker may legitimately contain the
+    // same CMP opcode, so searching the completed trampoline is ambiguous.
+    let ignore_executable_check = std::env::var("ZAKURO_3GX_IGNORE_EXE_CHECK")
+        .is_ok_and(|value| value == "1");
+    if ignore_executable_check {
+        if !force_executable_check_success(&mut boot) {
+            system.memory.unmap(PLUGIN_HEADER_ADDRESS, exe_size as u32);
+            system.memory.unmap(BOOTLOADER_ADDRESS, BOOTLOADER_SIZE);
+            system.memory.unmap(PLUGIN_HEAP_ADDRESS, heap_size);
+            system.memory.phys.free(block);
+            return Err(LoadError::MapFailed);
+        }
+        log::warn!("3GX executable-check result override is enabled for this test session");
+    }
+
     let checksum_size = (plugin.code.len() + plugin.rodata.len() + plugin.data.len()) as u32;
     patch_bootloader(
         &mut boot,
@@ -331,7 +396,7 @@ fn load_path(system: &mut System, title: &Title, game_entry: u32, path: &Path, i
         plugin.executable_checksum,
         PLUGIN_HEADER_ADDRESS - 0xC,
         PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
-        system.services.plgldr.no_flash as u32,
+        NO_FLASH_FOR_EMULATOR,
         load_func,
     );
     if !system.memory.write_physical(block.addr + boot_offset, &boot) {
@@ -444,6 +509,26 @@ fn patch_bootloader(
     }
 }
 
+
+/// Changes the embedded result comparison so a test session can proceed
+/// regardless of the embedded executable check's return value. The check
+/// function itself still runs, and the bootloader still records success.
+fn force_executable_check_success(boot: &mut [u8; 412]) -> bool {
+    let mut compare_offset = None;
+    for (index, word) in boot.chunks_exact(4).enumerate() {
+        if u32::from_le_bytes(word.try_into().unwrap()) == CHECK_RESULT_COMPARE_R0_R1 {
+            if compare_offset.replace(index * 4).is_some() {
+                return false;
+            }
+        }
+    }
+    let Some(offset) = compare_offset else {
+        return false;
+    };
+    boot[offset..offset + 4].copy_from_slice(&CHECK_RESULT_COMPARE_R0_R0.to_le_bytes());
+    true
+}
+
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -513,6 +598,106 @@ mod tests {
         assert_eq!(roots[1], Path::new("/data/user/sdmc/plugins"));
         assert_eq!(roots[2], Path::new("/data/luma/plugins"));
         assert_eq!(roots[3], Path::new("/data/plugins"));
+    }
+
+    #[test]
+    fn emulator_bootloader_skips_the_hardware_led_flash() {
+        let mut boot = BOOTLOADER;
+        patch_bootloader(
+            &mut boot,
+            0,
+            0,
+            0,
+            &[0; 4],
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            0,
+            0,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            NO_FLASH_FOR_EMULATOR,
+            &[0xE320_F000],
+        );
+
+        let no_flash_marker = 0x118;
+        let value = u32::from_le_bytes(boot[no_flash_marker..no_flash_marker + 4].try_into().unwrap());
+        assert_eq!(value, NO_FLASH_FOR_EMULATOR);
+    }
+
+    #[test]
+    fn executable_check_override_changes_only_the_result_comparison() {
+        let mut boot = BOOTLOADER;
+        assert!(force_executable_check_success(&mut boot));
+
+        let words: Vec<u32> = boot
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R1).count(),
+            0
+        );
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn executable_check_override_runs_before_checker_instructions_are_inserted() {
+        let mut boot = BOOTLOADER;
+        assert!(force_executable_check_success(&mut boot));
+
+        // CTGP's embedded checker contains this same opcode. It must remain
+        // intact while only the bootloader's comparison is changed.
+        patch_bootloader(
+            &mut boot,
+            0,
+            0,
+            0,
+            &[0; 4],
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            0,
+            0,
+            PLUGIN_HEADER_ADDRESS + PLUGIN_HEADER_SIZE,
+            NO_FLASH_FOR_EMULATOR,
+            &[CHECK_RESULT_COMPARE_R0_R1],
+        );
+
+        let words: Vec<u32> = boot
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R1).count(),
+            1
+        );
+        assert_eq!(
+            words.iter().filter(|&&word| word == CHECK_RESULT_COMPARE_R0_R0).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ctgp_direct_launch_config_selects_known_game_revisions() {
+        let usa = ctgp_launch_config(0x0004_0000_0003_0800, 3152, true);
+        assert_eq!(usa[0], 2); // America
+        assert_eq!(usa[1], 2); // Selects the USA v1.2 checksum-table entry.
+        assert_eq!(usa[2], 1);
+        assert_eq!(usa[7], 0x7777_7777);
+        assert!(usa.iter().enumerate().all(|(index, value)| {
+            matches!(index, 0 | 1 | 2 | 7) || *value == 0
+        }));
+
+        let japan = ctgp_launch_config(0x0004_0000_0003_0600, 1040, false);
+        assert_eq!(japan[0], 3);
+        assert_eq!(japan[1], 1);
+        assert_eq!(japan[2], 0);
+
+        let europe = ctgp_launch_config(0x0004_0000_0003_0700, 2112, false);
+        assert_eq!(europe[0], 1);
+        assert_eq!(europe[1], 2);
+
     }
 
     #[test]
