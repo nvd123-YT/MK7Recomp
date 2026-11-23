@@ -2,7 +2,7 @@
 name: Mario Kart 7 Recompiled CI
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-pretendo-network
   cancel-in-progress: true
 
 on:
