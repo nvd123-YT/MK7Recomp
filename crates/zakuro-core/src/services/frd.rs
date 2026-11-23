@@ -490,17 +490,20 @@ fn make_nasc_job(
 }
 
 fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), String> {
+    let user_agent = format!("CTR FPD/{:04X}", job.fpd_version);
+    let certificate = job.certificate.to_string_lossy().into_owned();
+    let private_key = job.private_key.to_string_lossy().into_owned();
     let mut child = Command::new("curl")
         .args([
             "--silent", "--show-error",
+            "--http1.1",
             "--connect-timeout", "8", "--max-time", "25",
             "--request", "POST",
             "--header", "X-GameId: 0001DB00",
-            "--header", &format!("User-Agent: CTR FPD/{:04X}", job.fpd_version),
+            "--header", user_agent.as_str(),
             "--header", "Content-Type: application/x-www-form-urlencoded",
-            "--header", "Content-Type: application/x-www-form-urlencoded",
-            "--cert", job.certificate.to_string_lossy().as_ref(),
-            "--key", job.private_key.to_string_lossy().as_ref(),
+            "--cert", certificate.as_str(),
+            "--key", private_key.as_str(),
             "--data-binary", "@-",
             "--write-out", "\n__MK7_NASC_HTTP__%{http_code}",
             NASC_URL,
@@ -1064,7 +1067,7 @@ mod tests {
 
     #[test]
     fn nasc_response_decodes_form_and_custom_base64_fields() {
-        let fields = parse_nasc_form("returncd=MDAx&locator=MTI3LjAuMC4xOjQwNDA*&token=YWJj*") .unwrap();
+        let fields = parse_nasc_form("returncd=MDAx&locator=MTI3LjAuMC4xOjQwNDA*&token=YWJj") .unwrap();
         assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
         assert_eq!(fields.get("locator").map(String::as_str), Some("127.0.0.1:4040"));
         assert_eq!(fields.get("token").map(String::as_str), Some("abc"));
