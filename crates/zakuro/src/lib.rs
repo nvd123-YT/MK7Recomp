@@ -1030,11 +1030,27 @@ impl App {
                 if let Some((_, bound)) = self.settings.pad.all_mut().into_iter().nth(index) {
                     *bound = button;
                 }
+                self.menus.rebinding_wheel = None;
                 self.apply_settings();
             } else if button == gilrs::Button::Mode && self.game.is_some() {
                 self.menus.menu_open = !self.menus.menu_open;
                 self.keyboard.release();
             }
+        }
+
+        if let (Some(index), Some(axis)) = (self.menus.rebinding_wheel, self.gamepads.take_axis()) {
+            self.settings.wheel.device_id = Some(axis.device_id);
+            self.settings.wheel.device_name = Some(axis.device_name.clone());
+            self.settings.wheel.enabled = true;
+            match index {
+                0 => self.settings.wheel.steering = Some(axis.code),
+                1 => self.settings.wheel.accelerator = Some(axis.code),
+                2 => self.settings.wheel.brake = Some(axis.code),
+                _ => {}
+            }
+            self.menus.rebinding_wheel = None;
+            self.menus.toast = Some((format!("Bound {} to {}", ["steering", "accelerator", "brake"].get(index).copied().unwrap_or("wheel"), axis.device_name), Instant::now()));
+            self.apply_settings();
         }
     }
 
@@ -1643,7 +1659,7 @@ impl App {
         let Some(game) = &mut self.game else { return };
         let input = match &mut game.replay {
             Some(replay) => replay.input(game.frame),
-            None => self.gamepads.apply(self.keyboard.state()),
+            None => self.gamepads.apply(self.keyboard.state(), &self.settings.wheel),
         };
         game.frame += 1;
         if let Some(recorder) = &mut game.recorder {

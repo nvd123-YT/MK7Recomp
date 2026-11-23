@@ -238,13 +238,22 @@ mod tests {
     /// with no controller, or no way to ask for one, the keyboard's input
     /// goes through as it was.
     #[test]
+    fn radial_deadzone_filters_jitter_and_preserves_full_travel() {
+        assert_eq!(deadzone_pair([0.10, 0.0]), None);
+        let half = deadzone_pair([0.575, 0.0]).unwrap();
+        assert!((half[0] - 0.5).abs() < 0.001);
+        let full = deadzone_pair([1.0, 0.0]).unwrap();
+        assert!((full[0] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn no_controller_leaves_the_keyboard_alone() {
         let gamepads = Gamepads::new(PadButtons::default());
         if gamepads.gilrs.as_ref().is_some_and(|gilrs| gilrs.gamepads().next().is_some()) {
             return;
         }
         let state = InputState { buttons: PadState::A, circle_x: 1.0, circle_y: 0.0, touch: Some((1, 2)), ..InputState::default() };
-        let applied = gamepads.apply(state);
+        let applied = gamepads.apply(state, &WheelSettings::default());
         assert_eq!(applied.buttons, PadState::A);
         assert_eq!((applied.circle_x, applied.circle_y, applied.touch), (1.0, 0.0, Some((1, 2))));
     }

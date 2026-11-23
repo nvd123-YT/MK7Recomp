@@ -93,6 +93,8 @@ pub struct Menus {
     /// the controller binding waiting for a button, by its place in
     /// PadButtons::all_mut.
     pub rebinding_pad: Option<usize>,
+    /// the wheel axis waiting to be bound: steering, accelerator or brake.
+    pub rebinding_wheel: Option<usize>,
     /// something to tell the user, until they close it.
     pub message: Option<String>,
     /// something to tell the user for a moment, over the game, and since
@@ -899,6 +901,7 @@ impl Menus {
                         if ui.add_sized([110.0, 20.0], egui::Button::new(text)).clicked() {
                             self.rebinding_pad = Some(i);
                             self.rebinding = None;
+                            self.rebinding_wheel = None;
                         }
                         if i % 2 == 1 {
                             ui.end_row();
@@ -910,11 +913,61 @@ impl Menus {
                     settings.pad = PadButtons::default();
                     self.rebinding_pad = None;
                 }
+
+                ui.separator();
+                ui.heading("Racing wheel");
+                ui.checkbox(&mut settings.wheel.enabled, "Enable racing wheel and pedals");
+                ui.label(RichText::new("Click a binding, then move the wheel or pedal axis. Native axis codes let you bind axes that are not exposed as ordinary gamepad sticks or triggers.").weak().small());
+                let wheel_bindings = [
+                    ("Steering", settings.wheel.steering),
+                    ("Accelerator", settings.wheel.accelerator),
+                    ("Brake", settings.wheel.brake),
+                ];
+                for (index, (name, code)) in wheel_bindings.into_iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        let label = if self.rebinding_wheel == Some(index) {
+                            "move axis…".to_owned()
+                        } else {
+                            code.map(|code| format!("{code:?}")).unwrap_or_else(|| "not bound".to_owned())
+                        };
+                        if ui.add_sized([130.0, 22.0], egui::Button::new(label)).clicked() {
+                            self.rebinding_wheel = Some(index);
+                            self.rebinding = None;
+                            self.rebinding_pad = None;
+                        }
+                        match index {
+                            0 => { ui.checkbox(&mut settings.wheel.steering_inverted, "Invert"); }
+                            1 => { ui.checkbox(&mut settings.wheel.accelerator_inverted, "Invert"); }
+                            _ => { ui.checkbox(&mut settings.wheel.brake_inverted, "Invert"); }
+                        }
+                    });
+                }
+                if let Some(device) = &settings.wheel.device_name {
+                    ui.label(RichText::new(format!("Bound device: {device}")).weak().small());
+                }
+                egui::ComboBox::from_label("Pedal axis range")
+                    .selected_text(settings.wheel.pedal_axis_range.name())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut settings.wheel.pedal_axis_range, crate::settings::PedalAxisRange::NegativeToPositive, "-1 to +1");
+                        ui.selectable_value(&mut settings.wheel.pedal_axis_range, crate::settings::PedalAxisRange::ZeroToOne, "0 to +1");
+                    });
+                ui.add(egui::Slider::new(&mut settings.wheel.steering_deadzone, 0..=35).text("Steering deadzone").suffix("%"));
+                if ui.button("Clear wheel bindings").clicked() {
+                    settings.wheel.device_id = None;
+                    settings.wheel.device_name = None;
+                    settings.wheel.steering = None;
+                    settings.wheel.accelerator = None;
+                    settings.wheel.brake = None;
+                    self.rebinding_wheel = None;
+                }
+                ui.label(RichText::new("Steering controls the circle pad; accelerator is A and brake is B. Force feedback is not emulated.").weak().small());
             });
         self.settings_open = open;
         if !open {
             self.rebinding = None;
             self.rebinding_pad = None;
+            self.rebinding_wheel = None;
         }
         if *settings != before {
             actions.push(Action::Settings);
