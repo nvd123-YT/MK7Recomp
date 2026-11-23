@@ -1287,6 +1287,33 @@ mod tests {
     }
 
     #[test]
+    fn stun_response_decodes_xor_mapped_ipv4_and_checks_transaction_id() {
+        let transaction = [0x11u8; 12];
+        let public_ip = std::net::Ipv4Addr::new(203, 0, 113, 7);
+        let public_port = 0xC123u16;
+        let mut packet = vec![0u8; 32];
+        packet[0..2].copy_from_slice(&STUN_BINDING_SUCCESS.to_be_bytes());
+        packet[2..4].copy_from_slice(&12u16.to_be_bytes());
+        packet[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        packet[8..20].copy_from_slice(&transaction);
+        packet[20..22].copy_from_slice(&STUN_XOR_MAPPED_ADDRESS.to_be_bytes());
+        packet[22..24].copy_from_slice(&8u16.to_be_bytes());
+        packet[25] = 1; // IPv4 family
+        packet[26..28].copy_from_slice(
+            &(public_port ^ (STUN_MAGIC_COOKIE >> 16) as u16).to_be_bytes()
+        );
+        let encoded_ip = u32::from_be_bytes(public_ip.octets()) ^ STUN_MAGIC_COOKIE;
+        packet[28..32].copy_from_slice(&encoded_ip.to_be_bytes());
+
+        assert_eq!(
+            parse_stun_response(&packet, &transaction),
+            Some(SocketAddr::from((public_ip, public_port)))
+        );
+        let other_transaction = [0x22u8; 12];
+        assert_eq!(parse_stun_response(&packet, &other_transaction), None);
+    }
+
+    #[test]
     fn nasc_custom_base64_uses_the_nintendo_alphabet_and_round_trips() {
         assert_eq!(nasc_base64_encode(b"0001DB00"), "MDAxREIwMA**");
         assert_eq!(nasc_base64_decode("MDAxREIwMA**").unwrap(), b"0001DB00");
