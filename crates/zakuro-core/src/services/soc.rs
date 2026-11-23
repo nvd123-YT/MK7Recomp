@@ -1048,7 +1048,7 @@ mod tests {
         let (mut system, buffer) = crate::services::tests::system_with_thread();
         let tls = system.kernel.current().unwrap().tls;
         let static_descriptor = Descriptor::static_buffer(0x20, 0);
-        let static_pointer = 0x0800_1000;
+        let static_pointer: u32 = 0x0800_1000;
         let mapped_descriptor = (0x30 << 4) | 0xC;
         let mapped_pointer = 0x0800_2000;
         system.memory.write_bytes(tls + TLS_IPC_STATIC_BUFFERS, &static_descriptor.to_le_bytes());

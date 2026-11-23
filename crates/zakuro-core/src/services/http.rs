@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
 
 use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
 use crate::{NetworkProvider, System};
@@ -34,11 +35,14 @@ const CLIENT_CERT_DEFAULT: u32 = 0x40;
 const ERROR_HEADER_NOT_FOUND: u32 = 0xD8A0_A028;
 const ERROR_HTTP_STATE: u32 = 0xD8A0_A066;
 const ERROR_TIMEOUT: u32 = 0xD820_A069;
+const HTTP_RESPONSE_WAIT: Duration = Duration::from_secs(36);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct HttpResponse {
     status: u32,
+    version: String,
+    reason: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
 }
@@ -62,6 +66,21 @@ struct HttpContext {
 }
 
 impl HttpContext {
+    fn finish(&mut self, result: Result<HttpResponse, String>) {
+        self.receiver = None;
+        match result {
+            Ok(response) => {
+                self.response = Some(response);
+                self.state = STATE_RECEIVED;
+            }
+            Err(error) => {
+                log::warn!("http:C request failed: {error}");
+                self.error = Some(error);
+                self.state = STATE_COMPLETED;
+            }
+        }
+    }
+
     fn refresh(&mut self) {
         let result = self.receiver.as_ref().and_then(|receiver| match receiver.try_recv() {
             Ok(result) => Some(result),
@@ -69,19 +88,41 @@ impl HttpContext {
             Err(mpsc::TryRecvError::Empty) => None,
         });
         if let Some(result) = result {
-            self.receiver = None;
-            match result {
-                Ok(response) => {
-                    self.response = Some(response);
-                    self.state = STATE_RECEIVED;
-                }
-                Err(error) => {
-                    log::warn!("http:C request failed: {error}");
-                    self.error = Some(error);
-                    self.state = STATE_COMPLETED;
-                }
+            self.finish(result);
+        }
+    }
+
+    /// Wait for response headers as the synchronous HTTP:C response commands
+    /// do. A timed-out call restores the receiver so a later call can retry.
+    fn wait_for_response(&mut self, timeout: Option<Duration>) -> bool {
+        self.refresh();
+        if self.response.is_some() {
+            return true;
+        }
+        if self.error.is_some() {
+            return false;
+        }
+        let Some(receiver) = self.receiver.take() else {
+            return false;
+        };
+        match receiver.recv_timeout(timeout.unwrap_or(HTTP_RESPONSE_WAIT)) {
+            Ok(result) => {
+                self.finish(result);
+                self.response.is_some()
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.receiver = Some(receiver);
+                false
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.finish(Err("HTTP worker stopped before returning a response".to_owned()));
+                false
             }
         }
+    }
+
+    fn response_error(&self) -> u32 {
+        if self.error.is_some() { ERROR_HTTP_STATE } else { ERROR_TIMEOUT }
     }
 }
 
@@ -334,40 +375,56 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             if result { buffer.reply(&mut system.memory, command, &[]); }
             else { buffer.reply_error(&mut system.memory, command, ERROR_HTTP_STATE); }
         }
-        // GetResponseStatusCode(handle)
+        // GetResponseStatusCode(handle[, timeout])
         0x0022 | 0x0023 => {
             let handle = buffer.get(&mut system.memory, 1);
-            let response = system.services.http.contexts.get_mut(&handle).and_then(|context| {
-                context.refresh();
-                context.response.as_ref().map(|response| response.status)
+            let timeout = if command == 0x0023 {
+                Some(Duration::from_nanos(read_u64_words(system, buffer, 2)))
+            } else {
+                None
+            };
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.wait_for_response(timeout) {
+                    Ok(context.response.as_ref().unwrap().status)
+                } else {
+                    Err(context.response_error())
+                }
             });
-            match response {
-                Some(status) => buffer.reply(&mut system.memory, command, &[status]),
+            match result {
+                Some(Ok(status)) => buffer.reply(&mut system.memory, command, &[status]),
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
                 None => buffer.reply_error(&mut system.memory, command, not_connected()),
             }
         }
-        // GetResponseHeader(handle, name length, value capacity, static name, mapped output)
+                // GetResponseHeader(handle, name length, value capacity[, timeout], static name, mapped output)
         0x001E | 0x001F => {
             let (handle, name_len, capacity) = (
                 buffer.get(&mut system.memory, 1),
                 buffer.get(&mut system.memory, 2) as usize,
                 buffer.get(&mut system.memory, 3) as usize,
             );
+            let timeout = if command == 0x001F {
+                Some(Duration::from_nanos(read_u64_words(system, buffer, 4)))
+            } else {
+                None
+            };
             let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
             let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_HEADER)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
-            let result = system.services.http.contexts.get_mut(&handle).and_then(|context| {
-                context.refresh();
-                context.response.as_ref().map(|response| {
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if !context.wait_for_response(timeout) {
+                    return Err(context.response_error());
+                }
+                context.response.as_ref().and_then(|response| {
                     response.headers.iter()
                         .find(|(key, _)| key.eq_ignore_ascii_case(&name))
                         .map(|(_, value)| value.clone())
-                })
+                }).ok_or(ERROR_HEADER_NOT_FOUND)
             });
             match result {
-                Some(Some(value)) => {
+                Some(Ok(value)) => {
                     let copied_size = value.len() as u32;
                     let mut bytes = value.into_bytes();
                     if capacity > 0 {
@@ -379,38 +436,53 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     system.memory.write_bytes(pointer, &bytes);
                     reply_mapped(system, buffer, command, &[copied_size], descriptor, pointer);
                 }
-                Some(None) => reply_mapped_error(system, buffer, command, ERROR_HEADER_NOT_FOUND, descriptor, pointer),
-                None => reply_mapped_error(system, buffer, command, ERROR_TIMEOUT, descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
             }
         }
-        // GetResponseData(handle, capacity, mapped output), response header block.
+                // GetResponseData(handle, capacity[, timeout], mapped output): raw response headers.
         0x0020 | 0x0021 => {
-            let (handle, capacity) = (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2) as usize);
+            let (handle, capacity) = (
+                buffer.get(&mut system.memory, 1),
+                buffer.get(&mut system.memory, 2) as usize,
+            );
+            let timeout = if command == 0x0021 {
+                Some(Duration::from_nanos(read_u64_words(system, buffer, 3)))
+            } else {
+                None
+            };
             let Some((_descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_BODY)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
-            let response = system.services.http.contexts.get_mut(&handle).and_then(|context| {
-                context.refresh();
-                context.response.as_ref().map(|response| {
-                    let mut text = format!("HTTP/1.1 {}\r\n", response.status);
-                    for (name, value) in &response.headers {
-                        text.push_str(&format!("{name}: {value}\r\n"));
-                    }
-                    text.push_str("\r\n");
-                    text.into_bytes()
-                })
+            let response = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if !context.wait_for_response(timeout) {
+                    return Err(context.response_error());
+                }
+                let response = context.response.as_ref().unwrap();
+                let reason = if response.reason.is_empty() {
+                    reason_phrase(response.status)
+                } else {
+                    response.reason.as_str()
+                };
+                let mut text = format!("{} {} {}\r\n", response.version, response.status, reason);
+                for (name, value) in &response.headers {
+                    text.push_str(&format!("{name}: {value}\r\n"));
+                }
+                text.push_str("\r\n");
+                Ok(text.into_bytes())
             });
             match response {
-                Some(bytes) => {
+                Some(Ok(bytes)) => {
                     let count = bytes.len().min(capacity);
                     system.memory.write_bytes(pointer, &bytes[..count]);
                     buffer.reply(&mut system.memory, command, &[count as u32]);
                 }
-                None => buffer.reply_error(&mut system.memory, command, ERROR_TIMEOUT),
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
+                None => buffer.reply_error(&mut system.memory, command, not_connected()),
             }
         }
-        // RegisterURLReplacement(pattern length, replacement length, two static buffers)
+                // RegisterURLReplacement(pattern length, replacement length, two static buffers)
         0x0C00 => {
             let (pattern_len, replacement_len) = (buffer.get(&mut system.memory, 1) as usize, buffer.get(&mut system.memory, 2) as usize);
             let pattern = nul_string(&read_static(system, buffer, header, 0, pattern_len.min(MAX_URL)));
@@ -536,25 +608,65 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         if header_size > 1024 * 1024 { return Err("HTTP response headers exceed 1 MiB".to_owned()); }
         let response_body = std::fs::read(&body_path).map_err(|error| format!("could not read HTTP response body: {error}"))?;
         let response_headers = std::fs::read_to_string(&header_path).unwrap_or_default();
-        Ok(HttpResponse { status, headers: parse_headers(&response_headers), body: response_body })
+        let (version, reason, headers) = parse_response_headers(&response_headers);
+        Ok(HttpResponse { status, version, reason, headers, body: response_body })
     })();
 
     let _ = std::fs::remove_dir_all(&directory);
     result
 }
 
-fn parse_headers(raw: &str) -> BTreeMap<String, String> {
+fn parse_response_headers(raw: &str) -> (String, String, BTreeMap<String, String>) {
+    let mut version = "HTTP/1.1".to_owned();
+    let mut reason = String::new();
     let mut headers = BTreeMap::new();
     for line in raw.lines() {
         let line = line.trim_end_matches('\r');
         if line.starts_with("HTTP/") {
             headers.clear();
+            let mut parts = line.splitn(3, ' ');
+            version = parts.next().unwrap_or("HTTP/1.1").to_owned();
+            let _status = parts.next();
+            reason = parts.next().unwrap_or_default().to_owned();
         } else if let Some((name, value)) = line.split_once(':') {
             headers.insert(name.trim().to_owned(), value.trim().to_owned());
         }
     }
-    headers
+    (version, reason, headers)
 }
+
+fn parse_headers(raw: &str) -> BTreeMap<String, String> {
+    parse_response_headers(raw).2
+}
+
+fn reason_phrase(status: u32) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Response",
+    }
+}
+
 
 fn form_encode(fields: &[(String, String)]) -> String {
     fields.iter().map(|(name, value)| format!("{}={}", url_encode(name), url_encode(value))).collect::<Vec<_>>().join("&")
@@ -572,6 +684,11 @@ fn url_encode(value: &str) -> String {
         }
     }
     out
+}
+
+fn read_u64_words(system: &mut System, buffer: &CommandBuffer, index: u32) -> u64 {
+    buffer.get(&mut system.memory, index) as u64
+        | ((buffer.get(&mut system.memory, index + 1) as u64) << 32)
 }
 
 fn valid_method(method: u32) -> bool {
@@ -680,39 +797,43 @@ fn reply_mapped_error(system: &mut System, buffer: &CommandBuffer, command: u16,
 
 fn receive_data(system: &mut System, buffer: &CommandBuffer, header: Header) {
     let command = header.command_id();
-    let (handle, requested) = (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2) as usize);
+    let (handle, requested) = (
+        buffer.get(&mut system.memory, 1),
+        buffer.get(&mut system.memory, 2) as usize,
+    );
+    let timeout = if command == 0x000C {
+        Some(Duration::from_nanos(read_u64_words(system, buffer, 3)))
+    } else {
+        None
+    };
     let Some((_descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, requested.min(MAX_BODY)) else {
         buffer.reply_error(&mut system.memory, command, not_connected());
         return;
     };
-    let mut chunk = Vec::new();
-    let mut response_error = None;
-    let mut is_complete = false;
-    if let Some(context) = system.services.http.contexts.get_mut(&handle) {
-        context.refresh();
-        if let Some(response) = &context.response {
-            let total = response.body.len();
-            let end = context.body_offset.saturating_add(requested.min(MAX_BODY)).min(total);
-            chunk.extend_from_slice(&response.body[context.body_offset.min(total)..end]);
-            context.body_offset = end;
-            is_complete = context.body_offset >= total;
-            if is_complete { context.state = STATE_COMPLETED; }
-        } else {
-            response_error = context.error.clone().or_else(|| Some("HTTP response is not ready".to_owned()));
-        }
-    } else {
-        response_error = Some("HTTP context does not exist".to_owned());
-    }
 
-    if let Some(error) = response_error {
-        log::warn!("http:C receive failed: {error}");
-        reply_result(system, buffer, command, not_connected());
-        return;
+    let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+        if !context.wait_for_response(timeout) {
+            return Err(context.response_error());
+        }
+        let response = context.response.as_ref().unwrap();
+        let total = response.body.len();
+        let end = context.body_offset.saturating_add(requested.min(MAX_BODY)).min(total);
+        let chunk = response.body[context.body_offset.min(total)..end].to_vec();
+        context.body_offset = end;
+        let complete = context.body_offset >= total;
+        if complete {
+            context.state = STATE_COMPLETED;
+        }
+        Ok((chunk, complete))
+    });
+    match result {
+        Some(Ok((chunk, complete))) => {
+            system.memory.write_bytes(pointer, &chunk);
+            reply_result(system, buffer, command, if complete { 0 } else { 0xD840_A02B });
+        }
+        Some(Err(error)) => reply_result(system, buffer, command, error),
+        None => reply_result(system, buffer, command, not_connected()),
     }
-    system.memory.write_bytes(pointer, &chunk);
-    // libctru treats HTTP's BufferTooSmall/WouldBlock result as the signal
-    // that another ReceiveData call is needed to collect the remaining body.
-    reply_result(system, buffer, command, if is_complete { 0 } else { 0xD840_A02B });
 }
 
 #[cfg(test)]
@@ -726,7 +847,7 @@ mod tests {
         let (mut system, buffer) = crate::services::tests::system_with_thread();
         let tls = system.kernel.current().unwrap().tls;
         let static_descriptor = Descriptor::static_buffer(0x20, 0);
-        let static_pointer = 0x0800_1000;
+        let static_pointer: u32 = 0x0800_1000;
         let mapped_descriptor = (0x30 << 4) | 0xC;
         let mapped_pointer = 0x0800_2000;
 
@@ -765,10 +886,13 @@ mod tests {
 
     #[test]
     fn response_headers_are_taken_from_the_final_redirect_response() {
-        let headers = parse_headers("HTTP/1.1 302 Found\r\nLocation: https://example.test\r\n\r\nHTTP/2 200\r\nContent-Length: 3\r\nX-Test: yes\r\n\r\n");
+        let (version, reason, headers) = parse_response_headers("HTTP/1.1 302 Found\r\nLocation: https://example.test\r\n\r\nHTTP/2 200\r\nContent-Length: 3\r\nX-Test: yes\r\n\r\n");
+        assert_eq!(version, "HTTP/2");
+        assert_eq!(reason, "");
         assert_eq!(headers.get("Content-Length").map(String::as_str), Some("3"));
         assert_eq!(headers.get("X-Test").map(String::as_str), Some("yes"));
         assert!(!headers.contains_key("Location"));
+        assert_eq!(reason_phrase(200), "OK");
     }
 
     #[test]
