@@ -580,12 +580,11 @@ fn translated_buffer(
         let raw = buffer.get(&mut system.memory, index);
         match Descriptor::parse(raw) {
             Descriptor::Handles { count, .. } => index += count + 1,
-            Descriptor::CurrentProcessId => index += 1,
+            Descriptor::CurrentProcessId => index += 2,
             Descriptor::StaticBuffer { size, buffer_id } => {
                 if !mapped && found == ordinal {
-                    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
-                    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, buffer_id);
-                    return Some((raw, pointer, size.min(capacity) as usize));
+                    let pointer = buffer.get(&mut system.memory, index + 1);
+                    return Some((raw, pointer, size as usize));
                 }
                 if !mapped { found += 1; }
                 index += 2;

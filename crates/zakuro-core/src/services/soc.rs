@@ -397,13 +397,107 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
     true
 }
 
+fn translated_buffer(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    header: Header,
+    mapped: bool,
+    ordinal: u32,
+) -> Option<(u32, u32, usize)> {
+    let mut index = header.normal_params() + 1;
+    let end = index + header.translate_params();
+    let mut found = 0u32;
+    while index < end {
+        let raw = buffer.get(&mut system.memory, index);
+        match Descriptor::parse(raw) {
+            Descriptor::Handles { count, .. } => index += count + 1,
+            Descriptor::CurrentProcessId => index += 2,
+            Descriptor::StaticBuffer { size, .. } => {
+                if !mapped && found == ordinal {
+                    let pointer = buffer.get(&mut system.memory, index + 1);
+                    return Some((raw, pointer, size as usize));
+                }
+                if !mapped { found += 1; }
+                index += 2;
+            }
+            Descriptor::MappedBuffer { size, .. } => {
+                let pointer = buffer.get(&mut system.memory, index + 1);
+                if mapped && found == ordinal {
+                    return Some((raw, pointer, size as usize));
+                }
+                if mapped { found += 1; }
+                index += 2;
+            }
+            Descriptor::Unknown(_) => index += 1,
+        }
+    }
+    None
+}
+
 fn read_static(system: &mut System, buffer: &CommandBuffer, id: u32, length: usize) -> Vec<u8> {
-    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
-    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, id);
-    let length = length.min(capacity as usize);
+    let header = buffer.header(&mut system.memory);
+    let Some((_, pointer, capacity)) = translated_buffer(system, buffer, header, false, id) else {
+        return Vec::new();
+    };
+    let length = length.min(capacity);
     let mut bytes = vec![0; length];
     system.memory.read_bytes(pointer, &mut bytes);
     bytes
+}
+
+fn mapped_buffer(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    header: Header,
+    ordinal: u32,
+    requested: usize,
+) -> Option<(u32, u32, usize)> {
+    let (descriptor, pointer, capacity) = translated_buffer(system, buffer, header, true, ordinal)?;
+    Some((descriptor, pointer, capacity.min(requested)))
+}
+
+fn reply_mapped(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    command: u16,
+    values: &[u32],
+    descriptor: u32,
+    pointer: u32,
+) {
+    let normal = values.len() as u32 + 1;
+    buffer.set(&mut system.memory, 0, Header::new(command, normal, 2).0);
+    buffer.set(&mut system.memory, 1, 0);
+    for (index, value) in values.iter().enumerate() {
+        buffer.set(&mut system.memory, index as u32 + 2, *value);
+    }
+    buffer.set(&mut system.memory, normal + 1, descriptor);
+    buffer.set(&mut system.memory, normal + 2, pointer);
+}
+
+fn reply_static_mapped(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    command: u16,
+    values: &[u32],
+    address: &[u8],
+    mapped_descriptor: u32,
+    mapped_pointer: u32,
+) {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (address_pointer, address_capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
+    let address_length = address.len().min(address_capacity as usize);
+    system.memory.write_bytes(address_pointer, &address[..address_length]);
+
+    let normal = values.len() as u32 + 1;
+    buffer.set(&mut system.memory, 0, Header::new(command, normal, 4).0);
+    buffer.set(&mut system.memory, 1, 0);
+    for (index, value) in values.iter().enumerate() {
+        buffer.set(&mut system.memory, index as u32 + 2, *value);
+    }
+    buffer.set(&mut system.memory, normal + 1, Descriptor::static_buffer(address_length as u32, 0));
+    buffer.set(&mut system.memory, normal + 2, address_pointer);
+    buffer.set(&mut system.memory, normal + 3, mapped_descriptor);
+    buffer.set(&mut system.memory, normal + 4, mapped_pointer);
 }
 
 fn reply_static(system: &mut System, buffer: &CommandBuffer, command: u16, words: &[u32], bytes: &[u8]) {
@@ -842,33 +936,31 @@ fn network_option(level: u32, option: u32, length: usize) -> Vec<u8> {
 }
 
 fn send_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
-    // The zero-copy libctru variant places a mapped-buffer descriptor after
-    // the current-process descriptor. The fallback is deliberately explicit:
-    // unsupported layouts fail rather than sending bytes from the wrong area.
     let command = header.command_id();
-    let normal = header.normal_params();
     let id = buffer.get(&mut system.memory, 1);
     let length = buffer.get(&mut system.memory, 2) as usize;
     let address_length = buffer.get(&mut system.memory, 4) as usize;
-    let mut pointer = None;
-    for index in normal + 1..normal + 1 + header.translate_params().min(8) {
-        let raw = buffer.get(&mut system.memory, index);
-        if let Descriptor::MappedBuffer { size, .. } = Descriptor::parse(raw) {
-            let address = buffer.get(&mut system.memory, index + 1);
-            pointer = Some((address, (size as usize).min(length).min(MAX_PACKET)));
-            break;
-        }
-    }
-    let result = match pointer {
-        Some((address, size)) => {
+    let mapped = mapped_buffer(system, buffer, header, 0, length.min(MAX_PACKET));
+    let result = match mapped {
+        Some((_, pointer, size)) => {
             let mut payload = vec![0; size];
-            system.memory.read_bytes(address, &mut payload);
-            let destination = if address_length > 0 { parse_address(&read_static(system, buffer, 0, address_length.min(28))).ok() } else { None };
+            system.memory.read_bytes(pointer, &mut payload);
+            let destination = if address_length > 0 {
+                parse_address(&read_static(system, buffer, 0, address_length.min(28))).ok()
+            } else {
+                None
+            };
             send_data(system.services.soc.sockets.get_mut(&id), &payload, destination)
         }
         None => -38,
     };
-    buffer.reply(&mut system.memory, command, &[result as u32]);
+
+    match mapped {
+        Some((descriptor, pointer, _)) => {
+            reply_mapped(system, buffer, command, &[result as u32], descriptor, pointer);
+        }
+        None => buffer.reply(&mut system.memory, command, &[result as u32]),
+    }
 }
 
 fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
@@ -876,19 +968,12 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
     let id = buffer.get(&mut system.memory, 1);
     let length = buffer.get(&mut system.memory, 2) as usize;
     let address_length = buffer.get(&mut system.memory, 4) as usize;
-    let mut mapped = None;
-    let normal = header.normal_params();
-    for index in normal + 1..normal + 1 + header.translate_params().min(8) {
-        let raw = buffer.get(&mut system.memory, index);
-        if let Descriptor::MappedBuffer { size, .. } = Descriptor::parse(raw) {
-            mapped = Some((buffer.get(&mut system.memory, index + 1), (size as usize).min(length).min(MAX_PACKET)));
-            break;
-        }
-    }
-    let Some((pointer, capacity)) = mapped else {
-        buffer.reply(&mut system.memory, command, &[(-38i32) as u32, 0]);
+    let mapped = mapped_buffer(system, buffer, header, 0, length.min(MAX_PACKET));
+    let Some((descriptor, pointer, capacity)) = mapped else {
+        buffer.reply(&mut system.memory, command, &[(-38i32) as u32]);
         return;
     };
+
     let result = match system.services.soc.sockets.get_mut(&id) {
         Some(entry) => {
             entry.update();
@@ -909,18 +994,53 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
         }
         None => Err(-8),
     };
+
     match result {
         Ok((bytes, address)) => {
             system.memory.write_bytes(pointer, &bytes);
-            reply_static(system, buffer, command, &[bytes.len() as u32, bytes.len() as u32], &address[..address.len().min(address_length)]);
+            let address = &address[..address.len().min(address_length)];
+            reply_static_mapped(system, buffer, command, &[bytes.len() as u32], address, descriptor, pointer);
         }
-        Err(code) => reply_static(system, buffer, command, &[code as u32, 0], &[]),
+        Err(code) => {
+            reply_static_mapped(system, buffer, command, &[code as u32], &[], descriptor, pointer);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socu_translation_walker_skips_pid_and_static_buffers() {
+        use zakuro_common::memory_map::TLS_IPC_STATIC_BUFFERS;
+
+        let (mut system, buffer) = crate::services::tests::system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let static_descriptor = Descriptor::static_buffer(0x20, 0);
+        let static_pointer = 0x0800_1000;
+        let mapped_descriptor = (0x30 << 4) | 0xC;
+        let mapped_pointer = 0x0800_2000;
+        system.memory.write_bytes(tls + TLS_IPC_STATIC_BUFFERS, &static_descriptor.to_le_bytes());
+        system.memory.write_bytes(tls + TLS_IPC_STATIC_BUFFERS + 4, &static_pointer.to_le_bytes());
+
+        let header = Header::new(0x0002, 2, 6);
+        buffer.set(&mut system.memory, 3, 0x20);
+        buffer.set(&mut system.memory, 4, 0x1234);
+        buffer.set(&mut system.memory, 5, static_descriptor);
+        buffer.set(&mut system.memory, 6, static_pointer);
+        buffer.set(&mut system.memory, 7, mapped_descriptor);
+        buffer.set(&mut system.memory, 8, mapped_pointer);
+
+        assert_eq!(
+            translated_buffer(&mut system, &buffer, header, false, 0),
+            Some((static_descriptor, static_pointer, 0x20))
+        );
+        assert_eq!(
+            mapped_buffer(&mut system, &buffer, header, 0, 0x40),
+            Some((mapped_descriptor, mapped_pointer, 0x30))
+        );
+    }
 
     #[test]
     fn ctr_ipv4_sockaddr_round_trips_network_byte_order() {
