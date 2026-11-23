@@ -523,7 +523,7 @@ impl PedalAxisRange {
 #[serde(default)]
 pub struct WheelSettings {
     pub enabled: bool,
-    pub device_id: Option<String>,
+    pub device_id: Option<[u8; 16]>,
     pub device_name: Option<String>,
     pub steering: Option<Code>,
     pub accelerator: Option<Code>,
@@ -638,6 +638,7 @@ pub struct Settings {
     pub keys: Keys,
     pub pad: PadButtons,
     /// optional racing wheel and pedal axes.
+    #[serde(deserialize_with = "or_default")]
     pub wheel: WheelSettings,
     /// the enhancements turned on, by name, for each game by its title id.
     pub enhancements: std::collections::BTreeMap<String, Vec<String>>,

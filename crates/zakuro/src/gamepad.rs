@@ -16,7 +16,7 @@ const DEADZONE: f32 = 0.15;
 /// An axis movement captured from a physical controller or wheel.
 #[derive(Debug, Clone)]
 pub struct AxisInput {
-    pub device_id: String,
+    pub device_id: [u8; 16],
     pub device_name: String,
     pub code: Code,
 }
@@ -67,7 +67,7 @@ impl Gamepads {
                         // and pedal axes can still be configured.
                         if !left_out(&pad, &reports) && value.abs() >= 0.20 {
                             self.axis_event = Some(AxisInput {
-                                device_id: pad.uuid().to_string(),
+                                device_id: pad.uuid(),
                                 device_name: pad.name().to_owned(),
                                 code,
                             });
@@ -137,8 +137,8 @@ impl Gamepads {
             let right = [pad.value(Axis::RightStickX), pad.value(Axis::RightStickY)];
             sticks(&mut state, left, right);
 
-            let device_id = pad.uuid().to_string();
-            if wheel.enabled && wheel.device_id.as_deref() == Some(device_id.as_str()) {
+            let device_id = pad.uuid();
+            if wheel.enabled && wheel.device_id.as_ref() == Some(&device_id) {
                 apply_wheel(&mut state, &pad, wheel);
             }
         }
