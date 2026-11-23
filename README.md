@@ -26,6 +26,8 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 - Reduces controller polling overhead by sharing Pro Controller report snapshots instead of cloning their button vectors every frame.
 - Buffers input recordings and flushes periodically rather than synchronously flushing after every changed input.
 - Improves SDMC compatibility: reports the 1 GiB free-space stub, returns the same unknown-result sentinel for unsupported SDMC format information, propagates SD-root creation failures, and uses the measured SDMC read/open latency model.
+- Adds Auto / GPU / CPU Vulkan vertex-shading selection, including per-game overrides, for A/B testing geometry-heavy tracks. Auto retains the existing device heuristic.
+- Replaces the F3 FPS-only counter with a copyable performance HUD showing rolling average, p95 and worst frame time, emulation time, GPU-command host time, draw calls and vertices per frame.
 
 ## Version 1.0.6 changes
 

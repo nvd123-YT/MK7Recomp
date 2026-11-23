@@ -6969,7 +6969,7 @@ mod tests {
         for scale in [1, 3] {
             let Ok(copied) = hardware::Hardware::new() else { return };
             let device = hardware::own_device().unwrap();
-            let direct = hardware::Hardware::with_device(std::sync::Arc::new(device), true, None).unwrap();
+            let direct = hardware::Hardware::with_device(std::sync::Arc::new(device), true, None, None).unwrap();
             let mut pictures = Vec::new();
             for mut hardware in [copied, direct] {
                 let scale = hardware.set_scale(scale);
@@ -7080,7 +7080,7 @@ mod tests {
         // each scene drawn plainly, and with what moved in between
         let scene = |red: f32, between: Option<f32>| -> Option<(Vec<u8>, Option<Vec<u8>>)> {
             let device = hardware::own_device().ok()?;
-            let mut hardware = hardware::Hardware::with_device(std::sync::Arc::new(device), true, None).unwrap();
+            let mut hardware = hardware::Hardware::with_device(std::sync::Arc::new(device), true, None, None).unwrap();
             hardware.set_twins(between.is_some());
             let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
             let mut memory = ConsoleMemory::default();

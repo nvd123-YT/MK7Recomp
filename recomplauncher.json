@@ -682,7 +682,7 @@
     },
     {
       "id": "show_fps",
-      "label": "Show FPS",
+      "label": "Show performance HUD",
       "group": "Interface",
       "help": "Show the runtime's frame-rate counter.",
       "choices": [
