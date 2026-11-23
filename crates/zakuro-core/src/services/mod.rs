@@ -29,6 +29,7 @@ pub mod nfc;
 pub mod shared_font;
 pub mod host_archive;
 pub mod srv;
+pub mod soc;
 pub mod system_archives;
 pub mod uds;
 pub mod y2r;
@@ -92,6 +93,8 @@ pub struct ServiceState {
     pub csnd: csnd::CsndState,
     #[serde(default)]
     pub plgldr: plgldr::PluginLoaderState,
+    #[serde(default)]
+    pub soc: soc::SocState,
 }
 
 /// entry point from svcSendSyncRequest.
@@ -133,6 +136,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "mic:u" => mic::handle(system, &buffer, header),
         "nwm::UDS" => uds::handle(system, &buffer, header),
         "dlp:SRVR" => dlp::handle(system, &buffer, header),
+        "soc:U" => soc::handle(system, &buffer, header),
         _ => misc::handle(system, &buffer, header, &name),
     };
 
@@ -157,7 +161,7 @@ fn is_network_service(name: &str) -> bool {
             | "nim:aoc" | "nim:s" | "nim:u"
             | "ac:u" | "ac:i"
             | "olv:u"
-            | "act:u" | "act:a"
+            | "act:u" | "act:a" | "soc:U"
     )
 }
 

@@ -823,6 +823,7 @@ impl App {
             find_recompiled: !interpret,
             hardware_renderer: self.options.hardware_rasterizer.unwrap_or(settings.hardware_rasterizer),
             gpu_vertex_shaders: settings.vertex_shading.gpu_override(),
+            pretendo_network: settings.network == settings::NetworkMode::Pretendo,
             mods_enabled: settings.mods_enabled,
             plugins_3gx_enabled: settings.plugins_3gx_enabled,
             texture_packs: settings.texture_packs,

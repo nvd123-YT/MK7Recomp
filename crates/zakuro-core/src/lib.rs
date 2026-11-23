@@ -61,6 +61,8 @@ pub struct Config {
     pub hardware_renderer: bool,
     /// true runs vertex shaders on the GPU, false on the CPU, None uses Auto.
     pub gpu_vertex_shaders: Option<bool>,
+    /// Enables host SOCU sockets for the experimental Pretendo path.
+    pub pretendo_network: bool,
     /// apply code patches and RomFS overlays from a game's mods folder.
     pub mods_enabled: bool,
     /// load Luma/Citra 3GX plugins at game startup.
@@ -117,6 +119,7 @@ impl Default for Config {
             data_dir: None,
             hardware_renderer: false,
             gpu_vertex_shaders: None,
+            pretendo_network: false,
             mods_enabled: true,
             plugins_3gx_enabled: true,
             texture_packs: true,

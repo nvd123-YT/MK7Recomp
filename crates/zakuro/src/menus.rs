@@ -12,7 +12,7 @@ use crate::library::{Game, Library, ICON_SIZE};
 use crate::recompile::{Job, Stage, Wanted};
 use crate::gamepad::button_name;
 use crate::settings::{
-    game_key, CameraSource, Filter, GameSettings, Keys, Language, MicrophoneSource, Orientation, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape, VertexShading,
+    game_key, CameraSource, Filter, GameSettings, Keys, Language, MicrophoneSource, Orientation, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape, VertexShading, NetworkMode,
 };
 
 /// Sampled runtime metrics shown by the F3 performance HUD.
@@ -855,6 +855,17 @@ impl Menus {
                 );
                 ui.label(RichText::new("The presenter changes the next time Mario Kart 7 Recomp starts, the 3D with the next game.").weak());
 
+                ui.separator();
+                ui.heading("Online");
+                egui::ComboBox::from_label("Network")
+                    .selected_text(settings.network.name())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut settings.network, NetworkMode::Disabled, "Disabled");
+                        ui.selectable_value(&mut settings.network, NetworkMode::Pretendo, "Pretendo (experimental)");
+                    });
+                if settings.network == NetworkMode::Pretendo {
+                    ui.label(RichText::new("Experimental TCP/UDP sockets and Nintendo Network DNS redirection. HTTP/SSL and game authentication are still required for online races.").weak());
+                }
                 ui.separator();
                 ui.heading("Emulation");
                 language(ui, &mut settings.language);

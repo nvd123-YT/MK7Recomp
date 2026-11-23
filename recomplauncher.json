@@ -69,7 +69,8 @@
         "swap_eyes": "false",
         "volume": "1.0",
         "mute": "false",
-        "show_fps": "false"
+        "show_fps": "false",
+        "network": "\"disabled\""
       }
     }
   ],
@@ -731,6 +732,29 @@
       ],
       "defaults": {
         "show_fps": "false"
+      }
+    },
+    {
+      "id": "online_network",
+      "label": "Online network",
+      "group": "Online",
+      "help": "Pretendo support is experimental. Full authentication and race matchmaking are still in development.",
+      "choices": [
+        {
+          "label": "Disabled",
+          "set": {
+            "network": "\"disabled\""
+          }
+        },
+        {
+          "label": "Pretendo (experimental)",
+          "set": {
+            "network": "\"pretendo\""
+          }
+        }
+      ],
+      "defaults": {
+        "network": "\"disabled\""
       }
     }
   ],
