@@ -240,3 +240,30 @@ pub fn handle(
         _ => false,
     }
 }
+
+/// the size of AM's description of a title's content.
+const CONTENT_INFO_SIZE: u32 = 0x18;
+
+/// a u64 the command passes as two words from index.
+fn read_u64(system: &mut System, buffer: &CommandBuffer, index: u32) -> u64 {
+    buffer.get(&mut system.memory, index) as u64 | (buffer.get(&mut system.memory, index + 1) as u64) << 32
+}
+
+/// writes AM's description of a content at at, its index, type, id and
+/// size, and that it is owned, and there, when the file holds it.
+fn write_content_info(system: &mut System, at: u32, content: &zakuro_fs::Content) {
+    use zakuro_cpu::Bus;
+    const OWNED: u32 = 0x02;
+    const DOWNLOADED: u32 = 0x01;
+    let ownership = OWNED | if content.offset.is_some() { DOWNLOADED } else { 0 };
+    for (offset, word) in [
+        (0, content.index as u32 | (content.flags as u32) << 16),
+        (4, content.id),
+        (8, content.size as u32),
+        (12, (content.size >> 32) as u32),
+        (16, ownership),
+        (20, 0),
+    ] {
+        system.memory.write32(at + offset, word);
+    }
+}

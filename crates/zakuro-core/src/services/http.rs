@@ -605,18 +605,16 @@ fn reply_mapped_error(system: &mut System, buffer: &CommandBuffer, command: u16,
 fn receive_data(system: &mut System, buffer: &CommandBuffer, header: Header) {
     let command = header.command_id();
     let (handle, requested) = (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2) as usize);
-    let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, requested.min(MAX_BODY)) else {
+    let Some((_descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, requested.min(MAX_BODY)) else {
         buffer.reply_error(&mut system.memory, command, not_connected());
         return;
     };
     let mut chunk = Vec::new();
     let mut response_error = None;
     let mut is_complete = false;
-    let mut total = 0usize;
     if let Some(context) = system.services.http.contexts.get_mut(&handle) {
         context.refresh();
         if let Some(response) = &context.response {
-            total = response.body.len();
             let end = context.body_offset.saturating_add(requested.min(MAX_BODY)).min(total);
             chunk.extend_from_slice(&response.body[context.body_offset.min(total)..end]);
             context.body_offset = end;

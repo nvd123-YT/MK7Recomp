@@ -179,60 +179,73 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0006 => {
             let (id, address_length) = (word(system, 1), word(system, 2) as usize);
             let address_bytes = read_static(system, buffer, 0, address_length.min(28));
-            let address = parse_address(&address_bytes);
-            let result = match (address, system.services.soc.sockets.get_mut(&id)) {
-                (Ok(SocketAddr::V4(address)), Some(entry)) => {
-                    match &entry.socket {
-                        HostSocket::UdpUnbound => match UdpSocket::bind("0.0.0.0:0") {
-                            Ok(socket) => {
-                                let _ = socket.set_nonblocking(true);
-                                // Do not call UdpSocket::connect here. A connected
-                                // host UDP socket filters incoming datagrams by peer,
-                                // but NEX also uses this socket for race peer traffic.
-                                entry.socket = HostSocket::Udp { socket, peer: Some(SocketAddr::V4(address)) };
-                                0
-                            }
-                            Err(error) => errno(&error),
-                        },
-                        HostSocket::Udp { peer, .. } => {
+            let result = match parse_address(&address_bytes) {
+                Err(code) => code,
+                Ok(SocketAddr::V6(_)) => -5,
+                Ok(SocketAddr::V4(address)) => match system.services.soc.sockets.get_mut(&id) {
+                    None => -8,
+                    Some(entry) => {
+                        // Change the remembered default peer without applying
+                        // an immutable borrow to the socket enum.
+                        if let HostSocket::Udp { peer, .. } = &mut entry.socket {
                             *peer = Some(SocketAddr::V4(address));
                             0
-                        },
-                        HostSocket::TcpUnbound => {
-                            let (send, receive) = mpsc::channel();
-                            thread::spawn(move || {
-                                let result = TcpStream::connect_timeout(&SocketAddr::V4(address), CONNECT_TIMEOUT)
-                                    .and_then(|stream| {
-                                        stream.set_nonblocking(true)?;
-                                        Ok(stream)
+                        } else {
+                            match &entry.socket {
+                                HostSocket::UdpUnbound => match UdpSocket::bind("0.0.0.0:0") {
+                                    Ok(socket) => {
+                                        let _ = socket.set_nonblocking(true);
+                                        // Keep the host socket unconnected so incoming
+                                        // peer-to-peer race packets are not filtered.
+                                        entry.socket = HostSocket::Udp {
+                                            socket,
+                                            peer: Some(SocketAddr::V4(address)),
+                                        };
+                                        0
+                                    }
+                                    Err(error) => errno(&error),
+                                },
+                                HostSocket::TcpUnbound => {
+                                    let (send, receive) = mpsc::channel();
+                                    thread::spawn(move || {
+                                        let result = TcpStream::connect_timeout(
+                                            &SocketAddr::V4(address),
+                                            CONNECT_TIMEOUT,
+                                        )
+                                        .and_then(|stream| {
+                                            stream.set_nonblocking(true)?;
+                                            Ok(stream)
+                                        });
+                                        let _ = send.send(result);
                                     });
-                                let _ = send.send(result);
-                            });
-                            let blocking = !entry.nonblocking;
-                            if blocking {
-                                match receive.recv_timeout(CONNECT_TIMEOUT) {
-                                    Ok(Ok(stream)) => { entry.socket = HostSocket::Tcp(stream); 0 }
-                                    Ok(Err(error)) => errno(&error),
-                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    let blocking = !entry.nonblocking;
+                                    if blocking {
+                                        match receive.recv_timeout(CONNECT_TIMEOUT) {
+                                            Ok(Ok(stream)) => {
+                                                entry.socket = HostSocket::Tcp(stream);
+                                                0
+                                            }
+                                            Ok(Err(error)) => errno(&error),
+                                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                                entry.socket = HostSocket::TcpConnecting(receive);
+                                                -26
+                                            }
+                                            Err(mpsc::RecvTimeoutError::Disconnected) => -5,
+                                        }
+                                    } else {
                                         entry.socket = HostSocket::TcpConnecting(receive);
                                         -26
                                     }
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => -5,
                                 }
-                            } else {
-                                entry.socket = HostSocket::TcpConnecting(receive);
-                                -26
+                                HostSocket::TcpConnecting(_) => -7,
+                                HostSocket::Tcp(_) => -30,
+                                HostSocket::TcpListener(_) => -22,
+                                HostSocket::TcpFailed(code) => *code,
+                                HostSocket::Udp { .. } => unreachable!(),
                             }
                         }
-                        HostSocket::TcpConnecting(_) => -7,
-                        HostSocket::Tcp(_) => -30,
-                        HostSocket::TcpListener(_) => -22,
-                        HostSocket::TcpFailed(code) => *code,
                     }
-                }
-                (Ok(SocketAddr::V6(_)), _) => -5,
-                (Err(code), _) => code,
-                (_, None) => -8,
+                },
             };
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
