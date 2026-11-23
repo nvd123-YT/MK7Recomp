@@ -23,6 +23,7 @@ const POLLIN: u32 = 1;
 const POLLOUT: u32 = 1 << 3;
 const POLLERR: u32 = 1 << 5;
 const POLLHUP: u32 = 1 << 6;
+const POLLNVAL: u32 = 1 << 7;
 const SOC_SOL_CONFIG: u32 = 0xFFFE;
 const MAX_PACKET: usize = 0x10000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -800,7 +801,15 @@ fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize,
     }
 
     let started = std::time::Instant::now();
-    let timeout = (timeout_ms >= 0).then(|| Duration::from_millis(timeout_ms as u64));
+    // The HLE syscall runs on the emulation thread, unlike the asynchronous
+    // scheduler used by the hardware/other emulators. Return in short slices
+    // for an infinite guest poll so the title can retry without freezing the
+    // entire emulator if its network peer has disappeared.
+    let timeout = Some(if timeout_ms < 0 {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_millis(timeout_ms as u64)
+    });
     let mut output = vec![0; descriptors.len() * 12];
     let ready_count = loop {
         let mut ready_count = 0u32;
@@ -814,7 +823,7 @@ fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize,
                 if error { ready |= POLLERR; }
                 if hangup { ready |= POLLHUP; }
             } else {
-                ready |= POLLERR;
+                ready |= POLLNVAL;
             }
             if ready != 0 { ready_count += 1; }
             output[at..at + 4].copy_from_slice(&id.to_le_bytes());
@@ -1025,6 +1034,7 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
     let command = header.command_id();
     let id = buffer.get(&mut system.memory, 1);
     let length = buffer.get(&mut system.memory, 2) as usize;
+    let flags = buffer.get(&mut system.memory, 3);
     let address_length = buffer.get(&mut system.memory, 4) as usize;
     let mapped = mapped_buffer(system, buffer, header, 0, length.min(MAX_PACKET));
     let Some((descriptor, pointer, capacity)) = mapped else {
@@ -1037,14 +1047,28 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
             entry.update();
             let mut bytes = vec![0; capacity];
             match &mut entry.socket {
-                HostSocket::Udp { socket, .. } => socket.recv_from(&mut bytes).map(|(size, address)| {
+                HostSocket::Udp { socket, .. } => {
+                    let received = if flags & 2 != 0 {
+                        socket.peek_from(&mut bytes)
+                    } else {
+                        socket.recv_from(&mut bytes)
+                    };
+                    received.map(|(size, address)| {
                     bytes.truncate(size);
                     (bytes, address_bytes(address))
-                }).map_err(|error| errno(&error)),
-                HostSocket::Tcp(stream) => stream.read(&mut bytes).map(|size| {
+                    }).map_err(|error| errno(&error))
+                },
+                HostSocket::Tcp(stream) => {
+                    let received = if flags & 2 != 0 {
+                        stream.peek(&mut bytes)
+                    } else {
+                        stream.read(&mut bytes)
+                    };
+                    received.map(|size| {
                     bytes.truncate(size);
                     (bytes, Vec::new())
-                }).map_err(|error| errno(&error)),
+                    }).map_err(|error| errno(&error))
+                }
                 HostSocket::TcpConnecting(_) => Err(-6),
                 HostSocket::TcpFailed(code) => Err(*code),
                 _ => Err(-107),
