@@ -368,7 +368,7 @@ fn paint_test_pattern(config: Config) -> System {
 
     let mut system = System::new(config);
     if system.config.hardware_renderer {
-        match system.gpu.enable_hardware_renderer(system.config.resolution, system.config.device.clone(), None) {
+        match system.gpu.enable_hardware_renderer(system.config.resolution, system.config.device.clone(), None, system.config.gpu_vertex_shaders) {
             Ok(name) => log::info!("the 3D draws on {name}"),
             Err(error) => log::warn!("the 3D can't draw on the GPU, {error}"),
         }

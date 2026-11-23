@@ -1144,6 +1144,23 @@ fn generic_keys(shades: bool) -> Vec<PipelineKey> {
     keys
 }
 
+/// Keeps the existing integrated/discrete Auto heuristic, while allowing an
+/// explicit per-game choice. The environment variables remain force overrides.
+fn use_gpu_vertex_shaders(
+    force_cpu: bool,
+    force_gpu: bool,
+    configured: Option<bool>,
+    device_type: vk::PhysicalDeviceType,
+) -> bool {
+    if force_cpu {
+        false
+    } else if force_gpu {
+        true
+    } else {
+        configured.unwrap_or(device_type != vk::PhysicalDeviceType::INTEGRATED_GPU)
+    }
+}
+
 /// what the PICA's blend function register asks for.
 fn blend_equation(config: u32) -> vk::ColorBlendEquationEXT {
     let factor = |raw: u32| {
@@ -1753,13 +1770,13 @@ impl Hardware {
     /// on a device of its own, keeping no pipelines, as the tests draw.
     #[cfg(test)]
     pub fn new() -> Result<Hardware, String> {
-        Hardware::with_device(Arc::new(own_device()?), false, None)
+        Hardware::with_device(Arc::new(own_device()?), false, None, None)
     }
 
     /// draws with a device made by render_device, which the presenter may
     /// share, and then shows screens straight from the GPU when direct. the
     /// pipelines it compiles are kept in the file given.
-    pub fn with_device(shared: Arc<SharedDevice>, direct: bool, kept_pipelines: Option<std::path::PathBuf>) -> Result<Hardware, String> {
+    pub fn with_device(shared: Arc<SharedDevice>, direct: bool, kept_pipelines: Option<std::path::PathBuf>, gpu_vertex_shaders: Option<bool>) -> Result<Hardware, String> {
         let kept_pipelines: Option<Arc<std::path::Path>> = kept_pipelines.map(Into::into);
         let (instance, device, physical, family) = (shared.instance.clone(), shared.device.clone(), shared.physical, shared.family);
         let (logic_ops, statistics, dynamic) = (shared.logic_ops, shared.statistics, shared.dynamic);
@@ -1894,11 +1911,12 @@ impl Hardware {
                 // read each vertex's inputs and uniforms out of storage
                 // buffers, a load after another. ZAKURO_GPU_SHADERS=1 has
                 // it shade all the same
-                shades: match (std::env::var_os("ZAKURO_CPU_SHADERS"), std::env::var_os("ZAKURO_GPU_SHADERS")) {
-                    (Some(_), _) => false,
-                    (None, Some(_)) => true,
-                    (None, None) => properties.device_type != vk::PhysicalDeviceType::INTEGRATED_GPU,
-                },
+                shades: use_gpu_vertex_shaders(
+                    std::env::var_os("ZAKURO_CPU_SHADERS").is_some(),
+                    std::env::var_os("ZAKURO_GPU_SHADERS").is_some(),
+                    gpu_vertex_shaders,
+                    properties.device_type,
+                ),
                 // interpreting them all instead, to tell the two apart
                 translates: std::env::var_os("ZAKURO_INTERPRET_SHADERS").is_none(),
                 scratch: Vec::new(),
@@ -6388,6 +6406,25 @@ fn pick(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32), String> {
     }
     best.map(|(_, device, family)| (device, family))
         .ok_or_else(|| "no GPU with Vulkan 1.3, push descriptors and a D24S8 depth format".to_owned())
+}
+
+#[cfg(test)]
+mod vertex_shading_selection_tests {
+    use super::*;
+
+    #[test]
+    fn auto_keeps_the_integrated_cpu_and_discrete_gpu_heuristic() {
+        assert!(!use_gpu_vertex_shaders(false, false, None, vk::PhysicalDeviceType::INTEGRATED_GPU));
+        assert!(use_gpu_vertex_shaders(false, false, None, vk::PhysicalDeviceType::DISCRETE_GPU));
+    }
+
+    #[test]
+    fn explicit_and_legacy_environment_choices_take_precedence() {
+        assert!(use_gpu_vertex_shaders(false, false, Some(true), vk::PhysicalDeviceType::INTEGRATED_GPU));
+        assert!(!use_gpu_vertex_shaders(false, false, Some(false), vk::PhysicalDeviceType::DISCRETE_GPU));
+        assert!(use_gpu_vertex_shaders(false, true, Some(false), vk::PhysicalDeviceType::INTEGRATED_GPU));
+        assert!(!use_gpu_vertex_shaders(true, true, Some(true), vk::PhysicalDeviceType::DISCRETE_GPU));
+    }
 }
 
 #[cfg(test)]

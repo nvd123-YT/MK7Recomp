@@ -720,11 +720,12 @@ impl Gpu {
         scale: u32,
         device: Option<std::sync::Arc<SharedDevice>>,
         title: Option<u64>,
+        gpu_vertex_shaders: Option<bool>,
     ) -> Result<String, String> {
         let kept = title.and_then(raster::hardware::pipeline_cache);
         let mut hardware = match device {
-            Some(device) => raster::hardware::Hardware::with_device(device, true, kept)?,
-            None => raster::hardware::Hardware::with_device(std::sync::Arc::new(raster::hardware::own_device()?), false, kept)?,
+            Some(device) => raster::hardware::Hardware::with_device(device, true, kept, gpu_vertex_shaders)?,
+            None => raster::hardware::Hardware::with_device(std::sync::Arc::new(raster::hardware::own_device()?), false, kept, gpu_vertex_shaders)?,
         };
         let scale = hardware.set_scale(scale);
         let shaded = if hardware.shades() { "" } else { ", vertices shaded on the CPU," };
@@ -745,6 +746,19 @@ impl Gpu {
         let drawn = pack.is_some();
         self.resources.textures.set_pack(pack);
         drawn
+    }
+
+    /// whether the active Vulkan rasterizer shades vertices on the GPU,
+    /// rather than the CPU. None when the hardware rasterizer is not active.
+    pub fn vertex_shading_on_gpu(&self) -> Option<bool> {
+        #[cfg(feature = "vulkan")]
+        {
+            return self.resources.hardware.as_ref().map(|hardware| hardware.shades());
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            None
+        }
     }
 
     /// whether the 3D is drawn on the host's GPU, enable_hardware_renderer
