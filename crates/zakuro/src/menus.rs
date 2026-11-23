@@ -899,7 +899,13 @@ impl Menus {
                         ui.selectable_value(&mut settings.network_provider, zakuro_core::NetworkProvider::Pretendo, "Pretendo (experimental routing)");
                     });
                 ui.label(
-                    RichText::new("Pretendo mode enables guest DNS/HTTP routing and the local AC/FRD connection events. NASC/NEX authentication and actual matchmaking/racing are still unvalidated. MK7 normally obtains its game-server token automatically through NASC; PNID linking is optional.")
+                    RichText::new("Pretendo mode enables guest DNS/HTTP routing and local AC/FRD connection events. A real online race is still unverified.")
+                        .weak()
+                        .small(),
+                );
+                ui.checkbox(&mut settings.auto_repair_uidhmac, "Repair Pretendo UID-HMAC automatically");
+                ui.label(
+                    RichText::new("Opt-in: sends the imported Friends account PrincipalID and NEX password to api.pretendo.cc over HTTPS. The original account record is backed up before its HMAC is changed.")
                         .weak()
                         .small(),
                 );

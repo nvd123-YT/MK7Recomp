@@ -819,6 +819,7 @@ impl App {
             data_dir: self.data_dir.clone(),
             language: settings.language.code(),
             network_provider: settings.network_provider,
+            auto_repair_uidhmac: settings.auto_repair_uidhmac,
             recompiled: self.options.recompiled.clone().filter(|_| !interpret).map(Into::into),
             linked: self.linked.filter(|_| !interpret),
             find_recompiled: !interpret,

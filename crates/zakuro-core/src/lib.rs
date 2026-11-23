@@ -56,6 +56,8 @@ pub struct Config {
     pub region: u8,
     /// hostnames are routed to Pretendo when selected; this does not imply that all game online services are implemented.
     pub network_provider: NetworkProvider,
+    /// explicitly opt in to sending imported FRD credentials to Pretendo's UID-HMAC repair endpoint.
+    pub auto_repair_uidhmac: bool,
     pub language: u8,
     pub slider_3d: f32,
     /// a library 3dsrecomp built for the title, or a directory holding one
@@ -123,6 +125,7 @@ impl Default for Config {
             new3ds: false,
             region: services::cfg::REGION_USA,
             network_provider: NetworkProvider::Off,
+            auto_repair_uidhmac: false,
             language: services::cfg::LANGUAGE_ENGLISH,
             slider_3d: 0.0,
             recompiled: None,
