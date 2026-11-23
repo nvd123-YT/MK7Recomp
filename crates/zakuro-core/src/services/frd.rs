@@ -4,6 +4,7 @@
 //! offline reply.
 
 use std::collections::BTreeMap;
+use chrono::{Datelike, Timelike};
 use std::io::Write;
 use std::path::PathBuf;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -530,9 +531,18 @@ fn fixed_string<const N: usize>(value: &str) -> [u8; N] {
     output
 }
 
+/// Encodes NASC's calendar time using the packed NEX timestamp bitfields,
+/// not Unix seconds. Bits 63..26 are the year, then month/day/hour/minute/second.
 fn server_time(value: Option<&String>) -> u64 {
     value.and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok())
-        .map(|date| date.and_utc().timestamp().max(0) as u64)
+        .map(|date| {
+            ((date.year().max(0) as u64) << 26)
+                | ((date.month() as u64) << 22)
+                | ((date.day() as u64) << 17)
+                | ((date.hour() as u64) << 12)
+                | ((date.minute() as u64) << 6)
+                | (date.second() as u64)
+        })
         .unwrap_or(0)
 }
 
@@ -626,6 +636,7 @@ fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), St
             "--header", "X-GameId: 0001DB00",
             "--header", user_agent.as_str(),
             "--header", "Content-Type: application/x-www-form-urlencoded",
+            "--header", "Content-Type: application/x-www-form-urlencoded",
             "--cert", certificate.as_str(),
             "--key", private_key.as_str(),
             "--data-binary", "@-",
@@ -672,22 +683,23 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
         ..GameAuthenticationData::default()
     };
     if data.nasc_result == 1 {
-        if let Some(locator) = fields.get("locator") {
-            if let Some((host, port)) = locator.rsplit_once(':') {
-                if let Ok(port) = port.parse::<u16>() {
-                    data.server_address = fixed_string::<0x20>(host).to_vec();
-                    data.server_port = port;
-                } else {
-                    data.nasc_result = u32::MAX;
-                }
-            } else {
-                data.nasc_result = u32::MAX;
+        let endpoint = fields.get("locator").and_then(|locator| {
+            let (host, port) = locator.rsplit_once(':')?;
+            let port = port.parse::<u16>().ok()?;
+            if host.is_empty() || port == 0 { return None; }
+            Some((host, port))
+        });
+        let token = fields.get("token");
+        let timestamp = server_time(fields.get("datetime"));
+        match (endpoint, token, timestamp) {
+            (Some((host, port)), Some(token), timestamp) if timestamp != 0 => {
+                data.server_address = fixed_string::<0x20>(host).to_vec();
+                data.server_port = port;
+                data.token = fixed_string::<0x100>(token).to_vec();
+                data.server_time = timestamp;
             }
+            _ => data.nasc_result = u32::MAX,
         }
-        if let Some(token) = fields.get("token") {
-            data.token = fixed_string::<0x100>(token).to_vec();
-        }
-        data.server_time = server_time(fields.get("datetime"));
     }
     data
 }
@@ -699,14 +711,18 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
         ..ServiceLocatorData::default()
     };
     if data.nasc_result == 7 {
-        if let Some(host) = fields.get("svchost") {
-            data.service_host = fixed_string::<0x80>(host).to_vec();
+        let host = fields.get("svchost");
+        let token = fields.get("servicetoken");
+        let timestamp = server_time(fields.get("datetime"));
+        match (host, token, timestamp) {
+            (Some(host), Some(token), timestamp) if timestamp != 0 => {
+                data.service_host = fixed_string::<0x80>(host).to_vec();
+                data.service_token = fixed_string::<0x100>(token).to_vec();
+                data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
+                data.server_time = timestamp;
+            }
+            _ => data.nasc_result = u32::MAX,
         }
-        if let Some(token) = fields.get("servicetoken") {
-            data.service_token = fixed_string::<0x100>(token).to_vec();
-        }
-        data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
-        data.server_time = server_time(fields.get("datetime"));
     }
     data
 }
@@ -1245,6 +1261,16 @@ mod tests {
         assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
         assert_eq!(fields.get("locator").map(String::as_str), Some("127.0.0.1:4040"));
         assert_eq!(fields.get("token").map(String::as_str), Some("abc"));
+    }
+
+    #[test]
+    fn nasc_datetime_is_converted_to_a_packed_nex_timestamp() {
+        let datetime = "20240209121603".to_owned();
+        assert_eq!(
+            server_time(Some(&datetime)),
+            (2024u64 << 26) | (2u64 << 22) | (9u64 << 17)
+                | (12u64 << 12) | (16u64 << 6) | 3u64
+        );
     }
 
     #[test]
