@@ -676,23 +676,71 @@ fn send_data(entry: Option<&mut SocketEntry>, payload: &[u8], address: Option<So
     }
 }
 
+const BLOCKING_RECV_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn recv_udp(
+    socket: &UdpSocket,
+    payload: &mut [u8],
+    peek: bool,
+    blocking: bool,
+) -> io::Result<(usize, SocketAddr)> {
+    let started = std::time::Instant::now();
+    loop {
+        let result = if peek { socket.peek_from(payload) } else { socket.recv_from(payload) };
+        match result {
+            Ok(received) => return Ok(received),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && blocking => {
+                if started.elapsed() >= BLOCKING_RECV_TIMEOUT {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "guest blocking UDP receive timed out"));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn recv_tcp(
+    stream: &mut TcpStream,
+    payload: &mut [u8],
+    peek: bool,
+    blocking: bool,
+) -> io::Result<usize> {
+    let started = std::time::Instant::now();
+    loop {
+        let result = if peek { stream.peek(payload) } else { stream.read(payload) };
+        match result {
+            Ok(received) => return Ok(received),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock && blocking => {
+                if started.elapsed() >= BLOCKING_RECV_TIMEOUT {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "guest blocking TCP receive timed out"));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn receive(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, length: usize, flags: u32, address_length: usize) {
     let length = length.min(MAX_PACKET);
     let result = match system.services.soc.sockets.get_mut(&id) {
         None => Err(-8),
         Some(entry) => {
             entry.update();
+            let blocking = !entry.nonblocking && flags & 4 == 0;
+            let peek = flags & 2 != 0;
             let mut payload = vec![0; length];
             match &mut entry.socket {
-                HostSocket::Udp { socket, .. } => {
-                    let received = if flags & 2 != 0 { socket.peek_from(&mut payload) } else { socket.recv_from(&mut payload) };
-                    received.map(|(size, address)| (size, Some(address)))
-                        .map_err(|error| errno(&error))
-                }
-                HostSocket::Tcp(stream) => {
-                    let received = if flags & 2 != 0 { stream.peek(&mut payload) } else { stream.read(&mut payload) };
-                    received.map(|size| (size, None)).map_err(|error| errno(&error))
-                }
+                HostSocket::Udp { socket, .. } => recv_udp(socket, &mut payload, peek, blocking)
+                    .map(|(size, address)| (size, Some(address)))
+                    .map_err(|error| errno(&error)),
+                HostSocket::Tcp(stream) => recv_tcp(stream, &mut payload, peek, blocking)
+                    .map(|size| {
+                        let address = if address_length > 0 { stream.peer_addr().ok() } else { None };
+                        (size, address)
+                    })
+                    .map_err(|error| errno(&error)),
                 HostSocket::TcpConnecting(_) => Err(-6),
                 HostSocket::TcpFailed(code) => Err(*code),
                 HostSocket::TcpListener(_) | HostSocket::TcpUnbound | HostSocket::UdpUnbound => Err(-107),
@@ -706,7 +754,7 @@ fn receive(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, l
     match result {
         Ok((payload, address)) => {
             let address = if address_length > 0 { &address[..address.len().min(address_length)] } else { &[] };
-            reply_static_two(system, buffer, command, &[payload.len() as u32 as u32, payload.len() as u32], &payload, address);
+            reply_static_two(system, buffer, command, &[payload.len() as u32, payload.len() as u32], &payload, address);
         }
         Err(code) => reply_static_two(system, buffer, command, &[code as u32, 0], &[], &[]),
     }
@@ -1045,30 +1093,27 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
     let result = match system.services.soc.sockets.get_mut(&id) {
         Some(entry) => {
             entry.update();
+            let blocking = !entry.nonblocking && flags & 4 == 0;
+            let peek = flags & 2 != 0;
             let mut bytes = vec![0; capacity];
             match &mut entry.socket {
-                HostSocket::Udp { socket, .. } => {
-                    let received = if flags & 2 != 0 {
-                        socket.peek_from(&mut bytes)
-                    } else {
-                        socket.recv_from(&mut bytes)
-                    };
-                    received.map(|(size, address)| {
-                    bytes.truncate(size);
-                    (bytes, address_bytes(address))
-                    }).map_err(|error| errno(&error))
-                },
-                HostSocket::Tcp(stream) => {
-                    let received = if flags & 2 != 0 {
-                        stream.peek(&mut bytes)
-                    } else {
-                        stream.read(&mut bytes)
-                    };
-                    received.map(|size| {
-                    bytes.truncate(size);
-                    (bytes, Vec::new())
-                    }).map_err(|error| errno(&error))
-                }
+                HostSocket::Udp { socket, .. } => recv_udp(socket, &mut bytes, peek, blocking)
+                    .map(|(size, address)| {
+                        bytes.truncate(size);
+                        (bytes, address_bytes(address))
+                    })
+                    .map_err(|error| errno(&error)),
+                HostSocket::Tcp(stream) => recv_tcp(stream, &mut bytes, peek, blocking)
+                    .map(|size| {
+                        bytes.truncate(size);
+                        let address = if address_length > 0 {
+                            stream.peer_addr().ok().map(address_bytes).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        (bytes, address)
+                    })
+                    .map_err(|error| errno(&error)),
                 HostSocket::TcpConnecting(_) => Err(-6),
                 HostSocket::TcpFailed(code) => Err(*code),
                 _ => Err(-107),
@@ -1201,6 +1246,31 @@ mod tests {
         let (peer_size, peer_address) = socket.recv_from(&mut received).unwrap();
         assert_eq!(&received[..peer_size], b"race peer");
         assert_eq!(peer_address, peer.local_addr().unwrap());
+    }
+
+    #[test]
+    fn blocking_udp_receive_waits_for_a_peer_packet() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(15));
+            sender.send_to(b"prudp", destination).unwrap();
+        });
+        let mut bytes = [0u8; 16];
+        let (size, _) = recv_udp(&receiver, &mut bytes, false, true).unwrap();
+        worker.join().unwrap();
+        assert_eq!(&bytes[..size], b"prudp");
+    }
+
+    #[test]
+    fn nonblocking_udp_receive_returns_would_block_without_waiting() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut bytes = [0u8; 8];
+        let error = recv_udp(&receiver, &mut bytes, false, false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]
