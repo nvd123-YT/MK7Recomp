@@ -211,7 +211,7 @@ fn start_request(system: &mut System, handle: u32) -> Result<(), u32> {
     if let Some(context) = system.services.http.contexts.get_mut(&handle) {
         context.receiver = Some(receive);
         context.state = STATE_CONNECTING;
-        context.post_pending_request = false;
+        context.request.post_pending_request = false;
     }
     thread::spawn(move || {
         let result = perform_request(request);
