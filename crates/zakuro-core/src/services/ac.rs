@@ -31,7 +31,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
             let bytes = vec![0; (capacity as usize).min(0x200)];
             system.memory.write_bytes(pointer, &bytes);
-            buffer.reply(&mut system.memory, command, &[]);
+            buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
+            buffer.set(&mut system.memory, 1, 0);
+            buffer.set(&mut system.memory, 2, Descriptor::static_buffer(bytes.len() as u32, 0));
+            buffer.set(&mut system.memory, 3, pointer);
         }
         // ConnectAsync(process id, event handle, ACConfig).
         0x0004 => {
@@ -91,7 +94,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // GetLastErrorCode / GetCurrentAPInfo (not associated with a failing
         // connection in Pretendo mode; there is no physical AP to describe).
         0x000A => buffer.reply(&mut system.memory, command, &[0]),
-        0x000E => buffer.reply(&mut system.memory, command, &[0; 8]),
+        // GetInfraPriority returns the default infrastructure priority.
+        0x000E => buffer.reply(&mut system.memory, command, &[0]),
         // GetStatus: 3 means internet reachable/available to the guest.
         0x000C => {
             let status = if online_provider { 3 } else { 0 };

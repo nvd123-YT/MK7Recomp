@@ -588,7 +588,7 @@ fn translated_buffer(
                     return Some((raw, pointer, size.min(capacity) as usize));
                 }
                 if !mapped { found += 1; }
-                index += 1;
+                index += 2;
             }
             Descriptor::MappedBuffer { size, .. } => {
                 let pointer = buffer.get(&mut system.memory, index + 1);
@@ -698,6 +698,41 @@ fn receive_data(system: &mut System, buffer: &CommandBuffer, header: Header) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translated_buffer_walk_skips_pid_and_static_descriptors() {
+        use zakuro_common::memory_map::TLS_IPC_STATIC_BUFFERS;
+
+        let (mut system, buffer) = crate::services::tests::system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let static_descriptor = Descriptor::static_buffer(0x20, 0);
+        let static_pointer = 0x0800_1000;
+        let mapped_descriptor = (0x30 << 4) | 0xC;
+        let mapped_pointer = 0x0800_2000;
+
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS,
+            &static_descriptor.to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 4,
+            &static_pointer.to_le_bytes(),
+        );
+
+        let header = Header::new(0x0002, 2, 6);
+        buffer.set(&mut system.memory, 3, 0x20); // CurrentProcessId descriptor
+        buffer.set(&mut system.memory, 4, 0x0000_1234); // PID
+        buffer.set(&mut system.memory, 5, static_descriptor);
+        buffer.set(&mut system.memory, 6, static_pointer);
+        buffer.set(&mut system.memory, 7, mapped_descriptor);
+        buffer.set(&mut system.memory, 8, mapped_pointer);
+
+        let static_buffer = translated_buffer(&mut system, &buffer, header, false, 0).unwrap();
+        assert_eq!(static_buffer, (static_descriptor, static_pointer, 0x20));
+
+        let mapped_buffer = translated_buffer(&mut system, &buffer, header, true, 0).unwrap();
+        assert_eq!(mapped_buffer, (mapped_descriptor, mapped_pointer, 0x30));
+    }
 
     #[test]
     fn nas_form_fields_are_percent_encoded() {
