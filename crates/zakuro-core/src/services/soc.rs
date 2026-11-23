@@ -748,7 +748,7 @@ fn socket_address(entry: &mut SocketEntry, peer: bool) -> Option<SocketAddr> {
     }
 }
 
-fn poll_ready(entry: &mut SocketEntry) -> (bool, bool, bool) {
+fn poll_ready(entry: &mut SocketEntry) -> (bool, bool, bool, bool) {
     entry.update();
     match &mut entry.socket {
         HostSocket::Udp { socket, .. } => {
@@ -758,54 +758,82 @@ fn poll_ready(entry: &mut SocketEntry) -> (bool, bool, bool) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
                 Err(_) => true,
             };
-            (readable, true, false)
+            (readable, true, false, false)
         }
         HostSocket::Tcp(stream) => {
             let mut byte = [0u8; 1];
+            let mut hangup = false;
             let readable = match stream.peek(&mut byte) {
+                Ok(0) => { hangup = true; true }
                 Ok(_) => true,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
                 Err(_) => true,
             };
-            (readable, true, false)
+            (readable, !hangup, false, hangup)
         }
         HostSocket::TcpListener(listener) => match listener.accept() {
             Ok((stream, address)) => {
                 entry.accepted.push_back((stream, address));
-                (true, false, false)
+                (true, false, false, false)
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => (false, false, false),
-            Err(_) => (false, false, true),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => (false, false, false, false),
+            Err(_) => (false, false, true, false),
         },
-        HostSocket::TcpConnecting(_) => (false, false, false),
-        HostSocket::TcpFailed(_) => (false, false, true),
-        HostSocket::UdpUnbound | HostSocket::TcpUnbound => (false, false, false),
+        HostSocket::TcpConnecting(_) => (false, false, false, false),
+        HostSocket::TcpFailed(_) => (false, false, true, true),
+        HostSocket::UdpUnbound | HostSocket::TcpUnbound => (false, false, false, false),
     }
 }
 
-fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize, _timeout: i32) {
+fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize, timeout_ms: i32) {
+    // CTRPollFD is { u32 fd, u32 events, u32 revents } (12 bytes).
+    // Preserve the guest's input fields and return the number of ready fds.
     let count = count.min(256);
     let input = read_static(system, buffer, 0, count.saturating_mul(12));
-    let mut output = vec![0; count.saturating_mul(12)];
+    let mut descriptors = Vec::with_capacity(count);
     for index in 0..count {
         let at = index * 12;
         if input.len() < at + 12 { break; }
         let id = u32::from_le_bytes(input[at..at + 4].try_into().unwrap());
         let events = u32::from_le_bytes(input[at + 4..at + 8].try_into().unwrap());
-        let mut ready = 0u32;
-        if let Some(entry) = system.services.soc.sockets.get_mut(&id) {
-            let (readable, writable, error) = poll_ready(entry);
-            if readable && events & POLLIN != 0 { ready |= POLLIN; }
-            if writable && events & POLLOUT != 0 { ready |= POLLOUT; }
-            if error { ready |= POLLERR; }
-        } else {
-            ready |= POLLERR;
-        }
-        output[at..at + 4].copy_from_slice(&id.to_le_bytes());
-        output[at + 4..at + 8].copy_from_slice(&events.to_le_bytes());
-        output[at + 8..at + 12].copy_from_slice(&ready.to_le_bytes());
+        descriptors.push((id, events));
     }
-    reply_static(system, buffer, command, &[output.chunks_exact(12).filter(|row| u32::from_le_bytes(row[8..12].try_into().unwrap()) != 0).count() as u32], &output);
+
+    let started = std::time::Instant::now();
+    let timeout = (timeout_ms >= 0).then(|| Duration::from_millis(timeout_ms as u64));
+    let mut output = vec![0; descriptors.len() * 12];
+    let ready_count = loop {
+        let mut ready_count = 0u32;
+        for (index, (id, events)) in descriptors.iter().copied().enumerate() {
+            let at = index * 12;
+            let mut ready = 0u32;
+            if let Some(entry) = system.services.soc.sockets.get_mut(&id) {
+                let (readable, writable, error, hangup) = poll_ready(entry);
+                if readable && events & POLLIN != 0 { ready |= POLLIN; }
+                if writable && events & POLLOUT != 0 { ready |= POLLOUT; }
+                if error { ready |= POLLERR; }
+                if hangup { ready |= POLLHUP; }
+            } else {
+                ready |= POLLERR;
+            }
+            if ready != 0 { ready_count += 1; }
+            output[at..at + 4].copy_from_slice(&id.to_le_bytes());
+            output[at + 4..at + 8].copy_from_slice(&events.to_le_bytes());
+            output[at + 8..at + 12].copy_from_slice(&ready.to_le_bytes());
+        }
+
+        if ready_count != 0 || timeout_ms == 0 {
+            break ready_count;
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            break 0;
+        }
+        // A 1 ms sleep avoids burning a CPU core while a guest NEX socket
+        // waits for a server ACK or a peer packet. A negative timeout follows
+        // POSIX poll semantics and waits until an fd becomes ready.
+        thread::sleep(Duration::from_millis(1));
+    };
+    reply_static(system, buffer, command, &[ready_count], &output);
 }
 
 fn host_by_name(name: &str) -> (i32, Vec<u8>) {
