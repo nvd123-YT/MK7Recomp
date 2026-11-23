@@ -29,7 +29,10 @@ impl Recorder {
         if self.last != Some(input) {
             let (x, y) = input.touch.map_or((-1, -1), |(x, y)| (x as i32, y as i32));
             let [tilt_x, tilt_y] = input.tilt;
-            let line = format!(
+            // Avoid formatting an intermediate String and flushing the file
+            // for every input change; both can stall the frame emulation loop.
+            if writeln!(
+                self.out,
                 "{} {:x} {:?} {:?} {x} {y} {tilt_x:?} {tilt_y:?} {:?} {:?}",
                 self.frame,
                 input.buttons.bits(),
@@ -37,14 +40,25 @@ impl Recorder {
                 input.circle_y,
                 input.c_stick_x,
                 input.c_stick_y
-            );
-            // written through at once, the run may end in a crash
-            if writeln!(self.out, "{line}").and_then(|()| self.out.flush()).is_err() {
+            ).is_err() {
                 log::warn!("could not write to the input recording");
+            } else {
+                self.last = Some(input);
             }
-            self.last = Some(input);
         }
         self.frame += 1;
+        // At 60 FPS, bound buffered data loss to about two seconds.
+        if self.frame % 120 == 0 && self.out.flush().is_err() {
+            log::warn!("could not flush the input recording");
+        }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        if self.out.flush().is_err() {
+            log::warn!("could not finish writing the input recording");
+        }
     }
 }
 

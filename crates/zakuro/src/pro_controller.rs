@@ -108,7 +108,7 @@ pub fn parse(report: &[u8], calibration: &mut Calibration) -> Option<Report> {
 #[derive(Default)]
 pub struct Controllers {
     #[cfg(target_os = "macos")]
-    latest: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, (Report, std::time::Instant)>>>,
+    latest: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, (std::sync::Arc<Report>, std::time::Instant)>>>,
 }
 
 impl Controllers {
@@ -131,7 +131,7 @@ impl Controllers {
     }
 
     /// the latest report of each controller sending full reports now.
-    pub fn reports(&self) -> Vec<Report> {
+    pub fn reports(&self) -> Vec<std::sync::Arc<Report>> {
         #[cfg(target_os = "macos")]
         {
             // a controller whose reports stopped, gone or back to the
@@ -154,7 +154,7 @@ mod reader {
 
     use super::{is_pro_controller, parse, Calibration, Report};
 
-    type Latest = Arc<Mutex<BTreeMap<String, (Report, Instant)>>>;
+    type Latest = Arc<Mutex<BTreeMap<String, (Arc<Report>, Instant)>>>;
 
     /// opens each Pro Controller as it shows up, shared with the system and
     /// gilrs, and reads it on a thread of its own.
@@ -210,7 +210,7 @@ mod reader {
                 Ok(length) => {
                     if let Some(report) = parse(&buffer[..length], &mut calibration) {
                         if let Ok(mut latest) = latest.lock() {
-                            latest.insert(path.to_owned(), (report, Instant::now()));
+                            latest.insert(path.to_owned(), (Arc::new(report), Instant::now()));
                         }
                     }
                 }

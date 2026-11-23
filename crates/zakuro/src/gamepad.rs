@@ -35,7 +35,7 @@ pub struct Gamepads {
 
 /// whether gilrs's reading of a controller is left out, a Pro Controller's
 /// while one is read from its reports.
-fn left_out(pad: &Gamepad, reports: &[Report]) -> bool {
+fn left_out(pad: &Gamepad, reports: &[std::sync::Arc<Report>]) -> bool {
     !reports.is_empty() && is_pro_controller(pad.vendor_id(), pad.product_id(), pad.name())
 }
 
@@ -137,7 +137,8 @@ impl Gamepads {
             let right = [pad.value(Axis::RightStickX), pad.value(Axis::RightStickY)];
             sticks(&mut state, left, right);
 
-            if wheel.enabled && wheel.device_id.as_deref() == Some(pad.uuid().to_string().as_str()) {
+            let device_id = pad.uuid().to_string();
+            if wheel.enabled && wheel.device_id.as_deref() == Some(device_id.as_str()) {
                 apply_wheel(&mut state, &pad, wheel);
             }
         }
