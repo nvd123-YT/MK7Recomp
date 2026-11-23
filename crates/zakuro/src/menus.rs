@@ -15,6 +15,36 @@ use crate::settings::{
     game_key, CameraSource, Filter, GameSettings, Keys, Language, MicrophoneSource, Orientation, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape, VertexShading,
 };
 
+/// Sampled runtime metrics shown by the F3 performance HUD.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Performance {
+    pub fps: f32,
+    pub frame_ms: f32,
+    pub p95_ms: f32,
+    pub worst_ms: f32,
+    pub emulation_ms: f32,
+    /// Host CPU time spent processing GPU command lists, not hardware GPU time.
+    pub gpu_host_ms: f32,
+    pub draws_per_frame: f32,
+    pub vertices_per_frame: f32,
+    pub gpu_vertex_shaders: Option<bool>,
+}
+
+impl Performance {
+    pub fn report(self) -> String {
+        let shading = match self.gpu_vertex_shaders {
+            Some(true) => "GPU vertex shaders",
+            Some(false) => "CPU vertex shaders",
+            None => "hardware rasterizer unavailable",
+        };
+        format!(
+            "Mario Kart 7 Recomp performance\nFPS: {:.1}\nFrame time: {:.2} ms average, {:.2} ms p95, {:.2} ms worst\nEmulation: {:.2} ms/frame\nGPU command host time: {:.2} ms/frame\nDraw calls: {:.1}/frame\nVertices: {:.0}/frame\n{}",
+            self.fps, self.frame_ms, self.p95_ms, self.worst_ms, self.emulation_ms,
+            self.gpu_host_ms, self.draws_per_frame, self.vertices_per_frame, shading
+        )
+    }
+}
+
 /// what the user asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -406,14 +436,14 @@ impl Menus {
     }
 
     /// what goes over a running game, the menu when it is open and the
-    /// frame rate when asked for.
+    /// sampled performance HUD when asked for.
     #[allow(clippy::too_many_arguments)]
     pub fn game(
         &mut self,
         ui: &mut egui::Ui,
         name: &str,
         program_id: Option<u64>,
-        fps: Option<f32>,
+        performance: Option<Performance>,
         recompiled: bool,
         fast: bool,
         jobs: &[Job],
@@ -448,11 +478,18 @@ impl Menus {
                     });
                 });
         }
-        if let Some(fps) = fps {
+        if let Some(perf) = performance {
             // clicks go through to the screen under it
-            egui::Area::new(egui::Id::new("fps")).fixed_pos(egui::pos2(8.0, 8.0)).interactable(false).show(&ctx, |ui| {
+            egui::Area::new(egui::Id::new("performance hud")).fixed_pos(egui::pos2(8.0, 8.0)).interactable(false).show(&ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(RichText::new(format!("{fps:.0} fps")).monospace());
+                    ui.monospace(format!("{:.0} FPS  ·  {:.2} ms/frame  ·  p95 {:.2} ms  ·  worst {:.2} ms", perf.fps, perf.frame_ms, perf.p95_ms, perf.worst_ms));
+                    ui.monospace(format!("Emulation {:.2} ms/frame  ·  GPU host {:.2} ms/frame", perf.emulation_ms, perf.gpu_host_ms));
+                    ui.monospace(format!("{:.1} draws/frame  ·  {:.0} vertices/frame", perf.draws_per_frame, perf.vertices_per_frame));
+                    ui.monospace(match perf.gpu_vertex_shaders {
+                        Some(true) => "Vertex shaders: GPU",
+                        Some(false) => "Vertex shaders: CPU",
+                        None => "Vertex shaders: hardware rasterizer unavailable",
+                    });
                 });
             });
         }
@@ -482,7 +519,12 @@ impl Menus {
                     ui.add(egui::DragValue::new(&mut self.slot).range(1..=9).prefix("Slot "));
                     ui.label(RichText::new(saved.unwrap_or("empty")).weak());
                 });
-                ui.label(RichText::new("F2 mute · F3 FPS · F6/F7 slots · F5 save · F8 load").weak().small());
+                ui.label(RichText::new("F2 mute · F3 performance HUD · F6/F7 slots · F5 save · F8 load").weak().small());
+                if let Some(perf) = performance {
+                    if ui.button("Copy performance report").on_hover_text("Copy frame-time percentiles, CPU/GPU-host timings and geometry workload.").clicked() {
+                        ui.ctx().copy_text(perf.report());
+                    }
+                }
                 ui.horizontal(|ui| {
                     if ui.add_sized([98.0, 28.0], egui::Button::new("Save state")).on_hover_text("F5 saves to this slot while playing.").clicked() {
                         actions.push(Action::SaveState);
