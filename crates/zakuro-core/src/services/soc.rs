@@ -1011,8 +1011,7 @@ fn set_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, value:
     0
 }
 
-/// Selects the host IPv4 address the OS would use for an outbound Internet
-/// datagram. UDP connect performs route selection only; it sends no packet.
+/// Select the host IPv4 address used for outbound Internet traffic.
 fn local_interface_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("1.1.1.1:53").ok()?;
@@ -1022,6 +1021,93 @@ fn local_interface_ipv4() -> Option<Ipv4Addr> {
         }
         _ => None,
     }
+}
+
+/// Return the actual address, netmask and directed-broadcast address for the
+/// interface selected by the host's default Internet route.
+#[cfg(unix)]
+fn local_interface_info() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+    use std::ptr;
+
+    let selected = local_interface_ipv4()?;
+    let mut interfaces: *mut libc::ifaddrs = ptr::null_mut();
+    // SAFETY: getifaddrs initializes a linked list, which is released below
+    // with freeifaddrs on every successful allocation.
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return None;
+    }
+
+    let mut found = None;
+    let mut current = interfaces;
+    while !current.is_null() {
+        // SAFETY: current is a node in the getifaddrs list.
+        let interface = unsafe { &*current };
+        if !interface.ifa_addr.is_null()
+            && !interface.ifa_netmask.is_null()
+            // SAFETY: both pointers have AF_INET family and therefore point
+            // to sockaddr_in values.
+            && unsafe { (*interface.ifa_addr).sa_family as i32 } == libc::AF_INET
+        {
+            let address = unsafe {
+                (*(interface.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr.to_ne_bytes()
+            };
+            if Ipv4Addr::from(address) == selected {
+                let mask = unsafe {
+                    (*(interface.ifa_netmask as *const libc::sockaddr_in)).sin_addr.s_addr.to_ne_bytes()
+                };
+                let broadcast = std::array::from_fn(|index| address[index] | !mask[index]);
+                found = Some((selected, Ipv4Addr::from(mask), Ipv4Addr::from(broadcast)));
+                break;
+            }
+        }
+        current = interface.ifa_next;
+    }
+
+    // SAFETY: interfaces was initialized by a successful getifaddrs call.
+    unsafe { libc::freeifaddrs(interfaces) };
+    found
+}
+
+/// Windows does not expose getifaddrs. Query the adapter selected by the
+/// default IPv4 route using the inbox PowerShell networking cmdlets.
+#[cfg(windows)]
+fn local_interface_info() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+    use std::process::Command;
+
+    let address = local_interface_ipv4()?;
+    let script = format!(
+        "$ip='{}'; $route=Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric,InterfaceMetric | Select-Object -First 1; if ($null -eq $route) {{ exit 2 }}; Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex | Where-Object {{ $_.IPAddress -eq $ip }} | Select-Object -ExpandProperty PrefixLength",
+        address
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let prefix = String::from_utf8_lossy(&output.stdout).trim().parse::<u8>().ok()?;
+    ipv4_info_from_prefix(address, prefix)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_interface_info() -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+    local_interface_ipv4().map(|address| ipv4_info_from_prefix(address, 32))
+}
+
+/// Derive a subnet mask and broadcast address from an IPv4 prefix length.
+fn ipv4_info_from_prefix(address: Ipv4Addr, prefix: u8) -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
+    if prefix > 32 {
+        return None;
+    }
+    let address_number = u32::from_be_bytes(address.octets());
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    let broadcast = (address_number & mask) | !mask;
+    Some((
+        address,
+        Ipv4Addr::from(mask.to_be_bytes()),
+        Ipv4Addr::from(broadcast.to_be_bytes()),
+    ))
 }
 
 fn network_option(system: &System, level: u32, option: u32, length: usize) -> Vec<u8> {
@@ -1040,10 +1126,10 @@ fn network_option(system: &System, level: u32, option: u32, length: usize) -> Ve
         // Rust has no portable interface-netmask API. Use a host-route mask
         // instead of inventing a LAN subnet or incorrectly claiming 127/8.
         0x4003 if bytes.len() >= 12 => {
-            let Some(address) = local_interface_ipv4() else { return Vec::new() };
+            let Some((address, netmask, broadcast)) = local_interface_info() else { return Vec::new() };
             bytes[0..4].copy_from_slice(&address.octets());
-            bytes[4..8].copy_from_slice(&[255, 255, 255, 255]);
-            bytes[8..12].copy_from_slice(&[0, 0, 0, 0]);
+            bytes[4..8].copy_from_slice(&netmask.octets());
+            bytes[8..12].copy_from_slice(&broadcast.octets());
         }
         _ => return Vec::new(),
     }
@@ -1167,6 +1253,15 @@ mod tests {
             mapped_buffer(&mut system, &buffer, header, 0, 0x40),
             Some((mapped_descriptor, mapped_pointer, 0x30))
         );
+    }
+
+    #[test]
+    fn interface_network_info_uses_prefix_length() {
+        let (address, mask, broadcast) = ipv4_info_from_prefix(Ipv4Addr::new(192, 168, 1, 64), 26).unwrap();
+        assert_eq!(address, Ipv4Addr::new(192, 168, 1, 64));
+        assert_eq!(mask, Ipv4Addr::new(255, 255, 255, 192));
+        assert_eq!(broadcast, Ipv4Addr::new(192, 168, 1, 127));
+        assert!(ipv4_info_from_prefix(address, 33).is_none());
     }
 
     #[test]
