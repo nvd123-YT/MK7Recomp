@@ -31,10 +31,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
             let bytes = vec![0; (capacity as usize).min(0x200)];
             system.memory.write_bytes(pointer, &bytes);
-            buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
-            buffer.set(&mut system.memory, 1, 0);
-            buffer.set(&mut system.memory, 2, Descriptor::static_buffer(bytes.len() as u32, 0));
-            buffer.set(&mut system.memory, 3, pointer);
+            buffer.reply(&mut system.memory, command, &[]);
         }
         // ConnectAsync(process id, event handle, ACConfig).
         0x0004 => {
