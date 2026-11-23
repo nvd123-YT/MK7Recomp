@@ -263,8 +263,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let handle = buffer.get(&mut system.memory, 1);
             let name_len = buffer.get(&mut system.memory, 2) as usize;
             let value_len = buffer.get(&mut system.memory, 3) as usize;
-            let name = read_static(system, buffer, 3, name_len.min(MAX_HEADER));
-            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 1, value_len.min(MAX_HEADER)) else {
+            let name = read_static(system, buffer, header, 0, name_len.min(MAX_HEADER));
+            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 0, value_len.min(MAX_HEADER)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
@@ -285,8 +285,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let handle = buffer.get(&mut system.memory, 1);
             let name_len = buffer.get(&mut system.memory, 2) as usize;
             let value_len = buffer.get(&mut system.memory, 3) as usize;
-            let name = nul_string(&read_static(system, buffer, 3, name_len.min(MAX_HEADER)));
-            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 1, value_len.min(MAX_HEADER)) else {
+            let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
+            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 0, value_len.min(MAX_HEADER)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
@@ -332,7 +332,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             else { buffer.reply_error(&mut system.memory, command, not_connected()); }
         }
         // GetResponseStatusCode(handle)
-        0x0022 => {
+        0x0022 | 0x0023 => {
             let handle = buffer.get(&mut system.memory, 1);
             let response = system.services.http.contexts.get_mut(&handle).and_then(|context| {
                 context.refresh();
@@ -344,14 +344,14 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             }
         }
         // GetResponseHeader(handle, name length, value capacity, static name, mapped output)
-        0x001E => {
+        0x001E | 0x001F => {
             let (handle, name_len, capacity) = (
                 buffer.get(&mut system.memory, 1),
                 buffer.get(&mut system.memory, 2) as usize,
                 buffer.get(&mut system.memory, 3) as usize,
             );
-            let name = nul_string(&read_static(system, buffer, 3, name_len.min(MAX_HEADER)));
-            let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 1, capacity.min(MAX_HEADER)) else {
+            let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
+            let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_HEADER)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
@@ -372,7 +372,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             reply_mapped(system, buffer, command, &[bytes.len() as u32], descriptor, pointer);
         }
         // GetResponseData(handle, capacity, mapped output), response header block.
-        0x0020 => {
+        0x0020 | 0x0021 => {
             let (handle, capacity) = (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2) as usize);
             let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_BODY)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
@@ -389,13 +389,13 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             }).unwrap_or_default();
             let count = bytes.len().min(capacity);
             system.memory.write_bytes(pointer, &bytes[..count]);
-            reply_mapped(system, buffer, command, &[count as u32], descriptor, pointer);
+            buffer.reply(&mut system.memory, command, &[count as u32]);
         }
         // RegisterURLReplacement(pattern length, replacement length, two static buffers)
         0x0C00 => {
             let (pattern_len, replacement_len) = (buffer.get(&mut system.memory, 1) as usize, buffer.get(&mut system.memory, 2) as usize);
-            let pattern = nul_string(&read_static(system, buffer, 0, pattern_len.min(MAX_URL)));
-            let replacement = nul_string(&read_static(system, buffer, 1, replacement_len.min(MAX_URL)));
+            let pattern = nul_string(&read_static(system, buffer, header, 0, pattern_len.min(MAX_URL)));
+            let replacement = nul_string(&read_static(system, buffer, header, 1, replacement_len.min(MAX_URL)));
             if pattern.is_empty() { buffer.reply_error(&mut system.memory, command, not_connected()); }
             else {
                 system.services.http.replacements.push((pattern, replacement));
@@ -405,7 +405,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // UnregisterURLReplacement(pattern length, static pattern)
         0x0C01 => {
             let length = buffer.get(&mut system.memory, 1) as usize;
-            let pattern = nul_string(&read_static(system, buffer, 0, length.min(MAX_URL)));
+            let pattern = nul_string(&read_static(system, buffer, header, 0, length.min(MAX_URL)));
             let before = system.services.http.replacements.len();
             system.services.http.replacements.retain(|(known, _)| known != &pattern);
             if before == system.services.http.replacements.len() { buffer.reply_error(&mut system.memory, command, not_connected()); }
@@ -468,8 +468,8 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
     let result = (|| {
         let mut command = Command::new("curl");
         command.args([
-            "--silent", "--show-error", "--location",
-            "--proto", "=http,https", "--proto-redir", "=http,https",
+            "--silent", "--show-error",
+            "--proto", "=http,https",
             "--connect-timeout", "12", "--max-time", "35",
             "--dump-header", header_path.to_str().ok_or_else(|| "invalid HTTP header output path".to_owned())?,
             "--output", body_path.to_str().ok_or_else(|| "invalid HTTP body output path".to_owned())?,
@@ -479,6 +479,11 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         for (name, value) in &request.headers {
             command.arg("--header").arg(format!("{name}: {value}"));
         }
+        if !request.post_fields.is_empty()
+            && !request.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            command.arg("--header").arg("Content-Type: application/x-www-form-urlencoded");
+        }
         if request.use_client_certificate {
             command.arg("--cert").arg(cert.as_ref().unwrap());
             command.arg("--key").arg(key.as_ref().unwrap());
@@ -487,6 +492,9 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
             command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
         } else {
             command.stdin(Stdio::null());
+        }
+        if !request.use_client_certificate {
+            command.args(["--location", "--proto-redir", "=https"]);
         }
         command.arg(&request.url).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -558,22 +566,70 @@ fn not_connected() -> u32 {
     zakuro_common::result::errors::NOT_CONNECTED.0
 }
 
-fn read_static(system: &mut System, buffer: &CommandBuffer, id: u32, requested: usize) -> Vec<u8> {
-    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
-    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, id);
-    let length = requested.min(capacity as usize);
+fn translated_buffer(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    header: Header,
+    mapped: bool,
+    ordinal: u32,
+) -> Option<(u32, u32, usize)> {
+    let mut index = header.normal_params() + 1;
+    let end = index + header.translate_params();
+    let mut found = 0u32;
+    while index < end {
+        let raw = buffer.get(&mut system.memory, index);
+        match Descriptor::parse(raw) {
+            Descriptor::Handles { count, .. } => index += count + 1,
+            Descriptor::CurrentProcessId => index += 1,
+            Descriptor::StaticBuffer { size, buffer_id } => {
+                if !mapped && found == ordinal {
+                    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+                    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, buffer_id);
+                    return Some((raw, pointer, size.min(capacity) as usize));
+                }
+                if !mapped { found += 1; }
+                index += 1;
+            }
+            Descriptor::MappedBuffer { size, .. } => {
+                let pointer = buffer.get(&mut system.memory, index + 1);
+                if mapped && found == ordinal {
+                    return Some((raw, pointer, size as usize));
+                }
+                if mapped { found += 1; }
+                index += 2;
+            }
+            Descriptor::Unknown(_) => index += 1,
+        }
+    }
+    None
+}
+
+fn read_static(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    header: Header,
+    ordinal: u32,
+    requested: usize,
+) -> Vec<u8> {
+    let Some((_, pointer, capacity)) = translated_buffer(system, buffer, header, false, ordinal) else {
+        return Vec::new();
+    };
+    let length = requested.min(capacity);
     let mut bytes = vec![0; length];
     system.memory.read_bytes(pointer, &mut bytes);
     bytes
 }
 
-/// Returns descriptor, pointer and a bounded copy of a guest mapped buffer.
-fn mapped_bytes(system: &mut System, buffer: &CommandBuffer, header: Header, id: u32, requested: usize) -> Option<(u32, u32, Vec<u8>)> {
-    let descriptor_index = header.normal_params() + 1 + id * 2;
-    let descriptor = buffer.get(&mut system.memory, descriptor_index);
-    let Descriptor::MappedBuffer { size, .. } = Descriptor::parse(descriptor) else { return None };
-    let pointer = buffer.get(&mut system.memory, descriptor_index + 1);
-    let length = requested.min(size as usize);
+/// Returns the original descriptor, pointer and a bounded copy of a guest mapped buffer.
+fn mapped_bytes(
+    system: &mut System,
+    buffer: &CommandBuffer,
+    header: Header,
+    ordinal: u32,
+    requested: usize,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let (descriptor, pointer, capacity) = translated_buffer(system, buffer, header, true, ordinal)?;
+    let length = requested.min(capacity);
     let mut bytes = vec![0; length];
     system.memory.read_bytes(pointer, &mut bytes);
     Some((descriptor, pointer, bytes))
@@ -615,6 +671,7 @@ fn receive_data(system: &mut System, buffer: &CommandBuffer, header: Header) {
     if let Some(context) = system.services.http.contexts.get_mut(&handle) {
         context.refresh();
         if let Some(response) = &context.response {
+            let total = response.body.len();
             let end = context.body_offset.saturating_add(requested.min(MAX_BODY)).min(total);
             chunk.extend_from_slice(&response.body[context.body_offset.min(total)..end]);
             context.body_offset = end;
