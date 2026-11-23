@@ -1055,6 +1055,7 @@ impl App {
                         format!("Fast forward {}", if self.fast_forward_toggle { "on" } else { "off" }),
                         Instant::now(),
                     ));
+                    return;
                 }
                 KeyCode::F3 => {
                     self.settings.show_fps = !self.settings.show_fps;
