@@ -38,7 +38,7 @@ use library::Library;
 use menus::{Action, Menus};
 use present::Backend;
 use recompile::{Job, Stage, Toolchain, Wanted};
-use settings::{CameraSource, MicrophoneSource, Renderer, Screens, Settings, VertexShading};
+use settings::{CameraSource, MicrophoneSource, Renderer, Screens, Settings};
 
 pub use zakuro_core::memory::Memory;
 pub use zakuro_core::recompiled::Linked;

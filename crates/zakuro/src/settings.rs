@@ -939,6 +939,7 @@ mod tests {
         let settings: Settings = toml::from_str("show_fps = true\n[keys]\na = \"KeyK\"\n").unwrap();
         assert!(settings.show_fps);
         assert_eq!(settings.resolution, 2);
+        assert_eq!(settings.vertex_shading, VertexShading::Auto);
         assert_eq!(settings.keys.a, KeyCode::KeyK);
         assert_eq!(settings.keys.b, Keys::default().b);
         assert_eq!(settings.scale, 2);

@@ -1065,7 +1065,7 @@ impl Menus {
                 own(ui, &mut game.language, &general.language, language);
                 own(ui, &mut game.recompiled, &general.recompiled, code);
                 ui.separator();
-                ui.label(RichText::new("Where the 3D is drawn, its resolution, the texture packs, the language and what runs the code change the next time the game starts, or with Reset.").weak());
+                ui.label(RichText::new("Where the 3D is drawn, vertex shading, its resolution, texture packs, the language and what runs the code change the next time the game starts, or with Reset.").weak());
                 if ui.add_enabled(game != GameSettings::default(), egui::Button::new("Follow the general settings in everything")).clicked() {
                     game = GameSettings::default();
                 }
@@ -1211,7 +1211,7 @@ fn vertex_shading(ui: &mut egui::Ui, value: &mut VertexShading) {
             }
         })
         .response
-        .on_hover_text("Auto uses CPU shading on integrated GPUs and GPU shading on discrete GPUs. Try GPU on vertex-heavy tracks and compare with the performance HUD.");
+        .on_hover_text("Auto uses CPU shading on integrated GPUs and GPU shading on discrete GPUs. Try GPU on vertex-heavy tracks and compare with the performance HUD. This setting takes effect the next time you start the game or Reset.");
 }
 
 fn resolution(ui: &mut egui::Ui, value: &mut u32) {
