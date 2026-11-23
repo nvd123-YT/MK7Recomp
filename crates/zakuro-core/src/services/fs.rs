@@ -1109,6 +1109,7 @@ fn system_archive_data(path: NcchArchivePath, data_dir: Option<&std::path::Path>
         (SHARED_DATA_ARCHIVE, SYSTEM_FILE_REGION_MANIFEST) => system_archives::region_manifest(),
         (SYSTEM_DATA_ARCHIVE, SYSTEM_FILE_BAD_WORD_LIST) => system_archives::bad_word_list(),
         (SHARED_DATA_ARCHIVE, SYSTEM_FILE_MII_DATA) => system_archives::mii_data(data_dir),
+        (SHARED_DATA_ARCHIVE, SYSTEM_FILE_TLS_ROOT_CERTIFICATES) => system_archives::tls_root_certificates(data_dir),
         _ => Vec::new(),
     }
 }

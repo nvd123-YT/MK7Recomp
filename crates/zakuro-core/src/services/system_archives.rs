@@ -93,6 +93,38 @@ pub fn mii_data(data_dir: Option<&std::path::Path>) -> Vec<u8> {
     romfs_build::build(&[BuildFile { path: "CFL_Res.dat".into(), data }])
 }
 
+/// where a decrypted NAND dump's shared TLS-root-certificate RomFS is
+/// found. This archive is title 0004009B00010602; it is separate from the
+/// ClCertA client certificate/key pair used for mutual TLS.
+const TLS_ROOT_ARCHIVE_PATHS: &[&str] = &[
+    "sysdata/TLSRootCerts.romfs",
+    "sysdata/tls-root-certificates.romfs",
+    "nand/00000000000000000000000000000000/title/0004009b/00010602/content/00000000.app.romfs",
+    "user/nand/00000000000000000000000000000000/title/0004009b/00010602/content/00000000.app.romfs",
+];
+
+/// reads the user's own 3DS TLS trust-store archive. No Nintendo certificate
+/// database is bundled; the game can still boot when the archive is absent,
+/// but HTTPS HLE must report that trust roots are unavailable.
+pub fn tls_root_certificates(data_dir: Option<&std::path::Path>) -> Vec<u8> {
+    let candidates = TLS_ROOT_ARCHIVE_PATHS
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(TLS_ROOT_ARCHIVE_PATHS.iter().filter_map(|path| Some(data_dir?.join(path))));
+    for path in candidates {
+        match std::fs::read(&path) {
+            Ok(bytes) if !bytes.is_empty() => {
+                log::info!("using the dumped 3DS TLS root certificate archive from {} ({} KiB)", path.display(), bytes.len() / 1024);
+                return bytes;
+            }
+            Ok(_) => log::warn!("the dumped TLS root certificate archive at {} is empty", path.display()),
+            Err(_) => {}
+        }
+    }
+    log::warn!("no 3DS TLS root certificate archive found; HTTPS requests will not have the console's trust store");
+    Vec::new()
+}
+
 /// the per-region table of countries, two sections (the second patches the
 /// first), then a copy of each section-0 entry's sort order, then a bitmap
 /// of which countries are eShop-locked.
@@ -234,6 +266,21 @@ mod tests {
         assert_eq!(resource(mii_data(Some(&dir))), dumped);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(resource(mii_data(Some(&dir))).iter().all(|&byte| byte == 0));
+    }
+
+    /// the TLS trust store is loaded from the user's own decrypted NAND
+    /// dump, and the project does not ship Nintendo's certificates.
+    #[test]
+    fn the_tls_root_archive_uses_user_supplied_system_data() {
+        let dir = std::env::temp_dir().join(format!("zakuro-tls-roots-{}", std::process::id()));
+        let relative = std::path::Path::new(TLS_ROOT_ARCHIVE_PATHS[0]);
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let dumped = b"test certificate archive".to_vec();
+        std::fs::write(&path, &dumped).unwrap();
+        assert_eq!(tls_root_certificates(Some(&dir)), dumped);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(tls_root_certificates(Some(&dir)).is_empty());
     }
 
     #[test]
