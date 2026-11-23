@@ -1,0 +1,854 @@
+//! soc:U, the guest TCP/UDP socket interface used by HTTP and NEX.
+//!
+//! Host sockets are deliberately non-blocking after creation. A guest which
+//! wants a blocking connect gets a bounded wait; a non-blocking connect is
+//! completed on a worker and reported through the normal poll/read path.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
+
+use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
+use crate::System;
+
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_DGRAM: u32 = 2;
+const IPPROTO_TCP: u32 = 6;
+const IPPROTO_UDP: u32 = 17;
+const POLLIN: u32 = 1;
+const POLLOUT: u32 = 1 << 3;
+const POLLERR: u32 = 1 << 5;
+const POLLHUP: u32 = 1 << 6;
+const SOC_SOL_CONFIG: u32 = 0xFFFE;
+const MAX_PACKET: usize = 0x10000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+enum HostSocket {
+    UdpUnbound,
+    Udp(UdpSocket),
+    TcpUnbound,
+    TcpConnecting(Receiver<io::Result<TcpStream>>),
+    Tcp(TcpStream),
+    TcpListener(TcpListener),
+    TcpFailed(i32),
+}
+
+struct SocketEntry {
+    socket: HostSocket,
+    nonblocking: bool,
+    accepted: VecDeque<(TcpStream, SocketAddr)>,
+}
+
+impl SocketEntry {
+    fn new(socket: HostSocket) -> Self {
+        Self { socket, nonblocking: false, accepted: VecDeque::new() }
+    }
+
+    fn update(&mut self) {
+        let completed = match &self.socket {
+            HostSocket::TcpConnecting(receiver) => match receiver.try_recv() {
+                Ok(Ok(stream)) => Some(Ok(stream)),
+                Ok(Err(error)) => Some(Err(errno(&error))),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(-5)),
+                Err(mpsc::TryRecvError::Empty) => None,
+            },
+            _ => None,
+        };
+        if let Some(completed) = completed {
+            self.socket = match completed {
+                Ok(stream) => HostSocket::Tcp(stream),
+                Err(code) => HostSocket::TcpFailed(code),
+            };
+        }
+    }
+}
+
+/// Runtime-only sockets are intentionally omitted from save states. Restoring
+/// a save state must not resurrect stale host file descriptors or credentials.
+pub struct SocState {
+    sockets: BTreeMap<u32, SocketEntry>,
+    initialized: bool,
+    next_socket: u32,
+}
+
+impl Default for SocState {
+    fn default() -> Self {
+        Self { sockets: BTreeMap::new(), initialized: false, next_socket: 3 }
+    }
+}
+
+impl SocState {
+    fn allocate(&mut self, socket: HostSocket) -> u32 {
+        let id = self.next_socket.max(3);
+        self.next_socket = id.wrapping_add(1).max(3);
+        self.sockets.insert(id, SocketEntry::new(socket));
+        id
+    }
+
+    fn close_all(&mut self) {
+        self.sockets.clear();
+        self.initialized = false;
+        self.next_socket = 3;
+    }
+}
+
+/// Handles the commands exposed by libctru's soc:U service.
+pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
+    let command = header.command_id();
+    let word = |system: &mut System, index| buffer.get(&mut system.memory, index);
+    match command {
+        // InitializeSockets(memory size, process id, shared memory)
+        0x0001 => {
+            system.services.soc.initialized = true;
+            buffer.reply(&mut system.memory, command, &[]);
+        }
+        // Socket(domain, type, protocol)
+        0x0002 => {
+            let (domain, kind, protocol) = (word(system, 1), word(system, 2), word(system, 3));
+            let result = if domain != AF_INET {
+                -5
+            } else if protocol != 0 && !matches!((kind, protocol), (SOCK_STREAM, IPPROTO_TCP) | (SOCK_DGRAM, IPPROTO_UDP)) {
+                -68
+            } else {
+                match kind {
+                    SOCK_STREAM => {
+                        let id = system.services.soc.allocate(HostSocket::TcpUnbound);
+                        id as i32
+                    }
+                    SOCK_DGRAM => {
+                        let id = system.services.soc.allocate(HostSocket::UdpUnbound);
+                        id as i32
+                    }
+                    _ => -69,
+                }
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Listen(fd, backlog). Binding creates the host listener in std::net.
+        0x0003 => {
+            let id = word(system, 1);
+            let result = match system.services.soc.sockets.get(&id) {
+                Some(entry) if matches!(entry.socket, HostSocket::TcpListener(_)) => 0,
+                Some(_) => -22,
+                None => -8,
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Accept(fd, max address length)
+        0x0004 => accept(system, buffer, command, word(system, 1), word(system, 2)),
+        // Bind(fd, address length, current pid), address in static buffer 0.
+        0x0005 => {
+            let (id, address_length) = (word(system, 1), word(system, 2) as usize);
+            let address_bytes = read_static(system, buffer, 0, address_length.min(28));
+            let address = parse_address(&address_bytes);
+            let result = match (address, system.services.soc.sockets.get_mut(&id)) {
+                (Ok(address), Some(entry)) => {
+                    match &entry.socket {
+                        HostSocket::UdpUnbound => match UdpSocket::bind(address) {
+                            Ok(socket) => {
+                                let _ = socket.set_nonblocking(true);
+                                entry.socket = HostSocket::Udp(socket);
+                                0
+                            }
+                            Err(error) => errno(&error),
+                        },
+                        HostSocket::TcpUnbound => match TcpListener::bind(address) {
+                            Ok(listener) => {
+                                let _ = listener.set_nonblocking(true);
+                                entry.socket = HostSocket::TcpListener(listener);
+                                0
+                            }
+                            Err(error) => errno(&error),
+                        },
+                        _ => -22,
+                    }
+                }
+                (Err(code), _) => code,
+                (_, None) => -8,
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Connect(fd, address length, pid), address in static buffer 0.
+        0x0006 => {
+            let (id, address_length) = (word(system, 1), word(system, 2) as usize);
+            let address_bytes = read_static(system, buffer, 0, address_length.min(28));
+            let address = parse_address(&address_bytes);
+            let result = match (address, system.services.soc.sockets.get_mut(&id)) {
+                (Ok(SocketAddr::V4(address)), Some(entry)) => {
+                    match &entry.socket {
+                        HostSocket::UdpUnbound => match UdpSocket::bind("0.0.0.0:0") {
+                            Ok(socket) => {
+                                let _ = socket.set_nonblocking(true);
+                                match socket.connect(SocketAddr::V4(address)) {
+                                    Ok(()) => { entry.socket = HostSocket::Udp(socket); 0 }
+                                    Err(error) => errno(&error),
+                                }
+                            }
+                            Err(error) => errno(&error),
+                        },
+                        HostSocket::Udp(socket) => match socket.connect(SocketAddr::V4(address)) {
+                            Ok(()) => 0,
+                            Err(error) => errno(&error),
+                        },
+                        HostSocket::TcpUnbound => {
+                            let (send, receive) = mpsc::channel();
+                            thread::spawn(move || {
+                                let result = TcpStream::connect_timeout(&SocketAddr::V4(address), CONNECT_TIMEOUT)
+                                    .and_then(|stream| {
+                                        stream.set_nonblocking(true)?;
+                                        Ok(stream)
+                                    });
+                                let _ = send.send(result);
+                            });
+                            let blocking = !entry.nonblocking;
+                            if blocking {
+                                match receive.recv_timeout(CONNECT_TIMEOUT) {
+                                    Ok(Ok(stream)) => { entry.socket = HostSocket::Tcp(stream); 0 }
+                                    Ok(Err(error)) => errno(&error),
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        entry.socket = HostSocket::TcpConnecting(receive);
+                                        -26
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => -5,
+                                }
+                            } else {
+                                entry.socket = HostSocket::TcpConnecting(receive);
+                                -26
+                            }
+                        }
+                        HostSocket::TcpConnecting(_) => -7,
+                        HostSocket::Tcp(_) => -30,
+                        HostSocket::TcpListener(_) => -22,
+                        HostSocket::TcpFailed(code) => *code,
+                    }
+                }
+                (Ok(SocketAddr::V6(_)), _) => -5,
+                (Err(code), _) => code,
+                (_, None) => -8,
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // RecvFromOther uses a mapped buffer; it shares the same receive path
+        // as RecvFrom where possible. See receive() for the ordinary SDK path.
+        0x0007 => receive_other(system, buffer, header),
+        // RecvFrom(fd, length, flags, address length), output buffers 0 and 1.
+        0x0008 => {
+            let (id, length, flags, address_length) = (word(system, 1), word(system, 2) as usize, word(system, 3), word(system, 4) as usize);
+            receive(system, buffer, command, id, length, flags, address_length);
+        }
+        // SendToOther uses a mapped buffer.
+        0x0009 => send_other(system, buffer, header),
+        // SendToSingle(fd, length, flags, address length), data in buffer 0, address in buffer 1.
+        0x000A => {
+            let (id, length, address_length) = (word(system, 1), word(system, 2) as usize, word(system, 4) as usize);
+            let payload = read_static(system, buffer, 0, length.min(MAX_PACKET));
+            let address = if address_length > 0 {
+                parse_address(&read_static(system, buffer, 1, address_length.min(28))).ok()
+            } else { None };
+            let result = send_data(system.services.soc.sockets.get_mut(&id), &payload, address);
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Close(fd)
+        0x000B => {
+            let id = word(system, 1);
+            let result = if system.services.soc.sockets.remove(&id).is_some() { 0 } else { -8 };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Shutdown(fd, how)
+        0x000C => {
+            let (id, how) = (word(system, 1), word(system, 2));
+            let result = match system.services.soc.sockets.get_mut(&id) {
+                Some(entry) => match &mut entry.socket {
+                    HostSocket::Tcp(stream) => {
+                        let how = match how { 0 => std::net::Shutdown::Read, 1 => std::net::Shutdown::Write, 2 => std::net::Shutdown::Both, _ => { buffer.reply(&mut system.memory, command, &[(-22i32) as u32]); return true; } };
+                        stream.shutdown(how).map_or_else(|error| errno(&error), |_| 0)
+                    }
+                    HostSocket::Udp(_) | HostSocket::UdpUnbound => 0,
+                    HostSocket::TcpListener(_) => -22,
+                    HostSocket::TcpUnbound | HostSocket::TcpConnecting(_) => -107,
+                    HostSocket::TcpFailed(code) => *code,
+                },
+                None => -8,
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // GetHostByName(name length, output length), input in buffer 0.
+        0x000D => {
+            let length = word(system, 1) as usize;
+            let name = c_string(read_static(system, buffer, 0, length.min(256)));
+            let (error, result) = host_by_name(&name);
+            reply_static(system, buffer, command, &[error as u32], &result);
+        }
+        // GetHostByAddr(address length, family, output length), input in buffer 0.
+        0x000E => {
+            let address = read_static(system, buffer, 0, 28);
+            let (error, result) = match parse_address(&address) {
+                Ok(SocketAddr::V4(address)) => host_by_name(&address.ip().to_string()),
+                _ => (-5, vec![0; 0x1A88]),
+            };
+            reply_static(system, buffer, command, &[error as u32], &result);
+        }
+        // GetAddrInfo(node length, service length, hints length, output size).
+        0x000F => get_addr_info(system, buffer, command),
+        // GetNameInfo
+        0x0010 => get_name_info(system, buffer, command),
+        // GetSockOpt(fd, level, option, length), output in buffer 0.
+        0x0011 => {
+            let (id, level, option, length) = (word(system, 1), word(system, 2), word(system, 3), word(system, 4) as usize);
+            let (error, value) = get_sock_opt(system.services.soc.sockets.get_mut(&id), level, option, length);
+            reply_static(system, buffer, command, &[error as u32, value.len() as u32], &value);
+        }
+        // SetSockOpt(fd, level, option, length), input in buffer 0.
+        0x0012 => {
+            let (id, level, option, length) = (word(system, 1), word(system, 2), word(system, 3), word(system, 4) as usize);
+            let value = read_static(system, buffer, 0, length.min(256));
+            let result = set_sock_opt(system.services.soc.sockets.get_mut(&id), level, option, &value);
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Fcntl(fd, command, argument)
+        0x0013 => {
+            let (id, operation, argument) = (word(system, 1), word(system, 2), word(system, 3));
+            let result = match system.services.soc.sockets.get_mut(&id) {
+                Some(entry) => match operation {
+                    3 => if entry.nonblocking { 4 } else { 0 },
+                    4 => { entry.nonblocking = argument & 4 != 0; 0 }
+                    _ => -22,
+                },
+                None => -8,
+            };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // Poll(count, timeout), pollfd array in static buffer 0.
+        0x0014 => poll(system, buffer, command, word(system, 1) as usize, word(system, 2) as i32),
+        // SockAtMark
+        0x0015 => {
+            let result = if system.services.soc.sockets.contains_key(&word(system, 1)) { 0 } else { -8 };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        // GetHostId
+        0x0016 => buffer.reply(&mut system.memory, command, &[0]),
+        // GetSockName / GetPeerName
+        0x0017 | 0x0018 => {
+            let (id, address_length) = (word(system, 1), word(system, 2) as usize);
+            let peer = command == 0x0018;
+            let result = match system.services.soc.sockets.get_mut(&id) {
+                Some(entry) => {
+                    entry.update();
+                    socket_address(entry, peer).map(|address| address_bytes(address)).unwrap_or_default()
+                }
+                None => Vec::new(),
+            };
+            let code = if result.is_empty() { -107 } else { 0 };
+            reply_static(system, buffer, command, &[code as u32], &result[..result.len().min(address_length)]);
+        }
+        // ShutdownSockets
+        0x0019 => {
+            system.services.soc.close_all();
+            buffer.reply(&mut system.memory, command, &[]);
+        }
+        // GetNetworkOpt(level, option, length), output in buffer 0.
+        0x001A => {
+            let (level, option, length) = (word(system, 1), word(system, 2), word(system, 3) as usize);
+            let result = network_option(level, option, length);
+            let error = if result.is_empty() { -22 } else { 0 };
+            reply_static(system, buffer, command, &[error as u32, result.len() as u32], &result);
+        }
+        // SendToMultiple is not used by the 3DS TCP/IP path used by NEX.
+        0x0020 => buffer.reply(&mut system.memory, command, &[(-38i32) as u32]),
+        // CloseSockets
+        0x0021 => {
+            system.services.soc.sockets.clear();
+            buffer.reply(&mut system.memory, command, &[]);
+        }
+        // AddGlobalSocket
+        0x0023 => {
+            let result = if system.services.soc.sockets.contains_key(&word(system, 1)) { 0 } else { -8 };
+            buffer.reply(&mut system.memory, command, &[result as u32]);
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn read_static(system: &mut System, buffer: &CommandBuffer, id: u32, length: usize) -> Vec<u8> {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, id);
+    let length = length.min(capacity as usize);
+    let mut bytes = vec![0; length];
+    system.memory.read_bytes(pointer, &mut bytes);
+    bytes
+}
+
+fn reply_static(system: &mut System, buffer: &CommandBuffer, command: u16, words: &[u32], bytes: &[u8]) {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (destination, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
+    let length = bytes.len().min(capacity as usize);
+    system.memory.write_bytes(destination, &bytes[..length]);
+    let normal = words.len() as u32 + 1;
+    buffer.set(&mut system.memory, 0, Header::new(command, normal, 2).0);
+    buffer.set(&mut system.memory, 1, 0);
+    for (index, value) in words.iter().enumerate() {
+        buffer.set(&mut system.memory, index as u32 + 2, *value);
+    }
+    buffer.set(&mut system.memory, normal + 1, Descriptor::static_buffer(length as u32, 0));
+    buffer.set(&mut system.memory, normal + 2, destination);
+}
+
+fn reply_static_two(system: &mut System, buffer: &CommandBuffer, command: u16, words: &[u32], first: &[u8], second: &[u8]) {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (first_ptr, first_cap) = buffer.static_buffer(&mut system.memory, tls, 0);
+    let (second_ptr, second_cap) = buffer.static_buffer(&mut system.memory, tls, 1);
+    let first_len = first.len().min(first_cap as usize);
+    let second_len = second.len().min(second_cap as usize);
+    system.memory.write_bytes(first_ptr, &first[..first_len]);
+    system.memory.write_bytes(second_ptr, &second[..second_len]);
+    let normal = words.len() as u32 + 1;
+    buffer.set(&mut system.memory, 0, Header::new(command, normal, 4).0);
+    buffer.set(&mut system.memory, 1, 0);
+    for (index, value) in words.iter().enumerate() {
+        buffer.set(&mut system.memory, index as u32 + 2, *value);
+    }
+    buffer.set(&mut system.memory, normal + 1, Descriptor::static_buffer(first_len as u32, 0));
+    buffer.set(&mut system.memory, normal + 2, first_ptr);
+    buffer.set(&mut system.memory, normal + 3, Descriptor::static_buffer(second_len as u32, 1));
+    buffer.set(&mut system.memory, normal + 4, second_ptr);
+}
+
+fn c_string(bytes: Vec<u8>) -> String {
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).trim().to_owned()
+}
+
+fn parse_address(bytes: &[u8]) -> Result<SocketAddr, i32> {
+    if bytes.len() < 8 || bytes[0] < 8 || bytes[1] as u32 != AF_INET {
+        return Err(-22);
+    }
+    let port = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let ip = Ipv4Addr::new(bytes[4], bytes[5], bytes[6], bytes[7]);
+    Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+}
+
+fn address_bytes(address: SocketAddr) -> Vec<u8> {
+    match address {
+        SocketAddr::V4(address) => {
+            let mut bytes = vec![0; 28];
+            bytes[0] = 8;
+            bytes[1] = AF_INET as u8;
+            bytes[2..4].copy_from_slice(&address.port().to_be_bytes());
+            bytes[4..8].copy_from_slice(&address.ip().octets());
+            bytes
+        }
+        SocketAddr::V6(_) => Vec::new(),
+    }
+}
+
+fn errno(error: &io::Error) -> i32 {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => -2,
+        io::ErrorKind::AddrInUse => -3,
+        io::ErrorKind::AddrNotAvailable => -4,
+        io::ErrorKind::ConnectionAborted => -13,
+        io::ErrorKind::ConnectionRefused => -14,
+        io::ErrorKind::ConnectionReset => -15,
+        io::ErrorKind::NotConnected => -56,
+        io::ErrorKind::TimedOut => -76,
+        io::ErrorKind::WouldBlock => -6,
+        io::ErrorKind::InvalidInput => -28,
+        io::ErrorKind::InvalidData => -9,
+        io::ErrorKind::BrokenPipe => -66,
+        io::ErrorKind::Interrupted => -27,
+        io::ErrorKind::OutOfMemory => -49,
+        _ => -5,
+    }
+}
+
+fn send_data(entry: Option<&mut SocketEntry>, payload: &[u8], address: Option<SocketAddr>) -> i32 {
+    let Some(entry) = entry else { return -8 };
+    entry.update();
+    match &mut entry.socket {
+        HostSocket::UdpUnbound => {
+            match UdpSocket::bind("0.0.0.0:0") {
+                Ok(socket) => {
+                    let _ = socket.set_nonblocking(true);
+                    entry.socket = HostSocket::Udp(socket);
+                    send_data(Some(entry), payload, address)
+                }
+                Err(error) => errno(&error),
+            }
+        }
+        HostSocket::Udp(socket) => {
+            let result = match address {
+                Some(address) => socket.send_to(payload, address),
+                None => socket.send(payload),
+            };
+            result.map_or_else(|error| errno(&error), |sent| sent as i32)
+        }
+        HostSocket::Tcp(stream) => stream.write(payload).map_or_else(|error| errno(&error), |sent| sent as i32),
+        HostSocket::TcpConnecting(_) => -6,
+        HostSocket::TcpFailed(code) => *code,
+        HostSocket::TcpListener(_) | HostSocket::TcpUnbound => -107,
+    }
+}
+
+fn receive(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, length: usize, flags: u32, address_length: usize) {
+    let length = length.min(MAX_PACKET);
+    let result = match system.services.soc.sockets.get_mut(&id) {
+        None => Err(-8),
+        Some(entry) => {
+            entry.update();
+            let mut payload = vec![0; length];
+            match &mut entry.socket {
+                HostSocket::Udp(socket) => {
+                    let received = if flags & 2 != 0 { socket.peek_from(&mut payload) } else { socket.recv_from(&mut payload) };
+                    received.map(|(size, address)| (size, Some(address)))
+                        .map_err(|error| errno(&error))
+                }
+                HostSocket::Tcp(stream) => {
+                    let received = if flags & 2 != 0 { stream.peek(&mut payload) } else { stream.read(&mut payload) };
+                    received.map(|size| (size, None)).map_err(|error| errno(&error))
+                }
+                HostSocket::TcpConnecting(_) => Err(-6),
+                HostSocket::TcpFailed(code) => Err(*code),
+                HostSocket::TcpListener(_) | HostSocket::TcpUnbound | HostSocket::UdpUnbound => Err(-107),
+            }.map(|(size, address)| {
+                payload.truncate(size);
+                let address = address.map(address_bytes).unwrap_or_default();
+                (payload, address)
+            })
+        }
+    };
+    match result {
+        Ok((payload, address)) => {
+            let address = if address_length > 0 { &address[..address.len().min(address_length)] } else { &[] };
+            reply_static_two(system, buffer, command, &[payload.len() as u32 as u32, payload.len() as u32], &payload, address);
+        }
+        Err(code) => reply_static_two(system, buffer, command, &[code as u32, 0], &[], &[]),
+    }
+}
+
+fn accept(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, max_address: u32) {
+    let accepted = match system.services.soc.sockets.get_mut(&id) {
+        Some(entry) => {
+            entry.update();
+            match &mut entry.socket {
+                HostSocket::TcpListener(listener) => listener.accept().map_err(|error| errno(&error)),
+                _ => Err(-22),
+            }
+        }
+        None => Err(-8),
+    };
+    match accepted {
+        Ok((stream, address)) => {
+            let _ = stream.set_nonblocking(true);
+            let new_id = system.services.soc.allocate(HostSocket::Tcp(stream));
+            let mut bytes = address_bytes(address);
+            bytes.truncate(bytes.len().min(max_address as usize));
+            reply_static(system, buffer, command, &[new_id], &bytes);
+        }
+        Err(code) => reply_static(system, buffer, command, &[code as u32], &[]),
+    }
+}
+
+fn socket_address(entry: &mut SocketEntry, peer: bool) -> Option<SocketAddr> {
+    entry.update();
+    match &entry.socket {
+        HostSocket::Udp(socket) => if peer { socket.peer_addr().ok() } else { socket.local_addr().ok() },
+        HostSocket::Tcp(stream) => if peer { stream.peer_addr().ok() } else { stream.local_addr().ok() },
+        HostSocket::TcpListener(listener) if !peer => listener.local_addr().ok(),
+        _ => None,
+    }
+}
+
+fn poll_ready(entry: &mut SocketEntry) -> (bool, bool, bool) {
+    entry.update();
+    match &mut entry.socket {
+        HostSocket::Udp(socket) => {
+            let mut byte = [0u8; 1];
+            let readable = match socket.peek_from(&mut byte) {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+                Err(_) => true,
+            };
+            (readable, true, false)
+        }
+        HostSocket::Tcp(stream) => {
+            let mut byte = [0u8; 1];
+            let readable = match stream.peek(&mut byte) {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+                Err(_) => true,
+            };
+            (readable, true, false)
+        }
+        HostSocket::TcpListener(listener) => match listener.accept() {
+            Ok((stream, address)) => {
+                entry.accepted.push_back((stream, address));
+                (true, false, false)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => (false, false, false),
+            Err(_) => (false, false, true),
+        },
+        HostSocket::TcpConnecting(_) => (false, false, false),
+        HostSocket::TcpFailed(_) => (false, false, true),
+        HostSocket::UdpUnbound | HostSocket::TcpUnbound => (false, false, false),
+    }
+}
+
+fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize, _timeout: i32) {
+    let count = count.min(256);
+    let input = read_static(system, buffer, 0, count.saturating_mul(12));
+    let mut output = vec![0; count.saturating_mul(12)];
+    for index in 0..count {
+        let at = index * 12;
+        if input.len() < at + 12 { break; }
+        let id = u32::from_le_bytes(input[at..at + 4].try_into().unwrap());
+        let events = u32::from_le_bytes(input[at + 4..at + 8].try_into().unwrap());
+        let mut ready = 0u32;
+        if let Some(entry) = system.services.soc.sockets.get_mut(&id) {
+            let (readable, writable, error) = poll_ready(entry);
+            if readable && events & POLLIN != 0 { ready |= POLLIN; }
+            if writable && events & POLLOUT != 0 { ready |= POLLOUT; }
+            if error { ready |= POLLERR; }
+        } else {
+            ready |= POLLERR;
+        }
+        output[at..at + 4].copy_from_slice(&id.to_le_bytes());
+        output[at + 4..at + 8].copy_from_slice(&events.to_le_bytes());
+        output[at + 8..at + 12].copy_from_slice(&ready.to_le_bytes());
+    }
+    reply_static(system, buffer, command, &[output.chunks_exact(12).filter(|row| u32::from_le_bytes(row[8..12].try_into().unwrap()) != 0).count() as u32], &output);
+}
+
+fn host_by_name(name: &str) -> (i32, Vec<u8>) {
+    let mut data = vec![0; 0x1A88];
+    data[0..2].copy_from_slice(&2u16.to_le_bytes());
+    data[2..4].copy_from_slice(&4u16.to_le_bytes());
+    if name.is_empty() { return (-305, data); }
+    let mut addresses = Vec::new();
+    if let Ok(iter) = (name, 0u16).to_socket_addrs() {
+        for address in iter {
+            if let SocketAddr::V4(address) = address {
+                if !addresses.contains(address.ip()) { addresses.push(*address.ip()); }
+            }
+        }
+    }
+    if addresses.is_empty() { return (-305, data); }
+    data[4..6].copy_from_slice(&(addresses.len().min(24) as u16).to_le_bytes());
+    let hostname = name.as_bytes();
+    let host_length = hostname.len().min(255);
+    data[8..8 + host_length].copy_from_slice(&hostname[..host_length]);
+    let start = 8 + 256 + 24 * 256;
+    for (index, address) in addresses.iter().take(24).enumerate() {
+        data[start + index * 16..start + index * 16 + 4].copy_from_slice(&address.octets());
+    }
+    (0, data)
+}
+
+fn get_addr_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
+    let node_length = buffer.get(&mut system.memory, 1) as usize;
+    let service_length = buffer.get(&mut system.memory, 2) as usize;
+    let hints_length = buffer.get(&mut system.memory, 3) as usize;
+    let output_size = (buffer.get(&mut system.memory, 4) as usize).min(0x10000);
+    let node = c_string(read_static(system, buffer, 0, node_length.min(256)));
+    let service = c_string(read_static(system, buffer, 1, service_length.min(32)));
+    let hints = read_static(system, buffer, 2, hints_length.min(0x130));
+    let port = service.parse::<u16>().unwrap_or(0);
+    let socktype = if hints.len() >= 12 { u32::from_le_bytes(hints[8..12].try_into().unwrap()) } else { 0 };
+    let protocol = if hints.len() >= 16 { u32::from_le_bytes(hints[12..16].try_into().unwrap()) } else { 0 };
+    let resolved = if node.is_empty() {
+        ("0.0.0.0", port).to_socket_addrs()
+    } else {
+        (node.as_str(), port).to_socket_addrs()
+    };
+    let mut output = Vec::new();
+    let mut count = 0u32;
+    let error = match resolved {
+        Ok(addresses) => {
+            for address in addresses {
+                let SocketAddr::V4(address) = address else { continue };
+                let mut info = vec![0; 0x130];
+                info[4..8].copy_from_slice(&AF_INET.to_le_bytes());
+                let resolved_type = if socktype != 0 { socktype } else if protocol == IPPROTO_TCP { SOCK_STREAM } else { SOCK_DGRAM };
+                let resolved_protocol = if protocol != 0 { protocol } else if resolved_type == SOCK_STREAM { IPPROTO_TCP } else { IPPROTO_UDP };
+                info[8..12].copy_from_slice(&resolved_type.to_le_bytes());
+                info[12..16].copy_from_slice(&resolved_protocol.to_le_bytes());
+                info[16..20].copy_from_slice(&8i32.to_le_bytes());
+                info[276..304].copy_from_slice(&address_bytes(SocketAddr::V4(address)));
+                if output.len() + info.len() <= output_size { output.extend_from_slice(&info); }
+                count += 1;
+            }
+            if count == 0 { -305 } else { 0 }
+        }
+        Err(error) => -match error.kind() {
+            io::ErrorKind::OutOfMemory => 304,
+            io::ErrorKind::Interrupted => 302,
+            _ => 305,
+        },
+    };
+    reply_static(system, buffer, command, &[error as u32, count], &output);
+}
+
+fn get_name_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
+    let host_length = buffer.get(&mut system.memory, 2) as usize;
+    let service_length = buffer.get(&mut system.memory, 3) as usize;
+    let bytes = read_static(system, buffer, 0, 28);
+    let parsed = parse_address(&bytes);
+    let (host, service, error) = match parsed {
+        Ok(SocketAddr::V4(address)) => (address.ip().to_string(), address.port().to_string(), 0),
+        _ => (String::new(), String::new(), -22),
+    };
+    let mut host_bytes = vec![0; host_length.min(256)];
+    let mut service_bytes = vec![0; service_length.min(32)];
+    let h = host.as_bytes();
+    let s = service.as_bytes();
+    let hlen = h.len().min(host_bytes.len().saturating_sub(1));
+    let slen = s.len().min(service_bytes.len().saturating_sub(1));
+    host_bytes[..hlen].copy_from_slice(&h[..hlen]);
+    service_bytes[..slen].copy_from_slice(&s[..slen]);
+    reply_static_two(system, buffer, command, &[error as u32], &host_bytes, &service_bytes);
+}
+
+fn get_sock_opt(entry: Option<&mut SocketEntry>, _level: u32, option: u32, length: usize) -> (i32, Vec<u8>) {
+    let Some(entry) = entry else { return (-8, Vec::new()) };
+    entry.update();
+    let value: i32 = match option {
+        0x1008 => match entry.socket { HostSocket::Udp(_) | HostSocket::UdpUnbound => SOCK_DGRAM as i32, _ => SOCK_STREAM as i32 },
+        0x1009 => match entry.socket { HostSocket::TcpFailed(code) => -code, _ => 0 },
+        _ => 0,
+    };
+    let bytes = value.to_le_bytes();
+    (0, bytes[..bytes.len().min(length)].to_vec())
+}
+
+fn set_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, value: &[u8]) -> i32 {
+    let Some(entry) = entry else { return -8 };
+    entry.update();
+    if level == 0xFFFF && option == 0x0004 { return 0; } // SO_REUSEADDR
+    if level == 0xFFFF && option == 0x1001 { return 0; } // SO_SNDBUF
+    if level == 0xFFFF && option == 0x1002 { return 0; } // SO_RCVBUF
+    if level == 0x0006 && option == 0x2001 {
+        let enabled = value.first().copied().unwrap_or(0) != 0;
+        if let HostSocket::Tcp(stream) = &entry.socket {
+            return stream.set_nodelay(enabled).map_or_else(|error| errno(&error), |_| 0);
+        }
+        return 0;
+    }
+    0
+}
+
+fn network_option(level: u32, option: u32, length: usize) -> Vec<u8> {
+    if level != SOC_SOL_CONFIG { return Vec::new(); }
+    let mut bytes = vec![0; length.min(256)];
+    match option {
+        0x1004 if bytes.len() >= 6 => { bytes[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]); }
+        0x4003 if bytes.len() >= 12 => {
+            bytes[0..4].copy_from_slice(&u32::from_ne_bytes([127, 0, 0, 1]).to_ne_bytes());
+            bytes[4..8].copy_from_slice(&u32::from_ne_bytes([255, 0, 0, 0]).to_ne_bytes());
+            bytes[8..12].copy_from_slice(&u32::from_ne_bytes([127, 255, 255, 255]).to_ne_bytes());
+        }
+        _ => return Vec::new(),
+    }
+    bytes
+}
+
+fn send_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
+    // The zero-copy libctru variant places a mapped-buffer descriptor after
+    // the current-process descriptor. The fallback is deliberately explicit:
+    // unsupported layouts fail rather than sending bytes from the wrong area.
+    let command = header.command_id();
+    let normal = header.normal_params();
+    let id = buffer.get(&mut system.memory, 1);
+    let length = buffer.get(&mut system.memory, 2) as usize;
+    let address_length = buffer.get(&mut system.memory, 4) as usize;
+    let mut pointer = None;
+    for index in normal + 1..normal + 1 + header.translate_params().min(8) {
+        let raw = buffer.get(&mut system.memory, index);
+        if let Descriptor::MappedBuffer { size, .. } = Descriptor::parse(raw) {
+            let address = buffer.get(&mut system.memory, index + 1);
+            pointer = Some((address, (size as usize).min(length).min(MAX_PACKET)));
+            break;
+        }
+    }
+    let result = match pointer {
+        Some((address, size)) => {
+            let mut payload = vec![0; size];
+            system.memory.read_bytes(address, &mut payload);
+            let destination = if address_length > 0 { parse_address(&read_static(system, buffer, 0, address_length.min(28))).ok() } else { None };
+            send_data(system.services.soc.sockets.get_mut(&id), &payload, destination)
+        }
+        None => -38,
+    };
+    buffer.reply(&mut system.memory, command, &[result as u32]);
+}
+
+fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
+    let command = header.command_id();
+    let id = buffer.get(&mut system.memory, 1);
+    let length = buffer.get(&mut system.memory, 2) as usize;
+    let address_length = buffer.get(&mut system.memory, 4) as usize;
+    let mut mapped = None;
+    let normal = header.normal_params();
+    for index in normal + 1..normal + 1 + header.translate_params().min(8) {
+        let raw = buffer.get(&mut system.memory, index);
+        if let Descriptor::MappedBuffer { size, .. } = Descriptor::parse(raw) {
+            mapped = Some((buffer.get(&mut system.memory, index + 1), (size as usize).min(length).min(MAX_PACKET)));
+            break;
+        }
+    }
+    let Some((pointer, capacity)) = mapped else {
+        buffer.reply(&mut system.memory, command, &[(-38i32) as u32, 0]);
+        return;
+    };
+    let result = match system.services.soc.sockets.get_mut(&id) {
+        Some(entry) => {
+            entry.update();
+            let mut bytes = vec![0; capacity];
+            match &mut entry.socket {
+                HostSocket::Udp(socket) => socket.recv_from(&mut bytes).map(|(size, address)| {
+                    bytes.truncate(size);
+                    (bytes, address_bytes(address))
+                }).map_err(|error| errno(&error)),
+                HostSocket::Tcp(stream) => stream.read(&mut bytes).map(|size| {
+                    bytes.truncate(size);
+                    (bytes, Vec::new())
+                }).map_err(|error| errno(&error)),
+                HostSocket::TcpConnecting(_) => Err(-6),
+                HostSocket::TcpFailed(code) => Err(*code),
+                _ => Err(-107),
+            }
+        }
+        None => Err(-8),
+    };
+    match result {
+        Ok((bytes, address)) => {
+            system.memory.write_bytes(pointer, &bytes);
+            reply_static(system, buffer, command, &[bytes.len() as u32, bytes.len() as u32], &address[..address.len().min(address_length)]);
+        }
+        Err(code) => reply_static(system, buffer, command, &[code as u32, 0], &[]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctr_ipv4_sockaddr_round_trips_network_byte_order() {
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 7), 24873));
+        let encoded = address_bytes(address);
+        assert_eq!(encoded[0], 8);
+        assert_eq!(encoded[1], 2);
+        assert_eq!(parse_address(&encoded).unwrap(), address);
+    }
+
+    #[test]
+    fn host_errno_translation_matches_soc_errno_numbers() {
+        assert_eq!(errno(&io::Error::from(io::ErrorKind::WouldBlock)), -6);
+        assert_eq!(errno(&io::Error::from(io::ErrorKind::ConnectionRefused)), -14);
+        assert_eq!(errno(&io::Error::from(io::ErrorKind::TimedOut)), -76);
+    }
+}

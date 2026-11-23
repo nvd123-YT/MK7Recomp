@@ -29,6 +29,7 @@ pub mod nfc;
 pub mod shared_font;
 pub mod host_archive;
 pub mod srv;
+pub mod soc;
 pub mod system_archives;
 pub mod uds;
 pub mod y2r;
@@ -92,6 +93,10 @@ pub struct ServiceState {
     pub csnd: csnd::CsndState,
     #[serde(default)]
     pub plgldr: plgldr::PluginLoaderState,
+    // Host sockets are process resources, not save-state data. Restoring a
+    // state starts a fresh socket service instead of reusing stale descriptors.
+    #[serde(skip)]
+    pub soc: soc::SocState,
 }
 
 /// entry point from svcSendSyncRequest.
@@ -132,6 +137,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "cam:u" | "cam:s" => cam::handle(system, &buffer, header),
         "mic:u" => mic::handle(system, &buffer, header),
         "nwm::UDS" => uds::handle(system, &buffer, header),
+        "soc:U" => soc::handle(system, &buffer, header),
         "dlp:SRVR" => dlp::handle(system, &buffer, header),
         _ => misc::handle(system, &buffer, header, &name),
     };
@@ -150,6 +156,7 @@ fn is_network_service(name: &str) -> bool {
     matches!(
         name,
         "frd:u" | "frd:a"
+            | "soc:U"
             | "nwm::UDS"
             | "dlp:SRVR"
             | "http:C"
