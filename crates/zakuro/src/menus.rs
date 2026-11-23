@@ -899,7 +899,7 @@ impl Menus {
                         ui.selectable_value(&mut settings.network_provider, zakuro_core::NetworkProvider::Pretendo, "Pretendo (experimental routing)");
                     });
                 ui.label(
-                    RichText::new("Pretendo mode rewrites documented Nintendo service domains. HTTP/TLS, account authentication and NEX multiplayer are still under development; this setting alone cannot join a race.")
+                    RichText::new("Pretendo mode enables guest DNS/HTTP routing and the local AC/FRD connection events. NASC/NEX authentication and actual matchmaking/racing are still unvalidated. MK7 normally obtains its game-server token automatically through NASC; PNID linking is optional.")
                         .weak()
                         .small(),
                 );

@@ -21,7 +21,9 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Unreleased improvements
 
-- Adds an experimental Pretendo network-provider setting. It rewrites the documented Nintendo service hostnames to Pretendo for guest DNS routing only; HTTP/TLS, ACT/NASC authentication and NEX multiplayer are still under development, so online races are not yet supported.
+- Adds an experimental Pretendo network-provider setting, guest IPv4 TCP/UDP and DNS, an asynchronous HTTP client for NASC-style requests, guest AC connection events, and local FRD login events. This is networking groundwork only: HTTPS uses the host's `curl` and trust store, and NASC/NEX authentication plus actual matchmaking/racing have not yet been validated.
+
+- To use Pretendo routing, select **Pretendo (experimental routing)** in Settings or RecompLauncher. The game performs its own NASC login and receives the NEX locator/token; no PNID username/password is required for MK7's usual login path. When mutual TLS is requested, place your own decrypted 3DS `ctr-common-1` pair at `sysdata/ctr-common-1-cert.pem` and `sysdata/ctr-common-1-key.pem` under the application's data directory. The project does not include Nintendo certificates or private keys.
 
 - Adds F4 toggleable fast-forward: switch between normal speed and uncapped emulation without holding Tab or a controller trigger; the existing hold-to-fast-forward controls remain available.
 

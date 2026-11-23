@@ -201,7 +201,27 @@ pub fn handle(
         // -- Accounts, background downloads and http ------------------------
         // setting a session up works offline, only its requests need the
         // network
-        "act:u" | "act:a" | "boss:U" | "boss:P" => match command {
+        "act:u" | "act:a" => match command {
+            // Initialize the local ACT service. Account linking is optional
+            // for MK7; the actual game-server token is obtained through NASC.
+            0x0001 => {
+                buffer.reply(&mut system.memory, command, &[]);
+                true
+            }
+            // GetErrorCode(result), no account-service error to translate.
+            0x0002 => {
+                buffer.reply(&mut system.memory, command, &[0]);
+                true
+            }
+            // GetAccountInfo(slot, size, block id, mapped output). Like the
+            // reference HLE, leave the optional account buffer untouched.
+            0x0006 => {
+                buffer.reply(&mut system.memory, command, &[]);
+                true
+            }
+            _ => false,
+        },
+        "boss:U" | "boss:P" => match command {
             0x0001 => {
                 buffer.reply(&mut system.memory, command, &[]);
                 true
