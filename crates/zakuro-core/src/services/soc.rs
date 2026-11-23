@@ -1110,6 +1110,28 @@ fn ipv4_info_from_prefix(address: Ipv4Addr, prefix: u8) -> Option<(Ipv4Addr, Ipv
     ))
 }
 
+fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
+    let hex: String = value.chars().filter(|ch| *ch != ':' && *ch != '-').collect();
+    if hex.len() != 12 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    for (index, slot) in mac.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(mac)
+}
+
+/// NASC and SOCU must report the same hardware address for a Pretendo
+/// session; it comes from the user's imported wireless configuration.
+fn configured_network_mac(system: &System) -> Option<[u8; 6]> {
+    let path = system.config.data_dir.as_ref()?.join("sysdata/nasc.json");
+    let bytes = std::fs::read(path).ok()?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let value = config.get("mac_address")?.as_str()?;
+    parse_mac_address(value)
+}
+
 fn network_option(system: &System, level: u32, option: u32, length: usize) -> Vec<u8> {
     if level != SOC_SOL_CONFIG { return Vec::new(); }
     let mut bytes = vec![0; length.min(256)];
@@ -1118,8 +1140,17 @@ fn network_option(system: &System, level: u32, option: u32, length: usize) -> Ve
         // from the emulated console ID, so separate emulator instances don't
         // all claim the same hard-coded address.
         0x1004 if bytes.len() >= 6 => {
-            let id = system.config.console_id.to_be_bytes();
-            bytes[..6].copy_from_slice(&[0x02, id[2], id[3], id[4], id[5], id[6]]);
+            let mac = if system.config.network_provider == NetworkProvider::Pretendo {
+                configured_network_mac(system)
+            } else {
+                let id = system.config.console_id.to_be_bytes();
+                Some([0x02, id[2], id[3], id[4], id[5], id[6]])
+            };
+            let Some(mac) = mac else {
+                log::warn!("soc:U MAC address is unavailable; Pretendo mode needs a valid mac_address in sysdata/nasc.json");
+                return Vec::new();
+            };
+            bytes[..6].copy_from_slice(&mac);
         }
         // SOC_CONFIG_IP_INFO: [IPv4, netmask, broadcast]. We can determine
         // the selected outbound address portably with std::net, but standard
@@ -1253,6 +1284,13 @@ mod tests {
             mapped_buffer(&mut system, &buffer, header, 0, 0x40),
             Some((mapped_descriptor, mapped_pointer, 0x30))
         );
+    }
+
+    #[test]
+    fn mac_address_parser_accepts_colon_and_compact_formats() {
+        assert_eq!(parse_mac_address("02:11:22:33:44:55"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        assert_eq!(parse_mac_address("021122334455"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        assert_eq!(parse_mac_address("02:11:22:33:44"), None);
     }
 
     #[test]

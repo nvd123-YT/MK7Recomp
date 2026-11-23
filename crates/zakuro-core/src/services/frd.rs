@@ -4,7 +4,7 @@
 //! offline reply.
 
 use std::collections::BTreeMap;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -284,8 +284,6 @@ struct NascJob {
     fpd_version: u16,
     certificate: PathBuf,
     private_key: PathBuf,
-    service_key: Option<String>,
-    service_type: Option<String>,
 }
 
 const MK7_NEX_SERVER_ID: u32 = 0x0001_DB00;
@@ -484,8 +482,6 @@ fn make_nasc_job(
         fpd_version: device.fpd_version,
         certificate,
         private_key,
-        service_key: None,
-        service_type: None,
     })
 }
 
