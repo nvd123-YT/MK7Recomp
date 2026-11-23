@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use gilrs::Button;
+use gilrs::ev::Code;
 use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 use zakuro_core::services::hid::PadState;
@@ -496,6 +497,62 @@ impl PadButtons {
     }
 }
 
+/// Which end of a racing pedal's axis represents a pressed pedal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PedalAxisRange {
+    /// Gilrs-normalized axis: -1.0 at rest, +1.0 fully pressed.
+    #[default]
+    NegativeToPositive,
+    /// Trigger-style axis: 0.0 at rest, +1.0 fully pressed.
+    ZeroToOne,
+}
+
+impl PedalAxisRange {
+    pub fn name(self) -> &'static str {
+        match self {
+            PedalAxisRange::NegativeToPositive => "-1 to +1",
+            PedalAxisRange::ZeroToOne => "0 to +1",
+        }
+    }
+}
+
+/// Racing wheel input. Native axis codes allow binding axes which a wheel
+/// does not expose as a standard gamepad stick or trigger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WheelSettings {
+    pub enabled: bool,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub steering: Option<Code>,
+    pub accelerator: Option<Code>,
+    pub brake: Option<Code>,
+    pub steering_inverted: bool,
+    pub accelerator_inverted: bool,
+    pub brake_inverted: bool,
+    pub pedal_axis_range: PedalAxisRange,
+    pub steering_deadzone: u8,
+}
+
+impl Default for WheelSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device_id: None,
+            device_name: None,
+            steering: None,
+            accelerator: None,
+            brake: None,
+            steering_inverted: false,
+            accelerator_inverted: false,
+            brake_inverted: false,
+            pedal_axis_range: PedalAxisRange::NegativeToPositive,
+            steering_deadzone: 8,
+        }
+    }
+}
+
 /// what a game has of its own, over the general settings. each one left
 /// out follows them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -580,6 +637,8 @@ pub struct Settings {
     pub background_opacity: f32,
     pub keys: Keys,
     pub pad: PadButtons,
+    /// optional racing wheel and pedal axes.
+    pub wheel: WheelSettings,
     /// the enhancements turned on, by name, for each game by its title id.
     pub enhancements: std::collections::BTreeMap<String, Vec<String>>,
     /// what each game has of its own, by its title id.
@@ -631,6 +690,7 @@ impl Default for Settings {
             background_opacity: 0.35,
             keys: Keys::default(),
             pad: PadButtons::default(),
+            wheel: WheelSettings::default(),
             enhancements: std::collections::BTreeMap::new(),
             per_game: std::collections::BTreeMap::new(),
             camera: CameraSource::Webcam,

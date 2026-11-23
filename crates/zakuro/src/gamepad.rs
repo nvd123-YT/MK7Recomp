@@ -3,19 +3,29 @@
 //! pro_controller.
 
 use gilrs::{Axis, Button, EventType, Gamepad, Gilrs};
+use gilrs::ev::Code;
 use zakuro_core::services::hid::{InputState, PadState};
 
 use crate::pro_controller::{is_pro_controller, Controllers, Report};
-use crate::settings::PadButtons;
+use crate::settings::{PadButtons, PedalAxisRange, WheelSettings};
 
 /// how far a stick has to lean before it counts, some rest a little off
 /// center.
 const DEADZONE: f32 = 0.15;
 
+/// An axis movement captured from a physical controller or wheel.
+#[derive(Debug, Clone)]
+pub struct AxisInput {
+    pub device_id: String,
+    pub device_name: String,
+    pub code: Code,
+}
+
 pub struct Gamepads {
     /// none when the system could not be asked for controllers.
     gilrs: Option<Gilrs>,
     buttons: PadButtons,
+    axis_event: Option<AxisInput>,
     /// Pro Controllers read from their own reports, on macOS.
     pro: Controllers,
     /// the buttons they held at the last poll, to tell the ones pressed
@@ -34,7 +44,7 @@ impl Gamepads {
         let gilrs = Gilrs::new()
             .inspect_err(|error| log::warn!("controllers are not available, {error}"))
             .ok();
-        Gamepads { gilrs, buttons, pro: Controllers::new(), pro_held: Vec::new() }
+        Gamepads { gilrs, buttons, axis_event: None, pro: Controllers::new(), pro_held: Vec::new() }
     }
 
     pub fn set_buttons(&mut self, buttons: PadButtons) {
@@ -45,11 +55,24 @@ impl Gamepads {
     /// buttons pressed meanwhile.
     pub fn poll(&mut self) -> Vec<Button> {
         let mut pressed = Vec::new();
+        self.axis_event = None;
         let reports = self.pro.reports();
         if let Some(gilrs) = &mut self.gilrs {
             while let Some(event) = gilrs.next_event() {
                 match event.event {
                     EventType::ButtonPressed(button, _) if !left_out(&gilrs.gamepad(event.id), &reports) => pressed.push(button),
+                    EventType::AxisChanged(_, value, code) => {
+                        let pad = gilrs.gamepad(event.id);
+                        // Keep native axis codes so wheels with unmapped steering
+                        // and pedal axes can still be configured.
+                        if !left_out(&pad, &reports) && value.abs() >= 0.20 {
+                            self.axis_event = Some(AxisInput {
+                                device_id: pad.uuid().to_string(),
+                                device_name: pad.name().to_owned(),
+                                code,
+                            });
+                        }
+                    }
                     EventType::Connected => {
                         log::info!("controller connected, {}", gilrs.gamepad(event.id).name());
                     }
@@ -64,6 +87,10 @@ impl Gamepads {
         pressed
     }
 
+    pub fn take_axis(&mut self) -> Option<AxisInput> {
+        self.axis_event.take()
+    }
+
     /// whether a controller holds button down.
     pub fn holding(&self, button: Button) -> bool {
         let reports = self.pro.reports();
@@ -74,7 +101,7 @@ impl Gamepads {
     }
 
     /// what the controllers hold down, over what the keyboard does.
-    pub fn apply(&self, mut state: InputState) -> InputState {
+    pub fn apply(&self, mut state: InputState, wheel: &WheelSettings) -> InputState {
         let reports = self.pro.reports();
         for report in &reports {
             for (button, bound) in self.buttons.map() {
@@ -109,21 +136,72 @@ impl Gamepads {
             let left = [pad.value(Axis::LeftStickX), pad.value(Axis::LeftStickY)];
             let right = [pad.value(Axis::RightStickX), pad.value(Axis::RightStickY)];
             sticks(&mut state, left, right);
+
+            if wheel.enabled && wheel.device_id.as_deref() == Some(pad.uuid().to_string().as_str()) {
+                apply_wheel(&mut state, &pad, wheel);
+            }
         }
         state
     }
 }
 
+fn apply_wheel(state: &mut InputState, pad: &Gamepad, wheel: &WheelSettings) {
+    if let Some(code) = wheel.steering {
+        let mut value = pad.state().value(code).clamp(-1.0, 1.0);
+        if wheel.steering_inverted {
+            value = -value;
+        }
+        let deadzone = f32::from(wheel.steering_deadzone.min(35)) / 100.0;
+        let magnitude = value.abs();
+        state.circle_x = if magnitude <= deadzone {
+            0.0
+        } else {
+            value.signum() * ((magnitude - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0)
+        };
+    }
+
+    let pedal_pressed = |code: Option<Code>, inverted: bool| -> bool {
+        let Some(code) = code else { return false };
+        let raw = pad.state().value(code).clamp(-1.0, 1.0);
+        let mut value = match wheel.pedal_axis_range {
+            PedalAxisRange::NegativeToPositive => (raw + 1.0) * 0.5,
+            PedalAxisRange::ZeroToOne => raw.max(0.0),
+        };
+        if inverted {
+            value = 1.0 - value;
+        }
+        value >= 0.5
+    };
+    if pedal_pressed(wheel.accelerator, wheel.accelerator_inverted) {
+        state.buttons.insert(PadState::A);
+    }
+    if pedal_pressed(wheel.brake, wheel.brake_inverted) {
+        state.buttons.insert(PadState::B);
+    }
+}
+
 /// the left stick is the circle pad and the right one the C-stick, up
 /// positive as the console has it, each once it leans past the deadzone.
-fn sticks(state: &mut InputState, [x, y]: [f32; 2], [cx, cy]: [f32; 2]) {
-    if x.hypot(y) > DEADZONE {
-        state.circle_x = x.clamp(-1.0, 1.0);
-        state.circle_y = y.clamp(-1.0, 1.0);
+fn deadzone_pair([x, y]: [f32; 2]) -> Option<[f32; 2]> {
+    let x = x.clamp(-1.0, 1.0);
+    let y = y.clamp(-1.0, 1.0);
+    let magnitude = x.hypot(y);
+    if magnitude <= DEADZONE {
+        return None;
     }
-    if cx.hypot(cy) > DEADZONE {
-        state.c_stick_x = cx.clamp(-1.0, 1.0);
-        state.c_stick_y = cy.clamp(-1.0, 1.0);
+    let scaled = ((magnitude - DEADZONE) / (1.0 - DEADZONE)).min(1.0);
+    let factor = scaled / magnitude;
+    Some([x * factor, y * factor])
+}
+
+fn sticks(state: &mut InputState, [x, y]: [f32; 2], [cx, cy]: [f32; 2]) {
+    if let Some([x, y]) = deadzone_pair([x, y]) {
+        state.circle_x = x;
+        state.circle_y = y;
+    }
+    if let Some([cx, cy]) = deadzone_pair([cx, cy]) {
+        state.c_stick_x = cx;
+        state.c_stick_y = cy;
     }
 }
 
