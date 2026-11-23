@@ -3,7 +3,9 @@
 //! logged in and has no friends. what needs the servers is left to the
 //! offline reply.
 
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use zakuro_common::result::errors;
 
@@ -89,6 +91,130 @@ fn load_friend_account(system: &System) -> Option<FriendAccount> {
     }
 }
 
+fn form_encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        if *byte == b' ' {
+            encoded.push('+');
+        } else if byte.is_ascii_alphanumeric() || matches!(*byte, b'*' | b'-' | b'.' | b'_') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// Fetch a fresh eight-character UID-HMAC from Pretendo's repair endpoint.
+/// The NEX password is sent to curl through stdin, not exposed in argv.
+fn request_uidhmac(principal_id: u32, password: &str) -> Result<String, String> {
+    let body = format!("pid={}&password={}", principal_id, form_encode_component(password));
+    let mut child = Command::new("curl")
+        .args([
+            "--silent", "--show-error",
+            "--connect-timeout", "8", "--max-time", "15",
+            "--request", "POST",
+            "--header", "Content-Type: application/x-www-form-urlencoded",
+            "--data-binary", "@-",
+            "https://api.pretendo.cc/v1/repair-uidhmac",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start the UID-HMAC repair request: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(body.as_bytes())
+            .map_err(|error| format!("could not send the UID-HMAC repair request: {error}"))?;
+    }
+    let output = child.wait_with_output()
+        .map_err(|error| format!("could not read the UID-HMAC repair response: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            format!("UID-HMAC repair client exited with {}", output.status)
+        } else {
+            detail
+        });
+    }
+
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Pretendo returned invalid UID-HMAC JSON: {error}"))?;
+    if response.get("status").and_then(serde_json::Value::as_i64) != Some(200) {
+        let detail = response.get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown repair API error");
+        return Err(format!("Pretendo rejected the UID-HMAC repair request: {detail}"));
+    }
+    let hmac = response.get("data")
+        .and_then(|data| data.get("uidhmac"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Pretendo's repair response omitted data.uidhmac".to_owned())?;
+    if hmac.len() != 8 || !hmac.is_ascii() {
+        return Err("Pretendo returned a malformed UID-HMAC".to_owned());
+    }
+    Ok(hmac.to_owned())
+}
+
+/// Repair only when explicitly enabled. The original Friends account record
+/// is preserved as a one-time backup, and the password is never logged.
+fn repair_uidhmac_if_enabled(system: &System) -> Result<(), String> {
+    if !system.config.auto_repair_uidhmac
+        || system.config.network_provider != NetworkProvider::Pretendo
+    {
+        return Ok(());
+    }
+
+    let account_path = friend_account_path(system);
+    let mut bytes = std::fs::read(&account_path)
+        .map_err(|error| format!("could not read the imported Friends account: {error}"))?;
+    let account = parse_friend_account(&bytes)
+        .ok_or_else(|| "the imported Friends account file is invalid or truncated".to_owned())?;
+    if account.principal_id == 0 || account.password.is_empty() {
+        return Err("the imported Friends account has no PrincipalID or NEX password".to_owned());
+    }
+
+    let marker_path = account_path.with_file_name("pretendo-uidhmac.marker");
+    let marker = format!("{}:{}", account.principal_id, account.uidhmac);
+    if std::fs::read_to_string(&marker_path).ok().is_some_and(|saved| saved.trim() == marker) {
+        return Ok(());
+    }
+
+    let hmac = request_uidhmac(account.principal_id, &account.password)?;
+    let backup_path = account_path.with_file_name("account.pretendo-backup");
+    if !backup_path.exists() {
+        std::fs::copy(&account_path, &backup_path)
+            .map_err(|error| format!("could not back up the original Friends account: {error}"))?;
+    }
+
+    // UIDHMAC is eight UTF-16 characters plus a NUL, at byte offset 0x42.
+    bytes[0x42..0x54].fill(0);
+    for (index, unit) in hmac.encode_utf16().enumerate() {
+        let offset = 0x42 + index * 2;
+        bytes[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+
+    let temporary = account_path.with_file_name("account.pretendo-tmp");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true).truncate(true).write(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not stage the repaired Friends account: {error}"))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("could not write the repaired Friends account: {error}"))?;
+        file.flush()
+            .map_err(|error| format!("could not flush the repaired Friends account: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not sync the repaired Friends account: {error}"))?;
+    }
+    std::fs::rename(&temporary, &account_path)
+        .map_err(|error| format!("could not install the repaired Friends account: {error}"))?;
+    std::fs::write(marker_path, format!("{}:{hmac}\n", account.principal_id))
+        .map_err(|error| format!("could not record the UID-HMAC repair state: {error}"))?;
+    Ok(())
+}
+
 fn reply_static_bytes(
     system: &mut System,
     buffer: &CommandBuffer,
@@ -154,6 +280,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0020 | 0x0021 | 0x0032 => buffer.reply(&mut system.memory, command, &[]),
         // GetMyFriendKey: PrincipalID, padding, and the 64-bit local friend code.
         0x0005 => {
+            if let Err(error) = repair_uidhmac_if_enabled(system) {
+                log::warn!("frd:u UID-HMAC repair failed: {error}");
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+                return true;
+            }
             let result = load_friend_account(system).map(|account| [
                 account.principal_id,
                 0,
@@ -208,6 +339,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // GetMyPassword(size, static output buffer). The Friends account file
         // stores the 16-character NEX password as UTF-16 at offset 0x20.
         0x0010 => {
+            if let Err(error) = repair_uidhmac_if_enabled(system) {
+                log::warn!("frd:u UID-HMAC repair failed: {error}");
+                reply_static_bytes(system, buffer, command, errors::NOT_CONNECTED.0, &[]);
+                return true;
+            }
             let requested = buffer.get(&mut system.memory, 1) as usize;
             match load_friend_account(system) {
                 Some(account) => {
@@ -277,6 +413,11 @@ mod tests {
         assert_eq!(account.nasc_environment, 1);
         assert_eq!(account.server_type, b'M');
         assert_eq!(account.server_type_number, b'K');
+    }
+
+    #[test]
+    fn repair_form_encoding_is_safe_for_password_characters() {
+        assert_eq!(form_encode_component("a b&c"), "a+b%26c");
     }
 
     #[test]

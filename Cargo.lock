@@ -4698,6 +4698,7 @@ dependencies = [
  "rayon",
  "recomp-abi",
  "serde",
+ "serde_json",
  "sha1",
  "symphonia-codec-aac",
  "symphonia-core",
