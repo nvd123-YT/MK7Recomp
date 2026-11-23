@@ -570,6 +570,60 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             };
             reply_ret(system, buffer, command, ret);
         }
+        0x0007 => {
+            // recvfrom using a mapped output buffer. This is the large-buffer
+            // variant used by libctru when a packet does not fit a small IPC
+            // static buffer.
+            let id = buffer.get(&mut system.memory, 1);
+            let length = buffer.get(&mut system.memory, 2) as usize;
+            let flags = buffer.get(&mut system.memory, 3);
+            let address_length = buffer.get(&mut system.memory, 4) as usize;
+            let descriptor = buffer.get(&mut system.memory, 6);
+            let pointer = buffer.get(&mut system.memory, 7);
+            let capacity = match Descriptor::parse(descriptor) {
+                Descriptor::MappedBuffer { size, .. } => size as usize,
+                _ => 0,
+            };
+            let mut bytes = vec![0; length.min(capacity).min(65_507)];
+            let received = match system.services.soc.sockets.get_mut(&id) {
+                None => Err(-9),
+                Some(entry) => match &mut entry.socket {
+                    Socket::Udp(socket) => {
+                        let result = if flags & 2 != 0 { socket.peek_from(&mut bytes) } else { socket.recv_from(&mut bytes) };
+                        result.map(|(count, address)| (count, Some(address))).map_err(|error| errno(&error))
+                    }
+                    Socket::Tcp(socket) => {
+                        let result = if flags & 2 != 0 { socket.peek(&mut bytes) } else { socket.read(&mut bytes) };
+                        result.map(|count| (count, socket.peer_addr().ok())).map_err(|error| errno(&error))
+                    }
+                    _ => Err(-107),
+                },
+            };
+            let (ret, source) = match received {
+                Ok((count, source)) => {
+                    bytes.truncate(count);
+                    (count as i32, if address_length > 0 { source } else { None })
+                }
+                Err(error) => {
+                    bytes.clear();
+                    (error, None)
+                }
+            };
+            if pointer != 0 && !bytes.is_empty() {
+                system.memory.write_bytes(pointer, &bytes);
+            }
+            let source_bytes = source.and_then(encode_address).unwrap_or([0; SOCKADDR_SIZE]);
+            let source_data: &[u8] = if source.is_some() { &source_bytes } else { &[] };
+            let (address_pointer, address_size) = tls_write(system, buffer, tls, 1, source_data);
+            buffer.set(&mut system.memory, 0, Header::new(command, 3, 4).0);
+            buffer.set(&mut system.memory, 1, 0);
+            buffer.set(&mut system.memory, 2, ret as u32);
+            buffer.set(&mut system.memory, 3, bytes.len() as u32);
+            buffer.set(&mut system.memory, 4, descriptor);
+            buffer.set(&mut system.memory, 5, pointer);
+            buffer.set(&mut system.memory, 6, Descriptor::static_buffer(address_size, 1));
+            buffer.set(&mut system.memory, 7, address_pointer);
+        }
         0x0008 => {
             let id = buffer.get(&mut system.memory, 1);
             let length = buffer.get(&mut system.memory, 2) as usize;
@@ -598,6 +652,47 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 }
                 Err(error) => reply_recv(system, buffer, command, tls, &[], None, error)
             }
+        }
+        0x0009 => {
+            // sendto using a mapped input buffer, the large-buffer counterpart
+            // of SendToSingle.
+            let id = buffer.get(&mut system.memory, 1);
+            let length = buffer.get(&mut system.memory, 2) as usize;
+            let address_length = buffer.get(&mut system.memory, 4) as usize;
+            let destination = inline_buffer(system, buffer, 6, address_length);
+            let descriptor = buffer.get(&mut system.memory, 8);
+            let pointer = buffer.get(&mut system.memory, 9);
+            let capacity = match Descriptor::parse(descriptor) {
+                Descriptor::MappedBuffer { size, .. } => size as usize,
+                _ => 0,
+            };
+            let mut payload = vec![0; length.min(capacity)];
+            if pointer != 0 && !payload.is_empty() {
+                system.memory.read_bytes(pointer, &mut payload);
+            }
+            let ret = if payload.len() != length {
+                -90
+            } else {
+                match system.services.soc.sockets.get_mut(&id) {
+                    None => -9,
+                    Some(entry) => match &mut entry.socket {
+                        Socket::Udp(socket) => if address_length > 0 {
+                            decode_address(&destination).map_or(-22, |address| socket.send_to(&payload, address).map(|count| count as i32).unwrap_or_else(|error| errno(&error)))
+                        } else {
+                            socket.send(&payload).map(|count| count as i32).unwrap_or_else(|error| errno(&error))
+                        },
+                        Socket::Tcp(socket) => if address_length > 0 { -89 } else {
+                            socket.write(&payload).map(|count| count as i32).unwrap_or_else(|error| errno(&error))
+                        },
+                        _ => -107,
+                    },
+                }
+            };
+            buffer.set(&mut system.memory, 0, Header::new(command, 2, 2).0);
+            buffer.set(&mut system.memory, 1, 0);
+            buffer.set(&mut system.memory, 2, ret as u32);
+            buffer.set(&mut system.memory, 3, descriptor);
+            buffer.set(&mut system.memory, 4, pointer);
         }
         0x000A => {
             let id = buffer.get(&mut system.memory, 1);
@@ -735,6 +830,38 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.set(&mut system.memory, 2, ready as u32);
             buffer.set(&mut system.memory, 3, Descriptor::static_buffer(size, 0));
             buffer.set(&mut system.memory, 4, pointer);
+        }
+        0x0010 => {
+            // Return numeric host and service strings when reverse DNS is not
+            // available; this keeps getnameinfo useful for NEX diagnostics.
+            let address_length = buffer.get(&mut system.memory, 1) as usize;
+            let host_length = buffer.get(&mut system.memory, 2) as usize;
+            let service_length = buffer.get(&mut system.memory, 3) as usize;
+            let _flags = buffer.get(&mut system.memory, 4);
+            let address = decode_address(&inline_buffer(system, buffer, 5, address_length));
+            let (host, service, ret) = match address {
+                Some(SocketAddr::V4(address)) => (address.ip().to_string(), address.port().to_string(), 0),
+                None => (String::new(), String::new(), -22),
+            };
+            let mut host_bytes = host.into_bytes();
+            let mut service_bytes = service.into_bytes();
+            host_bytes.push(0);
+            service_bytes.push(0);
+            host_bytes.truncate(host_length);
+            service_bytes.truncate(service_length);
+            let (host_pointer, host_size) = tls_write(system, buffer, tls, 0, &host_bytes);
+            let (service_pointer, service_size) = tls_write(system, buffer, tls, 1, &service_bytes);
+            buffer.set(&mut system.memory, 0, Header::new(command, 2, 4).0);
+            buffer.set(&mut system.memory, 1, 0);
+            buffer.set(&mut system.memory, 2, ret as u32);
+            buffer.set(&mut system.memory, 3, Descriptor::static_buffer(host_size, 0));
+            buffer.set(&mut system.memory, 4, host_pointer);
+            buffer.set(&mut system.memory, 5, Descriptor::static_buffer(service_size, 1));
+            buffer.set(&mut system.memory, 6, service_pointer);
+        }
+        0x0015 => {
+            // SockAtMark: stream sockets do not expose an urgent-data mark.
+            reply_ret(system, buffer, command, 0);
         }
         0x0016 => {
             let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
