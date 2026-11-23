@@ -6,9 +6,11 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
 
 use zakuro_common::result::errors;
 
@@ -395,6 +397,132 @@ fn parse_nasc_form(body: &str) -> Option<BTreeMap<String, String>> {
     Some(fields)
 }
 
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+const STUN_BINDING_REQUEST: u16 = 0x0001;
+const STUN_BINDING_SUCCESS: u16 = 0x0101;
+const STUN_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+const STUN_MAPPED_ADDRESS: u16 = 0x0001;
+const STUN_CHANGE_REQUEST: u16 = 0x0003;
+const STUN_TIMEOUT: Duration = Duration::from_millis(1100);
+
+fn parse_stun_response(response: &[u8], transaction_id: &[u8; 12]) -> Option<SocketAddr> {
+    if response.len() < 20
+        || u16::from_be_bytes([response[0], response[1]]) != STUN_BINDING_SUCCESS
+        || u32::from_be_bytes(response[4..8].try_into().ok()?) != STUN_MAGIC_COOKIE
+        || &response[8..20] != transaction_id
+    {
+        return None;
+    }
+    let message_end = 20usize.saturating_add(
+        u16::from_be_bytes([response[2], response[3]]) as usize
+    ).min(response.len());
+    let mut cursor = 20usize;
+    while cursor + 4 <= message_end {
+        let kind = u16::from_be_bytes([response[cursor], response[cursor + 1]]);
+        let length = u16::from_be_bytes([response[cursor + 2], response[cursor + 3]]) as usize;
+        let value_start = cursor + 4;
+        let value_end = value_start.checked_add(length)?;
+        if value_end > message_end { return None; }
+        let value = &response[value_start..value_end];
+        if (kind == STUN_XOR_MAPPED_ADDRESS || kind == STUN_MAPPED_ADDRESS)
+            && value.len() >= 8
+            && value[1] == 1
+        {
+            let mut port = u16::from_be_bytes([value[2], value[3]]);
+            let mut address = u32::from_be_bytes(value[4..8].try_into().ok()?);
+            if kind == STUN_XOR_MAPPED_ADDRESS {
+                port ^= (STUN_MAGIC_COOKIE >> 16) as u16;
+                address ^= STUN_MAGIC_COOKIE;
+            }
+            return Some(SocketAddr::from((std::net::Ipv4Addr::from(address), port)));
+        }
+        cursor = value_start + length.next_multiple_of(4);
+    }
+    None
+}
+
+fn stun_binding(
+    socket: &UdpSocket,
+    server: SocketAddr,
+    change_ip_and_port: bool,
+) -> Option<(SocketAddr, SocketAddr)> {
+    let mut transaction_id = [0u8; 12];
+    getrandom::fill(&mut transaction_id).ok()?;
+    let attribute_length = if change_ip_and_port { 8 } else { 0 };
+    let mut request = vec![0u8; 20 + attribute_length];
+    request[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
+    request[2..4].copy_from_slice(&(attribute_length as u16).to_be_bytes());
+    request[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    request[8..20].copy_from_slice(&transaction_id);
+    if change_ip_and_port {
+        request[20..22].copy_from_slice(&STUN_CHANGE_REQUEST.to_be_bytes());
+        request[22..24].copy_from_slice(&4u16.to_be_bytes());
+        request[24..28].copy_from_slice(&6u32.to_be_bytes());
+    }
+    socket.send_to(&request, server).ok()?;
+    let deadline = std::time::Instant::now() + STUN_TIMEOUT;
+    let mut response = [0u8; 1500];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() { return None; }
+        socket.set_read_timeout(Some(remaining)).ok()?;
+        match socket.recv_from(&mut response) {
+            Ok((size, source)) => {
+                if let Some(mapped) = parse_stun_response(&response[..size], &transaction_id) {
+                    return Some((mapped, source));
+                }
+            }
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return None,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Infer mapping from two different STUN endpoints. Filtering is reported as
+/// port-independent only when an RFC 3489 change-request gets an answer from
+/// the alternate endpoint; otherwise it remains unknown.
+fn detect_nat_properties(servers: Vec<String>) -> (u32, u32) {
+    let mut endpoints = Vec::new();
+    for server in servers {
+        let resolved = match server.to_socket_addrs() {
+            Ok(addresses) => addresses.filter(SocketAddr::is_ipv4).collect::<Vec<_>>(),
+            Err(error) => {
+                log::debug!("FRD STUN server {server} did not resolve: {error}");
+                Vec::new()
+            }
+        };
+        if let Some(endpoint) = resolved.into_iter().next() {
+            if !endpoints.contains(&endpoint) { endpoints.push(endpoint); }
+        }
+        if endpoints.len() >= 4 { break; }
+    }
+    if endpoints.len() < 2 {
+        log::warn!("FRD NAT probe needs two resolvable IPv4 STUN endpoints");
+        return (0, 0);
+    }
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(socket) => socket,
+        Err(error) => {
+            log::warn!("FRD NAT probe could not create a UDP socket: {error}");
+            return (0, 0);
+        }
+    };
+
+    let first = stun_binding(&socket, endpoints[0], false);
+    let second_endpoint = endpoints.iter().copied().find(|endpoint| *endpoint != endpoints[0]);
+    let second = second_endpoint.and_then(|endpoint| stun_binding(&socket, endpoint, false));
+    let mapping = match (first, second) {
+        (Some((a, _)), Some((b, _))) if a == b => 1,
+        (Some(_), Some(_)) => 2,
+        _ => 0,
+    };
+
+    let filtering = stun_binding(&socket, endpoints[0], true)
+        .filter(|(_, source)| *source != endpoints[0])
+        .map_or(0, |_| 1);
+    (mapping, filtering)
+}
+
 fn fixed_string<const N: usize>(value: &str) -> [u8; N] {
     let mut output = [0u8; N];
     let count = value.len().min(N.saturating_sub(1));
@@ -628,6 +756,24 @@ fn start_game_auth(
     Ok(PendingNasc { receiver: receive, event })
 }
 
+fn start_nat_detection(system: &System, event: ObjectId) -> PendingNasc<(u32, u32)> {
+    let configured = system.config.data_dir.as_ref()
+        .and_then(|dir| std::fs::read(dir.join("sysdata/nasc.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|json| json.get("stun_servers").and_then(serde_json::Value::as_array).cloned())
+        .map(|servers| servers.into_iter().filter_map(|server| server.as_str().map(str::to_owned)).collect::<Vec<_>>())
+        .filter(|servers| servers.len() >= 2);
+    let servers = configured.unwrap_or_else(|| vec![
+        "stun.l.google.com:19302".to_owned(),
+        "stun.cloudflare.com:3478".to_owned(),
+    ]);
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = send.send(Ok(detect_nat_properties(servers)));
+    });
+    PendingNasc { receiver: receive, event }
+}
+
 fn start_service_locator(
     system: &mut System,
     server_id: u32,
@@ -671,6 +817,10 @@ pub struct FrdState {
     pending_game: Option<PendingNasc<GameAuthenticationData>>,
     #[serde(skip)]
     pending_service: Option<PendingNasc<ServiceLocatorData>>,
+    #[serde(skip)]
+    pending_nat: Option<PendingNasc<(u32, u32)>>,
+    #[serde(default)]
+    nat_properties: Option<(u32, u32)>,
     #[serde(default)]
     game_authentication: Option<GameAuthenticationData>,
     #[serde(default)]
@@ -727,6 +877,30 @@ pub fn poll(system: &mut System) {
                     nasc_result: u32::MAX,
                     ..ServiceLocatorData::default()
                 });
+            }
+        }
+        system.kernel.signal_event(event);
+    }
+
+    let nat_ready = system.services.frd.pending_nat.as_ref().and_then(|pending| {
+        match pending.receiver.try_recv() {
+            Ok(result) => Some((pending.event, result)),
+            Err(mpsc::TryRecvError::Disconnected) => Some((pending.event, Err("STUN worker stopped".to_owned()))),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    });
+    if let Some((event, result)) = nat_ready {
+        system.services.frd.pending_nat = None;
+        match result {
+            Ok(properties) => {
+                log::info!("frd:u detected NAT mapping={} filtering={}", properties.0, properties.1);
+                system.services.frd.nat_properties = Some(properties);
+                system.services.frd.last_response_result = 0;
+            }
+            Err(error) => {
+                log::warn!("frd:u NAT detection failed: {error}");
+                system.services.frd.nat_properties = Some((0, 0));
+                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
             }
         }
         system.kernel.signal_event(event);
@@ -972,24 +1146,28 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
             }
         }
-        // DetectNatProperties completes with unknown mapping/filtering until
-        // a real STUN implementation supplies measured values.
+        // DetectNatProperties runs independent STUN mappings and an
+        // alternate-source probe asynchronously, then signals the event.
         0x002C => {
             let descriptor = Descriptor::parse(buffer.get(&mut system.memory, 1));
             let handle = match descriptor {
                 Descriptor::Handles { count, .. } if count > 0 => Some(buffer.get(&mut system.memory, 2)),
                 _ => None,
             };
-            if let Some(event) = handle.and_then(|handle| system.kernel.handles.resolve(handle)) {
-                system.kernel.signal_event(event);
-                buffer.reply(&mut system.memory, command, &[]);
-            } else {
-                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            match handle.and_then(|handle| system.kernel.handles.resolve(handle)) {
+                Some(event) if system.services.frd.pending_nat.is_none() => {
+                    system.services.frd.nat_properties = None;
+                    system.services.frd.pending_nat = Some(start_nat_detection(system, event));
+                    buffer.reply(&mut system.memory, command, &[]);
+                }
+                _ => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
             }
         }
-        // GetNatProperties: unknown until the host has completed a real STUN
-        // classification. Never claim endpoint-independent NAT by default.
-        0x002D => buffer.reply(&mut system.memory, command, &[0, 0]),
+        // GetNatProperties only returns once the asynchronous probe finishes.
+        0x002D => match system.services.frd.nat_properties {
+            Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
+            None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+        },
         // GetServerTypes: bytes from the imported Friends account.
         0x0030 => {
             match load_friend_account(system) {

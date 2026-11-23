@@ -174,7 +174,7 @@
     {
       "id": "open_online_data",
       "label": "Open online data",
-      "help": "For Pretendo NASC, place your own ctr-common-1-cert.pem, ctr-common-1-key.pem, LocalFriendCodeSeed_B, and a filled-in nasc.json here. Import the Friends save separately. These identity files are private and are never included in the game download.",
+      "help": "For NASC/FRD, place your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json here. Optional stun_servers controls NAT mapping detection. Private files are never bundled.",
       "open": "online_data"
     },
     {
