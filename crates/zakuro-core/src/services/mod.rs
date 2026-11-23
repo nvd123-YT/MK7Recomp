@@ -14,6 +14,7 @@ pub mod dsp_mixer;
 pub mod dsp_voices;
 pub mod frd;
 pub mod fs;
+pub mod http;
 pub mod glyphs;
 pub mod gsp;
 pub mod hid;
@@ -97,6 +98,9 @@ pub struct ServiceState {
     // state starts a fresh socket service instead of reusing stale descriptors.
     #[serde(skip)]
     pub soc: soc::SocState,
+    // HTTP requests hold host worker channels and temporary response data.
+    #[serde(skip)]
+    pub http: http::HttpState,
 }
 
 /// entry point from svcSendSyncRequest.
@@ -138,6 +142,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "mic:u" => mic::handle(system, &buffer, header),
         "nwm::UDS" => uds::handle(system, &buffer, header),
         "soc:U" => soc::handle(system, &buffer, header),
+        "http:C" => http::handle(system, &buffer, header),
         "dlp:SRVR" => dlp::handle(system, &buffer, header),
         _ => misc::handle(system, &buffer, header, &name),
     };

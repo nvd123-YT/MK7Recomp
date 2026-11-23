@@ -228,7 +228,7 @@ pub fn handle(
         // -- Accounts, background downloads and http ------------------------
         // setting a session up works offline, only its requests need the
         // network
-        "act:u" | "act:a" | "boss:U" | "boss:P" | "http:C" => match command {
+        "act:u" | "act:a" | "boss:U" | "boss:P" => match command {
             0x0001 => {
                 buffer.reply(&mut system.memory, command, &[]);
                 true
