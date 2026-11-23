@@ -37,7 +37,7 @@ use library::Library;
 use menus::{Action, Menus};
 use present::Backend;
 use recompile::{Job, Stage, Toolchain, Wanted};
-use settings::{CameraSource, MicrophoneSource, Renderer, Screens, Settings};
+use settings::{CameraSource, MicrophoneSource, Renderer, Screens, Settings, VertexShading};
 
 pub use zakuro_core::memory::Memory;
 pub use zakuro_core::recompiled::Linked;
@@ -754,6 +754,7 @@ impl App {
             linked: self.linked.filter(|_| !interpret),
             find_recompiled: !interpret,
             hardware_renderer: self.options.hardware_rasterizer.unwrap_or(settings.hardware_rasterizer),
+            gpu_vertex_shaders: settings.vertex_shading.gpu_override(),
             mods_enabled: settings.mods_enabled,
             plugins_3gx_enabled: settings.plugins_3gx_enabled,
             texture_packs: settings.texture_packs,

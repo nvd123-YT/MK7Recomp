@@ -12,7 +12,7 @@ use crate::library::{Game, Library, ICON_SIZE};
 use crate::recompile::{Job, Stage, Wanted};
 use crate::gamepad::button_name;
 use crate::settings::{
-    game_key, CameraSource, Filter, GameSettings, Keys, Language, MicrophoneSource, Orientation, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape,
+    game_key, CameraSource, Filter, GameSettings, Keys, Language, MicrophoneSource, Orientation, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape, VertexShading,
 };
 
 /// what the user asked for.
@@ -783,6 +783,9 @@ impl Menus {
                         ui.selectable_value(&mut settings.renderer, Renderer::OpenGl, "OpenGL");
                     });
                 rasterizer(ui, &mut settings.hardware_rasterizer);
+                ui.add_enabled_ui(settings.hardware_rasterizer, |ui| {
+                    vertex_shading(ui, &mut settings.vertex_shading);
+                });
                 ui.checkbox(&mut settings.mods_enabled, "Enable game mods")
                     .on_hover_text("Apply code patches and RomFS replacements from the game's mods folder.");
                 ui.checkbox(&mut settings.plugins_3gx_enabled, "Enable 3GX plugins")
@@ -849,7 +852,7 @@ impl Menus {
 
                 ui.separator();
                 ui.heading("Interface");
-                ui.checkbox(&mut settings.show_fps, "Show the frame rate");
+                ui.checkbox(&mut settings.show_fps, "Show the performance HUD");
                 ui.horizontal(|ui| {
                     ui.label("Library background");
                     match &settings.background {
@@ -1003,6 +1006,7 @@ impl Menus {
                 ui.separator();
                 ui.heading("Graphics");
                 own(ui, &mut game.hardware_rasterizer, &general.hardware_rasterizer, rasterizer);
+                own(ui, &mut game.vertex_shading, &general.vertex_shading, vertex_shading);
                 own(ui, &mut game.resolution, &general.resolution, resolution);
                 own(ui, &mut game.texture_packs, &general.texture_packs, texture_packs);
                 own(ui, &mut game.frame_interpolation, &general.frame_interpolation, interpolation);
@@ -1154,6 +1158,18 @@ fn own<T: Clone>(ui: &mut egui::Ui, own: &mut Option<T>, general: &T, row: impl 
 
 fn rasterizer(ui: &mut egui::Ui, value: &mut bool) {
     ui.checkbox(value, "Draw the 3D on the GPU");
+}
+
+fn vertex_shading(ui: &mut egui::Ui, value: &mut VertexShading) {
+    egui::ComboBox::from_label("Vertex shading")
+        .selected_text(value.name())
+        .show_ui(ui, |ui| {
+            for mode in [VertexShading::Auto, VertexShading::Gpu, VertexShading::Cpu] {
+                ui.selectable_value(value, mode, mode.name());
+            }
+        })
+        .response
+        .on_hover_text("Auto uses CPU shading on integrated GPUs and GPU shading on discrete GPUs. Try GPU on vertex-heavy tracks and compare with the performance HUD.");
 }
 
 fn resolution(ui: &mut egui::Ui, value: &mut u32) {
