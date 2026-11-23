@@ -18,6 +18,7 @@ mod report;
 mod settings;
 mod zig;
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -457,14 +458,30 @@ struct Running {
     /// place of the keyboard's and the controllers', and the frames run.
     replay: Option<zakuro_core::replay::Replay>,
     frame: u64,
-    /// frames run since counting_since, for the frame rate.
     frames: u32,
     counting_since: Instant,
-    fps: f32,
+    last_frame_at: Instant,
+    frame_times_ms: VecDeque<f32>,
+    emulation_time: Duration,
+    sampled_draw_calls: u64,
+    sampled_vertices: u64,
+    sampled_gpu_busy: Duration,
+    last_draw_calls: u64,
+    last_vertices: u64,
+    last_gpu_busy: Duration,
+    performance: menus::Performance,
 }
 
 impl Running {
     fn new(system: System, path: PathBuf, name: String) -> Running {
+        let now = Instant::now();
+        let last_draw_calls = system.gpu.draw_calls;
+        let last_vertices = system.gpu.vertices_drawn;
+        let last_gpu_busy = system.gpu.busy;
+        let performance = menus::Performance {
+            gpu_vertex_shaders: system.gpu.vertex_shading_on_gpu(),
+            ..menus::Performance::default()
+        };
         Running {
             system,
             path,
@@ -473,18 +490,66 @@ impl Running {
             replay: None,
             frame: 0,
             frames: 0,
-            counting_since: Instant::now(),
-            fps: 0.0,
+            counting_since: now,
+            last_frame_at: now,
+            frame_times_ms: VecDeque::with_capacity(120),
+            emulation_time: Duration::ZERO,
+            sampled_draw_calls: 0,
+            sampled_vertices: 0,
+            sampled_gpu_busy: Duration::ZERO,
+            last_draw_calls,
+            last_vertices,
+            last_gpu_busy,
+            performance,
         }
     }
 
-    fn count_frame(&mut self) {
+    fn count_frame(&mut self, emulation_time: Duration) {
+        let now = Instant::now();
+        let frame_ms = now.saturating_duration_since(self.last_frame_at).as_secs_f32() * 1000.0;
+        self.last_frame_at = now;
+        if frame_ms.is_finite() {
+            self.frame_times_ms.push_back(frame_ms);
+            while self.frame_times_ms.len() > 120 {
+                self.frame_times_ms.pop_front();
+            }
+        }
+
+        self.emulation_time += emulation_time;
+        self.sampled_draw_calls = self.sampled_draw_calls.saturating_add(self.system.gpu.draw_calls.saturating_sub(self.last_draw_calls));
+        self.sampled_vertices = self.sampled_vertices.saturating_add(self.system.gpu.vertices_drawn.saturating_sub(self.last_vertices));
+        self.sampled_gpu_busy += self.system.gpu.busy.saturating_sub(self.last_gpu_busy);
+        self.last_draw_calls = self.system.gpu.draw_calls;
+        self.last_vertices = self.system.gpu.vertices_drawn;
+        self.last_gpu_busy = self.system.gpu.busy;
+
         self.frames += 1;
         let elapsed = self.counting_since.elapsed();
         if elapsed >= Duration::from_millis(500) {
-            self.fps = self.frames as f32 / elapsed.as_secs_f32();
+            let mut times: Vec<f32> = self.frame_times_ms.iter().copied().collect();
+            times.sort_by(f32::total_cmp);
+            let average_frame_ms = if times.is_empty() { 0.0 } else { times.iter().sum::<f32>() / times.len() as f32 };
+            let percentile_index = times.len().saturating_mul(95).div_ceil(100).saturating_sub(1);
+            let p95_ms = times.get(percentile_index).copied().unwrap_or(0.0);
+            let worst_ms = times.last().copied().unwrap_or(0.0);
+            let frames = self.frames.max(1) as f32;
+            self.performance = menus::Performance {
+                fps: self.frames as f32 / elapsed.as_secs_f32(),
+                frame_ms: average_frame_ms,
+                p95_ms,
+                worst_ms,
+                emulation_ms: self.emulation_time.as_secs_f32() * 1000.0 / frames,
+                gpu_host_ms: self.sampled_gpu_busy.as_secs_f32() * 1000.0 / frames,
+                draws_per_frame: self.sampled_draw_calls as f32 / frames,
+                vertices_per_frame: self.sampled_vertices as f32 / frames,
+                gpu_vertex_shaders: self.system.gpu.vertex_shading_on_gpu(),
+            };
             self.frames = 0;
-            self.counting_since = Instant::now();
+            self.counting_since = now;
+            self.emulation_time = Duration::ZERO;
+            self.sampled_draw_calls = 0;
+            self.sampled_vertices = 0;
+            self.sampled_gpu_busy = Duration::ZERO;
         }
     }
 }
@@ -985,7 +1050,7 @@ impl App {
                     self.settings.show_fps = !self.settings.show_fps;
                     self.settings.save();
                     self.menus.toast = Some((
-                        format!("FPS counter {}", if self.settings.show_fps { "on" } else { "off" }),
+                        format!("Performance HUD {}", if self.settings.show_fps { "on" } else { "off" }),
                         Instant::now(),
                     ));
                 }
@@ -1647,7 +1712,7 @@ impl App {
                 log::debug!(
                     target: "zakuro::fps",
                     "{:.1} frames emulated and {shown:.1} shown a second, emulating took {emulating}, showing {showing}",
-                    game.fps
+                    game.performance.fps
                 );
             }
             if let Some(window) = &self.window {
@@ -1681,7 +1746,9 @@ impl App {
             recorder.record(input);
         }
         game.system.set_input(input);
+        let emulation_started = Instant::now();
         let outcome = game.system.run_frame();
+        let emulation_elapsed = emulation_started.elapsed();
         // the overlay reads the game the program was built on, not another
         // one its library opened
         let ours = self.linked.as_ref().is_none_or(|linked| game.system.title.as_ref().is_some_and(|title| title.program_id() == linked.program_id()));
@@ -1692,7 +1759,7 @@ impl App {
                 self.menus.toast = Some((notice, Instant::now()));
             }
         }
-        game.count_frame();
+        game.count_frame(emulation_elapsed);
         let sound = game.system.take_audio();
         // fast forward plays no sound, there is too much of it too soon
         if let (Some(audio), false) = (&self.audio, self.fast_forwarding) {
@@ -1959,7 +2026,7 @@ impl App {
         let program_id = self.program_id();
         let (Some(gui), Some(window)) = (&mut self.gui, &self.window) else { return Overlay::default() };
         let show_fps = self.settings.show_fps;
-        let game = self.game.as_ref().map(|game| (game.name.clone(), game.fps, game.system.recompiled.is_some()));
+        let game = self.game.as_ref().map(|game| (game.name.clone(), game.performance, game.system.recompiled.is_some()));
         let fast = self.fast_forwarding;
         let keyboard = self.game.as_ref().and_then(|game| game.system.keyboard_request().cloned());
         let room = self.room.as_ref().filter(|_| self.menus.multiplayer_open).map(|connection| {
@@ -1979,8 +2046,8 @@ impl App {
         let mut actions = Vec::new();
         let overlay = gui.frame(window, |ui| {
             match &game {
-                Some((name, fps, recompiled)) => {
-                    actions.extend(menus.game(ui, name, program_id, show_fps.then_some(*fps), *recompiled, fast, jobs, waiting.len(), saved.as_deref(), backup_available));
+                Some((name, performance, recompiled)) => {
+                    actions.extend(menus.game(ui, name, program_id, show_fps.then_some(*performance), *recompiled, fast, jobs, waiting.len(), saved.as_deref(), backup_available));
                     if let Some(text) = &corner {
                         menus::corner(ui.ctx(), text);
                     }
