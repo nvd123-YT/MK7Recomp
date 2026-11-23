@@ -540,9 +540,13 @@ fn accept(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, ma
     let accepted = match system.services.soc.sockets.get_mut(&id) {
         Some(entry) => {
             entry.update();
-            match &mut entry.socket {
-                HostSocket::TcpListener(listener) => listener.accept().map_err(|error| errno(&error)),
-                _ => Err(-22),
+            if let Some(queued) = entry.accepted.pop_front() {
+                Ok(queued)
+            } else {
+                match &mut entry.socket {
+                    HostSocket::TcpListener(listener) => listener.accept().map_err(|error| errno(&error)),
+                    _ => Err(-22),
+                }
             }
         }
         None => Err(-8),
