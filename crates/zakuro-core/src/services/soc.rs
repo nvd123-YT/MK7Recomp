@@ -139,7 +139,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
         // Accept(fd, max address length)
-        0x0004 => accept(system, buffer, command, word(system, 1), word(system, 2)),
+        0x0004 => {
+            let (id, max_address) = (word(system, 1), word(system, 2));
+            accept(system, buffer, command, id, max_address);
+        }
         // Bind(fd, address length, current pid), address in static buffer 0.
         0x0005 => {
             let (id, address_length) = (word(system, 1), word(system, 2) as usize);
@@ -323,7 +326,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
         // Poll(count, timeout), pollfd array in static buffer 0.
-        0x0014 => poll(system, buffer, command, word(system, 1) as usize, word(system, 2) as i32),
+        0x0014 => {
+            let (count, timeout) = (word(system, 1) as usize, word(system, 2) as i32);
+            poll(system, buffer, command, count, timeout);
+        }
         // SockAtMark
         0x0015 => {
             let result = if system.services.soc.sockets.contains_key(&word(system, 1)) { 0 } else { -8 };
