@@ -566,12 +566,43 @@ impl Default for WheelSettings {
     }
 }
 
+/// Where the Vulkan vertex shader runs. Auto preserves the device-based
+/// choice; GPU and CPU are useful for comparing geometry-heavy games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VertexShading {
+    #[default]
+    Auto,
+    Gpu,
+    Cpu,
+}
+
+impl VertexShading {
+    pub fn name(self) -> &'static str {
+        match self {
+            VertexShading::Auto => "Auto (recommended)",
+            VertexShading::Gpu => "GPU",
+            VertexShading::Cpu => "CPU",
+        }
+    }
+
+    pub fn gpu_override(self) -> Option<bool> {
+        match self {
+            VertexShading::Auto => None,
+            VertexShading::Gpu => Some(true),
+            VertexShading::Cpu => Some(false),
+        }
+    }
+}
+
 /// what a game has of its own, over the general settings. each one left
 /// out follows them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameSettings {
     pub hardware_rasterizer: Option<bool>,
+    #[serde(deserialize_with = "or_default")]
+    pub vertex_shading: Option<VertexShading>,
     pub resolution: Option<u32>,
     pub texture_packs: Option<bool>,
     pub frame_interpolation: Option<bool>,
@@ -606,6 +637,9 @@ pub struct Settings {
     pub renderer: Renderer,
     /// draw the 3D on the GPU rather than in software.
     pub hardware_rasterizer: bool,
+    /// how vertex shaders run on Vulkan; Auto keeps the device-based choice.
+    #[serde(deserialize_with = "or_default")]
+    pub vertex_shading: VertexShading,
     /// how many times the console's resolution the GPU draws the 3D at.
     pub resolution: u32,
     /// apply code patches and RomFS overlays from game mods folders.
@@ -682,6 +716,7 @@ impl Default for Settings {
             language: Language::English,
             renderer: Renderer::Vulkan,
             hardware_rasterizer: true,
+            vertex_shading: VertexShading::Auto,
             resolution: 2,
             mods_enabled: true,
             plugins_3gx_enabled: false,
@@ -735,6 +770,7 @@ impl GameSettings {
     /// the settings with these over them.
     fn over(&self, settings: &mut Settings) {
         settings.hardware_rasterizer = self.hardware_rasterizer.unwrap_or(settings.hardware_rasterizer);
+        settings.vertex_shading = self.vertex_shading.unwrap_or(settings.vertex_shading);
         settings.resolution = self.resolution.unwrap_or(settings.resolution);
         settings.texture_packs = self.texture_packs.unwrap_or(settings.texture_packs);
         settings.frame_interpolation = self.frame_interpolation.unwrap_or(settings.frame_interpolation);
@@ -856,6 +892,21 @@ fn path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_shading_defaults_to_auto_and_round_trips_per_game() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.vertex_shading, VertexShading::Auto);
+        settings.vertex_shading = VertexShading::Gpu;
+        settings.per_game.insert(
+            game_key(0x0004_0000_0012_3400),
+            GameSettings { vertex_shading: Some(VertexShading::Cpu), ..GameSettings::default() },
+        );
+        let encoded = toml::to_string_pretty(&settings).unwrap();
+        let decoded: Settings = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, settings);
+        assert_eq!(decoded.for_game(Some(0x0004_0000_0012_3400)).vertex_shading, VertexShading::Cpu);
+    }
 
     #[test]
     fn three_gx_plugins_are_disabled_by_default() {

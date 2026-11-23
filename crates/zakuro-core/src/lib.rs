@@ -59,6 +59,8 @@ pub struct Config {
     pub data_dir: Option<std::path::PathBuf>,
     /// draw on the host's GPU through Vulkan, when there is one that can.
     pub hardware_renderer: bool,
+    /// true runs vertex shaders on the GPU, false on the CPU, None uses Auto.
+    pub gpu_vertex_shaders: Option<bool>,
     /// apply code patches and RomFS overlays from a game's mods folder.
     pub mods_enabled: bool,
     /// load Luma/Citra 3GX plugins at game startup.
@@ -114,6 +116,7 @@ impl Default for Config {
             find_recompiled: false,
             data_dir: None,
             hardware_renderer: false,
+            gpu_vertex_shaders: None,
             mods_enabled: true,
             plugins_3gx_enabled: true,
             texture_packs: true,
