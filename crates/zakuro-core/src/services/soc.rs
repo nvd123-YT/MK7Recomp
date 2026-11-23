@@ -19,11 +19,13 @@ const SOCK_STREAM: u32 = 1;
 const SOCK_DGRAM: u32 = 2;
 const IPPROTO_TCP: u32 = 6;
 const IPPROTO_UDP: u32 = 17;
-const POLLIN: u32 = 1;
-const POLLOUT: u32 = 1 << 3;
-const POLLERR: u32 = 1 << 5;
-const POLLHUP: u32 = 1 << 6;
-const POLLNVAL: u32 = 1 << 7;
+// libctru/include/poll.h (CTR): these values differ from some host poll APIs.
+const POLLIN: u32 = 0x01;
+const POLLPRI: u32 = 0x02;
+const POLLHUP: u32 = 0x04;
+const POLLERR: u32 = 0x08;
+const POLLOUT: u32 = 0x10;
+const POLLNVAL: u32 = 0x20;
 const SOC_SOL_CONFIG: u32 = 0xFFFE;
 const MAX_PACKET: usize = 0x10000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -864,6 +866,14 @@ fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize,
         for (index, (id, events)) in descriptors.iter().copied().enumerate() {
             let at = index * 12;
             let mut ready = 0u32;
+            // libctru normalizes every negative guest fd to -1 and poll
+            // ignores it. The fd field is a signed int carried as u32.
+            if id == u32::MAX {
+                output[at..at + 4].copy_from_slice(&id.to_le_bytes());
+                output[at + 4..at + 8].copy_from_slice(&events.to_le_bytes());
+                output[at + 8..at + 12].copy_from_slice(&0u32.to_le_bytes());
+                continue;
+            }
             if let Some(entry) = system.services.soc.sockets.get_mut(&id) {
                 let (readable, writable, error, hangup) = poll_ready(entry);
                 if readable && events & POLLIN != 0 { ready |= POLLIN; }
@@ -1291,6 +1301,16 @@ mod tests {
         assert_eq!(parse_mac_address("02:11:22:33:44:55"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac_address("021122334455"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac_address("02:11:22:33:44"), None);
+    }
+
+    #[test]
+    fn poll_event_masks_match_libctru_ctr_values() {
+        assert_eq!(POLLIN, 0x01);
+        assert_eq!(POLLPRI, 0x02);
+        assert_eq!(POLLHUP, 0x04);
+        assert_eq!(POLLERR, 0x08);
+        assert_eq!(POLLOUT, 0x10);
+        assert_eq!(POLLNVAL, 0x20);
     }
 
     #[test]
