@@ -351,8 +351,14 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let result = if system.services.soc.sockets.contains_key(&id) { 0 } else { -8 };
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
-        // GetHostId
-        0x0016 => buffer.reply(&mut system.memory, command, &[0]),
+        // GetHostId, the guest-visible IPv4 address selected by the host's
+        // active route rather than a loopback address.
+        0x0016 => {
+            let host_id = local_interface_ipv4()
+                .map(|address| u32::from_ne_bytes(address.octets()))
+                .unwrap_or(0);
+            buffer.reply(&mut system.memory, command, &[host_id]);
+        }
         // GetSockName / GetPeerName
         0x0017 | 0x0018 => {
             let (id, address_length) = (word(system, 1), word(system, 2) as usize);
@@ -375,7 +381,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // GetNetworkOpt(level, option, length), output in buffer 0.
         0x001A => {
             let (level, option, length) = (word(system, 1), word(system, 2), word(system, 3) as usize);
-            let result = network_option(level, option, length);
+            let result = network_option(system, level, option, length);
             let error = if result.is_empty() { -22 } else { 0 };
             reply_static(system, buffer, command, &[error as u32, result.len() as u32], &result);
         }
@@ -920,15 +926,39 @@ fn set_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, value:
     0
 }
 
-fn network_option(level: u32, option: u32, length: usize) -> Vec<u8> {
+/// Selects the host IPv4 address the OS would use for an outbound Internet
+/// datagram. UDP connect performs route selection only; it sends no packet.
+fn local_interface_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:53").ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(address) if !address.ip().is_unspecified() && !address.ip().is_loopback() => {
+            Some(*address.ip())
+        }
+        _ => None,
+    }
+}
+
+fn network_option(system: &System, level: u32, option: u32, length: usize) -> Vec<u8> {
     if level != SOC_SOL_CONFIG { return Vec::new(); }
     let mut bytes = vec![0; length.min(256)];
     match option {
-        0x1004 if bytes.len() >= 6 => { bytes[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]); }
+        // SOC_CONFIG_MAC_ADDRESS. Derive a stable locally administered MAC
+        // from the emulated console ID, so separate emulator instances don't
+        // all claim the same hard-coded address.
+        0x1004 if bytes.len() >= 6 => {
+            let id = system.config.console_id.to_be_bytes();
+            bytes[..6].copy_from_slice(&[0x02, id[2], id[3], id[4], id[5], id[6]]);
+        }
+        // SOC_CONFIG_IP_INFO: [IPv4, netmask, broadcast]. We can determine
+        // the selected outbound address portably with std::net, but standard
+        // Rust has no portable interface-netmask API. Use a host-route mask
+        // instead of inventing a LAN subnet or incorrectly claiming 127/8.
         0x4003 if bytes.len() >= 12 => {
-            bytes[0..4].copy_from_slice(&u32::from_ne_bytes([127, 0, 0, 1]).to_ne_bytes());
-            bytes[4..8].copy_from_slice(&u32::from_ne_bytes([255, 0, 0, 0]).to_ne_bytes());
-            bytes[8..12].copy_from_slice(&u32::from_ne_bytes([127, 255, 255, 255]).to_ne_bytes());
+            let Some(address) = local_interface_ipv4() else { return Vec::new() };
+            bytes[0..4].copy_from_slice(&address.octets());
+            bytes[4..8].copy_from_slice(&[255, 255, 255, 255]);
+            bytes[8..12].copy_from_slice(&[0, 0, 0, 0]);
         }
         _ => return Vec::new(),
     }
