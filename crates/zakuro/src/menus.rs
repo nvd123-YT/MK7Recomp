@@ -888,6 +888,23 @@ impl Menus {
                 ui.label(RichText::new("It changes with the next game started, or Reset.").weak());
 
                 ui.separator();
+                ui.heading("Online");
+                egui::ComboBox::from_label("Network provider")
+                    .selected_text(match settings.network_provider {
+                        zakuro_core::NetworkProvider::Off => "Off",
+                        zakuro_core::NetworkProvider::Pretendo => "Pretendo (experimental routing)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut settings.network_provider, zakuro_core::NetworkProvider::Off, "Off");
+                        ui.selectable_value(&mut settings.network_provider, zakuro_core::NetworkProvider::Pretendo, "Pretendo (experimental routing)");
+                    });
+                ui.label(
+                    RichText::new("Pretendo mode rewrites documented Nintendo service domains. HTTP/TLS, account authentication and NEX multiplayer are still under development; this setting alone cannot join a race.")
+                        .weak()
+                        .small(),
+                );
+
+                ui.separator();
                 ui.heading("Sound");
                 ui.add(egui::Slider::new(&mut settings.volume, 0.0..=1.0).text("Volume").show_value(false));
                 ui.checkbox(&mut settings.mute, "Mute");

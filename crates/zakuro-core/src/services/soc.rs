@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
-use crate::System;
+use crate::{NetworkProvider, System};
 
 const AF_INET: u32 = 2;
 const SOCK_STREAM: u32 = 1;
@@ -283,7 +283,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x000D => {
             let length = word(system, 1) as usize;
             let name = c_string(read_static(system, buffer, 0, length.min(256)));
-            let (error, result) = host_by_name(&name);
+            let name_for_dns = rewrite_network_hostname(&name, system.config.network_provider);
+            let (error, result) = host_by_name(&name_for_dns);
             reply_static(system, buffer, command, &[error as u32], &result);
         }
         // GetHostByAddr(address length, family, output length), input in buffer 0.
@@ -422,6 +423,63 @@ fn reply_static_two(system: &mut System, buffer: &CommandBuffer, command: u16, w
     buffer.set(&mut system.memory, normal + 2, first_ptr);
     buffer.set(&mut system.memory, normal + 3, Descriptor::static_buffer(second_len as u32, 1));
     buffer.set(&mut system.memory, normal + 4, second_ptr);
+}
+
+/// Applies the same domain-family substitutions used by the official
+/// Pretendo 3DS HTTP/socket patches. URL callers should use
+/// [rewrite_network_url] as well, so the HTTP Host header and TLS SNI match.
+pub fn rewrite_network_hostname(host: &str, provider: NetworkProvider) -> String {
+    if provider != NetworkProvider::Pretendo {
+        return host.to_owned();
+    }
+    let lower = host.to_ascii_lowercase();
+    // The Friends sysmodule uses a fixed Pretendo NASC URL rather than the
+    // generic test-environment URL replacement performed by http:C.
+    if matches!(lower.as_str(), "nasc.nintendowifi.net" | "nasc.test.nintendowifi.net" | "nasc.dev.nintendowifi.net") {
+        return "nasc.pretendo.cc".to_owned();
+    }
+    for suffix in ["nintendowifi.net", "nintendo.net", "pokemon-gl.com"] {
+        if lower == suffix {
+            return "pretendo.cc".to_owned();
+        }
+        if lower.ends_with(&format!(".{suffix}")) {
+            let prefix_length = host.len() - suffix.len();
+            return format!("{}pretendo.cc", &host[..prefix_length]);
+        }
+    }
+    host.to_owned()
+}
+
+/// Rewrites a URL's authority host without touching path, query or fragment.
+pub fn rewrite_network_url(url: &str, provider: NetworkProvider) -> String {
+    if provider != NetworkProvider::Pretendo {
+        return url.to_owned();
+    }
+    let Some(scheme_end) = url.find("://") else { return url.to_owned() };
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |offset| authority_start + offset);
+    let authority = &url[authority_start..authority_end];
+    let host_start = authority.rfind('@').map_or(0, |at| at + 1);
+    let host_port = &authority[host_start..];
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => (host, Some(port)),
+        _ => (host_port, None),
+    };
+    let rewritten = rewrite_network_hostname(host, provider);
+    if rewritten == host {
+        return url.to_owned();
+    }
+    let replacement = match port {
+        Some(port) => format!("{rewritten}:{port}"),
+        None => rewritten,
+    };
+    let mut output = String::with_capacity(url.len() + replacement.len());
+    output.push_str(&url[..authority_start + host_start]);
+    output.push_str(&replacement);
+    output.push_str(&url[authority_end..]);
+    output
 }
 
 fn c_string(bytes: Vec<u8>) -> String {
@@ -664,6 +722,7 @@ fn get_addr_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
     let hints_length = buffer.get(&mut system.memory, 3) as usize;
     let output_size = (buffer.get(&mut system.memory, 4) as usize).min(0x10000);
     let node = c_string(read_static(system, buffer, 0, node_length.min(256)));
+    let node_for_dns = rewrite_network_hostname(&node, system.config.network_provider);
     let service = c_string(read_static(system, buffer, 1, service_length.min(32)));
     let hints = read_static(system, buffer, 2, hints_length.min(0x130));
     let port = service.parse::<u16>().unwrap_or(0);
@@ -672,7 +731,7 @@ fn get_addr_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
     let resolved = if node.is_empty() {
         ("0.0.0.0", port).to_socket_addrs()
     } else {
-        (node.as_str(), port).to_socket_addrs()
+        (node_for_dns.as_str(), port).to_socket_addrs()
     };
     let mut output = Vec::new();
     let mut count = 0u32;
@@ -853,6 +912,46 @@ mod tests {
         assert_eq!(encoded[0], 8);
         assert_eq!(encoded[1], 2);
         assert_eq!(parse_address(&encoded).unwrap(), address);
+    }
+
+    #[test]
+    fn pretendo_host_rewrite_matches_the_documented_3ds_domains() {
+        assert_eq!(
+            rewrite_network_hostname("nasc.test.nintendowifi.net", NetworkProvider::Pretendo),
+            "nasc.pretendo.cc"
+        );
+        assert_eq!(
+            rewrite_network_hostname("nncs1.app.nintendowifi.net", NetworkProvider::Pretendo),
+            "nncs1.app.pretendo.cc"
+        );
+        assert_eq!(
+            rewrite_network_hostname("account.nintendo.net", NetworkProvider::Pretendo),
+            "account.pretendo.cc"
+        );
+        assert_eq!(
+            rewrite_network_hostname("api.pokemon-gl.com", NetworkProvider::Pretendo),
+            "api.pretendo.cc"
+        );
+        assert_eq!(
+            rewrite_network_hostname("example.com", NetworkProvider::Pretendo),
+            "example.com"
+        );
+        assert_eq!(
+            rewrite_network_hostname("nasc.test.nintendowifi.net", NetworkProvider::Off),
+            "nasc.test.nintendowifi.net"
+        );
+    }
+
+    #[test]
+    fn pretendo_url_rewrite_preserves_port_path_and_query() {
+        assert_eq!(
+            rewrite_network_url("https://account.nintendo.net:443/v1/api/?a=1", NetworkProvider::Pretendo),
+            "https://account.pretendo.cc:443/v1/api/?a=1"
+        );
+        assert_eq!(
+            rewrite_network_url("https://example.com/path", NetworkProvider::Pretendo),
+            "https://example.com/path"
+        );
     }
 
     #[test]

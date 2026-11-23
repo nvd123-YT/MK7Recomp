@@ -629,6 +629,9 @@ pub struct GameSettings {
 pub struct Settings {
     /// the folder the library lists games from.
     pub games: Option<PathBuf>,
+    /// the online environment used by guest networking; Pretendo mode only enables documented endpoint rewriting until the full online stack is available.
+    #[serde(default)]
+    pub network_provider: zakuro_core::NetworkProvider,
     /// the console's system language, which titles pick their localised
     /// text and files by.
     #[serde(deserialize_with = "or_default")]
@@ -713,6 +716,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             games: None,
+            network_provider: zakuro_core::NetworkProvider::Off,
             language: Language::English,
             renderer: Renderer::Vulkan,
             hardware_rasterizer: true,

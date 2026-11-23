@@ -818,6 +818,7 @@ impl App {
             new3ds: self.options.new3ds,
             data_dir: self.data_dir.clone(),
             language: settings.language.code(),
+            network_provider: settings.network_provider,
             recompiled: self.options.recompiled.clone().filter(|_| !interpret).map(Into::into),
             linked: self.linked.filter(|_| !interpret),
             find_recompiled: !interpret,

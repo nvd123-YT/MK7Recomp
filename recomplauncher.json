@@ -69,7 +69,8 @@
         "swap_eyes": "false",
         "volume": "1.0",
         "mute": "false",
-        "show_fps": "false"
+        "show_fps": "false",
+        "network_provider": "\"off\""
       }
     }
   ],
@@ -731,6 +732,29 @@
       ],
       "defaults": {
         "show_fps": "false"
+      }
+    },
+    {
+      "id": "network_provider",
+      "label": "Network provider",
+      "group": "Online",
+      "help": "Pretendo enables Nintendo service hostname and URL rewriting. HTTP/TLS, account authentication and NEX multiplayer remain in development; choosing Pretendo does not yet enable online races.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "network_provider": "\"off\""
+          }
+        },
+        {
+          "label": "Pretendo (experimental routing)",
+          "set": {
+            "network_provider": "\"pretendo\""
+          }
+        }
+      ],
+      "defaults": {
+        "network_provider": "\"off\""
       }
     }
   ],

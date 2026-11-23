@@ -36,6 +36,17 @@ use memory::{Memory, MemoryState, Permission};
 use services::hid::InputState;
 use services::ServiceState;
 
+/// Which network environment guest services direct requests to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkProvider {
+    /// Leave Nintendo service hostnames untouched.
+    #[default]
+    Off,
+    /// Rewrite the documented Nintendo Network domains to Pretendo.
+    Pretendo,
+}
+
 /// console settings the frontend can change.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -43,6 +54,8 @@ pub struct Config {
     pub new3ds: bool,
     /// 0 = Japan, 1 = USA, 2 = Europe.
     pub region: u8,
+    /// hostnames are routed to Pretendo when selected; this does not imply that all game online services are implemented.
+    pub network_provider: NetworkProvider,
     pub language: u8,
     pub slider_3d: f32,
     /// a library 3dsrecomp built for the title, or a directory holding one
@@ -109,6 +122,7 @@ impl Default for Config {
             model: ConsoleModel::Old3ds,
             new3ds: false,
             region: services::cfg::REGION_USA,
+            network_provider: NetworkProvider::Off,
             language: services::cfg::LANGUAGE_ENGLISH,
             slider_3d: 0.0,
             recompiled: None,

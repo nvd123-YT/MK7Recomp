@@ -21,6 +21,8 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Unreleased improvements
 
+- Adds an experimental Pretendo network-provider setting. It rewrites the documented Nintendo service domains to Pretendo for guest DNS/URL routing only; HTTP/TLS, ACT/NASC authentication and NEX multiplayer are still under development, so online races are not yet supported.
+
 - Adds F4 toggleable fast-forward: switch between normal speed and uncapped emulation without holding Tab or a controller trigger; the existing hold-to-fast-forward controls remain available.
 
 - Adds configurable racing-wheel input for devices exposed by the system through Gilrs: bind steering, accelerator and brake independently (including across separate wheel/pedal devices), select pedal axis range, invert individual axes, and tune steering deadzone. Steering drives the circle pad; accelerator and brake map to A and B. Force feedback is not implemented, and device availability depends on OS/driver enumeration.
