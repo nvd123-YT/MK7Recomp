@@ -47,12 +47,19 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct HttpRequest {
     url: String,
     method: u32,
     headers: Vec<(String, String)>,
-    post_fields: Vec<(String, String)>,
+    post_fields: Vec<(String, Vec<u8>)>,
     raw_body: Option<Vec<u8>>,
+    force_multipart: bool,
+    post_data_encoding: u32,
+    chunked_request: bool,
+    post_data_type: u32,
+    post_data_added: bool,
+    post_pending_request: bool,
     use_client_certificate: bool,
 }
 
@@ -170,6 +177,49 @@ impl HttpState {
     }
 }
 
+fn start_request(system: &mut System, handle: u32) -> Result<(), u32> {
+    let provider = system.config.network_provider;
+    let data_dir = system.config.data_dir.clone();
+    let rewritten_url = system.services.http.contexts.get(&handle)
+        .map(|context| system.services.http.url(&context.request.url, provider));
+    let (url, request) = match (rewritten_url, system.services.http.contexts.get(&handle)) {
+        (Some(url), Some(context)) if context.state == STATE_NOT_STARTED => {
+            let request = RequestToRun {
+                url,
+                method: context.request.method,
+                headers: context.request.headers.clone(),
+                post_fields: context.request.post_fields.clone(),
+                raw_body: context.request.raw_body.clone(),
+                multipart: context.request.force_multipart
+                    || context.request.post_data_encoding == 2
+                    || context.request.post_data_type == 1,
+                use_client_certificate: context.request.use_client_certificate
+                    || (provider == NetworkProvider::Pretendo
+                        && context.request.url.to_ascii_lowercase().contains("nasc.")),
+                data_dir,
+            };
+            (request.url.clone(), request)
+        }
+        (Some(_), Some(_)) => return Err(ERROR_HTTP_STATE),
+        _ => return Err(not_connected()),
+    };
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ERROR_HTTP_STATE);
+    }
+
+    let (send, receive) = mpsc::channel();
+    if let Some(context) = system.services.http.contexts.get_mut(&handle) {
+        context.receiver = Some(receive);
+        context.state = STATE_CONNECTING;
+        context.post_pending_request = false;
+    }
+    thread::spawn(move || {
+        let result = perform_request(request);
+        let _ = send.send(result);
+    });
+    Ok(())
+}
+
 /// Handles the HTTP:C commands required by basic HTTP/HTTPS requests.
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
     let command = header.command_id();
@@ -197,6 +247,12 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 headers: Vec::new(),
                 post_fields: Vec::new(),
                 raw_body: None,
+                force_multipart: false,
+                post_data_encoding: 0,
+                chunked_request: false,
+                post_data_type: 0,
+                post_data_added: false,
+                post_pending_request: false,
                 use_client_certificate: false,
             };
             let context = system.services.http.allocate(request);
@@ -268,36 +324,29 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 buffer.reply_error(&mut system.memory, command, not_connected());
             }
         }
-        // BeginRequest(handle) / BeginRequestAsync(handle)
+        // BeginRequest / BeginRequestAsync. A POST with no fields yet stays
+        // pending so the guest can stream SendPostData* calls and notify finish.
         0x0009 | 0x000A => {
             let handle = buffer.get(&mut system.memory, 1);
-            let provider = system.config.network_provider;
-            let data_dir = system.config.data_dir.clone();
-            let rewritten_url = system.services.http.contexts.get(&handle)
-                .map(|context| system.services.http.url(&context.request.url, provider));
-            match (rewritten_url, system.services.http.contexts.get_mut(&handle)) {
-                (Some(url), Some(context)) if context.state == STATE_NOT_STARTED => {
-                    let request = RequestToRun {
-                        url,
-                        method: context.request.method,
-                        headers: context.request.headers.clone(),
-                        post_fields: context.request.post_fields.clone(),
-                        raw_body: context.request.raw_body.clone(),
-                        use_client_certificate: context.request.use_client_certificate
-                            || (provider == NetworkProvider::Pretendo && context.request.url.to_ascii_lowercase().contains("nasc.")),
-                        data_dir,
-                    };
-                    let (send, receive) = mpsc::channel();
-                    context.receiver = Some(receive);
-                    context.state = STATE_CONNECTING;
-                    thread::spawn(move || {
-                        let result = perform_request(request);
-                        let _ = send.send(result);
-                    });
-                    buffer.reply(&mut system.memory, command, &[]);
+            let pending = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED {
+                    return Err(ERROR_HTTP_STATE);
                 }
-                (Some(_), Some(_)) => buffer.reply_error(&mut system.memory, command, not_connected()),
-                _ => buffer.reply_error(&mut system.memory, command, not_connected()),
+                if context.request.method == HTTP_POST && !context.request.post_data_added {
+                    context.request.post_pending_request = true;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            });
+            match pending {
+                Some(Ok(true)) => buffer.reply(&mut system.memory, command, &[]),
+                Some(Ok(false)) => match start_request(system, handle) {
+                    Ok(()) => buffer.reply(&mut system.memory, command, &[]),
+                    Err(error) => buffer.reply_error(&mut system.memory, command, error),
+                },
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
+                None => buffer.reply_error(&mut system.memory, command, not_connected()),
             }
         }
         // ReceiveData(handle, size, mapped writable buffer)
@@ -334,16 +383,49 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
-            let value = nul_string(&value);
+            let value = nul_string(&value).into_bytes();
             let result = system.services.http.contexts.get_mut(&handle).map(|context| {
-                if context.state != STATE_NOT_STARTED || context.request.raw_body.is_some() || name.is_empty() { false }
-                else {
+                if context.state != STATE_NOT_STARTED || context.request.chunked_request
+                    || context.request.raw_body.is_some() || name.is_empty() {
+                    Err(ERROR_HTTP_STATE)
+                } else {
                     context.request.post_fields.push((name, value));
-                    true
+                    context.request.post_data_added = true;
+                    Ok(())
                 }
-            }).unwrap_or(false);
-            if result { reply_mapped(system, buffer, command, &[], descriptor, pointer); }
-            else { reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer); }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
+        }
+        // AddPostDataBinary(handle, name length, value length, static name, mapped value)
+        0x0013 => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let name_len = buffer.get(&mut system.memory, 2) as usize;
+            let value_len = buffer.get(&mut system.memory, 3) as usize;
+            let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
+            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 0, value_len.min(MAX_BODY)) else {
+                buffer.reply_error(&mut system.memory, command, not_connected());
+                return true;
+            };
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || context.request.chunked_request
+                    || context.request.raw_body.is_some() || name.is_empty() {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    context.request.post_fields.push((name, value));
+                    context.request.force_multipart = true;
+                    context.request.post_data_added = true;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
         }
         // AddPostDataRaw(handle, length, mapped bytes)
         0x0014 => {
@@ -354,14 +436,159 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 return true;
             };
             let result = system.services.http.contexts.get_mut(&handle).map(|context| {
-                if context.state != STATE_NOT_STARTED || !context.request.post_fields.is_empty() { false }
-                else {
+                if context.state != STATE_NOT_STARTED || context.request.chunked_request
+                    || !context.request.post_fields.is_empty() || context.request.raw_body.is_some() {
+                    Err(0xD8A0_A032)
+                } else {
                     context.request.raw_body = Some(bytes);
-                    true
+                    context.request.post_data_added = true;
+                    Ok(())
                 }
-            }).unwrap_or(false);
-            if result { reply_mapped(system, buffer, command, &[], descriptor, pointer); }
-            else { reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer); }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
+        }
+        // SetPostDataType(handle, type): 0 ASCII, 1 multipart, 2 raw.
+        0x0015 => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let data_type = buffer.get(&mut system.memory, 2);
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || context.request.post_data_added
+                    || context.request.raw_body.is_some() || data_type > 2 {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    context.request.chunked_request = true;
+                    context.request.post_data_type = data_type;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => buffer.reply(&mut system.memory, command, &[]),
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
+                None => buffer.reply_error(&mut system.memory, command, not_connected()),
+            }
+        }
+        // SendPostDataAscii / timeout variant.
+        0x0016 | 0x0017 => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let name_len = buffer.get(&mut system.memory, 2) as usize;
+            let value_len = buffer.get(&mut system.memory, 3) as usize;
+            let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
+            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 0, value_len.min(MAX_HEADER)) else {
+                buffer.reply_error(&mut system.memory, command, not_connected());
+                return true;
+            };
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || !context.request.chunked_request
+                    || context.request.post_data_type != 0 || name.is_empty() {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    context.request.post_fields.push((name, nul_string(&value).into_bytes()));
+                    context.request.post_data_added = true;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
+        }
+        // SendPostDataBinary / timeout variant.
+        0x0018 | 0x0019 => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let name_len = buffer.get(&mut system.memory, 2) as usize;
+            let value_len = buffer.get(&mut system.memory, 3) as usize;
+            let name = nul_string(&read_static(system, buffer, header, 0, name_len.min(MAX_HEADER)));
+            let Some((descriptor, pointer, value)) = mapped_bytes(system, buffer, header, 0, value_len.min(MAX_BODY)) else {
+                buffer.reply_error(&mut system.memory, command, not_connected());
+                return true;
+            };
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || !context.request.chunked_request
+                    || context.request.post_data_type == 2 || name.is_empty() {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    context.request.post_fields.push((name, value));
+                    context.request.force_multipart = true;
+                    context.request.post_data_added = true;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
+        }
+        // SendPostDataRaw / timeout variant.
+        0x001A | 0x001B => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let length = buffer.get(&mut system.memory, 2) as usize;
+            let Some((descriptor, pointer, bytes)) = mapped_bytes(system, buffer, header, 0, length.min(MAX_BODY)) else {
+                buffer.reply_error(&mut system.memory, command, not_connected());
+                return true;
+            };
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || !context.request.chunked_request
+                    || context.request.post_data_type != 2 || !context.request.post_fields.is_empty() {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    let raw = context.request.raw_body.get_or_insert_with(Vec::new);
+                    if raw.len().saturating_add(bytes.len()) > MAX_BODY {
+                        return Err(ERROR_HTTP_STATE);
+                    }
+                    raw.extend_from_slice(&bytes);
+                    context.request.post_data_added = true;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => reply_mapped(system, buffer, command, &[], descriptor, pointer),
+                Some(Err(error)) => reply_mapped_error(system, buffer, command, error, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, not_connected(), descriptor, pointer),
+            }
+        }
+        // SetPostDataEncoding(handle, encoding): auto, ASCII form, multipart.
+        0x001C => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let encoding = buffer.get(&mut system.memory, 2);
+            let result = system.services.http.contexts.get_mut(&handle).map(|context| {
+                if context.state != STATE_NOT_STARTED || context.request.raw_body.is_some() || encoding > 2 {
+                    Err(ERROR_HTTP_STATE)
+                } else {
+                    context.request.post_data_encoding = encoding;
+                    Ok(())
+                }
+            });
+            match result {
+                Some(Ok(())) => buffer.reply(&mut system.memory, command, &[]),
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
+                None => buffer.reply_error(&mut system.memory, command, not_connected()),
+            }
+        }
+        // NotifyFinishSendPostData starts the buffered chunked POST.
+        0x001D => {
+            let handle = buffer.get(&mut system.memory, 1);
+            let result = system.services.http.contexts.get(&handle).map(|context| {
+                if context.state == STATE_NOT_STARTED && context.request.post_pending_request
+                    && context.request.post_data_added {
+                    Ok(())
+                } else {
+                    Err(ERROR_HTTP_STATE)
+                }
+            });
+            match result {
+                Some(Ok(())) => match start_request(system, handle) {
+                    Ok(()) => buffer.reply(&mut system.memory, command, &[]),
+                    Err(error) => buffer.reply_error(&mut system.memory, command, error),
+                },
+                Some(Err(error)) => buffer.reply_error(&mut system.memory, command, error),
+                None => buffer.reply_error(&mut system.memory, command, not_connected()),
+            }
         }
         // SetDefaultClientCert(handle, certificate id)
         0x0028 => {
@@ -518,8 +745,9 @@ struct RequestToRun {
     url: String,
     method: u32,
     headers: Vec<(String, String)>,
-    post_fields: Vec<(String, String)>,
+    post_fields: Vec<(String, Vec<u8>)>,
     raw_body: Option<Vec<u8>>,
+    multipart: bool,
     use_client_certificate: bool,
     data_dir: Option<PathBuf>,
 }
@@ -538,11 +766,21 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         _ => return Err("unsupported HTTP method".to_owned()),
     };
 
-    let mut body = request.raw_body.unwrap_or_default();
-    if !request.post_fields.is_empty() {
-        if !body.is_empty() { return Err("cannot mix raw and form POST data".to_owned()); }
-        body = form_encode(&request.post_fields).into_bytes();
-    }
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let mut content_type = None;
+    let body = if let Some(raw) = request.raw_body {
+        raw
+    } else if request.post_fields.is_empty() {
+        Vec::new()
+    } else if request.multipart {
+        let boundary = format!("----MK7Recomp-{}-{id}", std::process::id());
+        content_type = Some(format!("multipart/form-data; boundary={boundary}"));
+        multipart_encode(&request.post_fields, &boundary)
+    } else {
+        content_type = Some("application/x-www-form-urlencoded".to_owned());
+        form_encode(&request.post_fields).into_bytes()
+    };
+    if body.len() > MAX_BODY { return Err("HTTP request body exceeds 16 MiB".to_owned()); }
 
     let cert = request.data_dir.as_ref().map(|dir| dir.join("sysdata/ctr-common-1-cert.pem"));
     let key = request.data_dir.as_ref().map(|dir| dir.join("sysdata/ctr-common-1-key.pem"));
@@ -550,7 +788,6 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         return Err("Pretendo NASC requires your own decrypted ctr-common-1 certificate and private key at sysdata/ctr-common-1-cert.pem and sysdata/ctr-common-1-key.pem".to_owned());
     }
 
-    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!("mk7recomp-http-{}-{id}", std::process::id()));
     std::fs::create_dir_all(&directory).map_err(|error| format!("could not create HTTP temp directory: {error}"))?;
     let body_path = directory.join("response.bin");
@@ -570,10 +807,10 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         for (name, value) in &request.headers {
             command.arg("--header").arg(format!("{name}: {value}"));
         }
-        if !request.post_fields.is_empty()
-            && !request.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        {
-            command.arg("--header").arg("Content-Type: application/x-www-form-urlencoded");
+        if let Some(content_type) = &content_type {
+            if !request.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type")) {
+                command.arg("--header").arg(format!("Content-Type: {content_type}"));
+            }
         }
         if request.use_client_certificate {
             command.arg("--cert").arg(cert.as_ref().unwrap());
@@ -668,13 +905,16 @@ fn reason_phrase(status: u32) -> &'static str {
 }
 
 
-fn form_encode(fields: &[(String, String)]) -> String {
-    fields.iter().map(|(name, value)| format!("{}={}", url_encode(name), url_encode(value))).collect::<Vec<_>>().join("&")
+fn form_encode(fields: &[(String, Vec<u8>)]) -> String {
+    fields.iter()
+        .map(|(name, value)| format!("{}={}", url_encode(name.as_bytes()), url_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
-fn url_encode(value: &str) -> String {
+fn url_encode(value: &[u8]) -> String {
     let mut out = String::new();
-    for byte in value.as_bytes() {
+    for byte in value {
         if *byte == b' ' {
             out.push('+');
         } else if byte.is_ascii_alphanumeric() || matches!(*byte, b'*' | b'-' | b'.' | b'_') {
@@ -685,6 +925,22 @@ fn url_encode(value: &str) -> String {
     }
     out
 }
+
+fn multipart_encode(fields: &[(String, Vec<u8>)], boundary: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        let safe_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{safe_name}\"\r\n\r\n").as_bytes()
+        );
+        body.extend_from_slice(value);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
 
 fn read_u64_words(system: &mut System, buffer: &CommandBuffer, index: u32) -> u64 {
     buffer.get(&mut system.memory, index) as u64
@@ -878,8 +1134,8 @@ mod tests {
     #[test]
     fn nas_form_fields_are_percent_encoded() {
         let fields = vec![
-            ("action".to_owned(), "LOGIN".to_owned()),
-            ("ingamesn".to_owned(), "A B&c".to_owned()),
+            ("action".to_owned(), b"LOGIN".to_vec()),
+            ("ingamesn".to_owned(), b"A B&c".to_vec()),
         ];
         assert_eq!(form_encode(&fields), "action=LOGIN&ingamesn=A+B%26c");
     }
