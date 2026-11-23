@@ -249,6 +249,7 @@ struct GameAuthenticationData {
     server_port: u16,
     token: Vec<u8>,
     server_time: u64,
+    server_time_difference_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -259,6 +260,7 @@ struct ServiceLocatorData {
     service_token: Vec<u8>,
     status_data: u8,
     server_time: u64,
+    server_time_difference_ns: u64,
 }
 
 struct PendingNasc<T> {
@@ -533,17 +535,30 @@ fn fixed_string<const N: usize>(value: &str) -> [u8; N] {
 
 /// Encodes NASC's calendar time using the packed NEX timestamp bitfields,
 /// not Unix seconds. Bits 63..26 are the year, then month/day/hour/minute/second.
-fn server_time(value: Option<&String>) -> u64 {
+fn parse_nasc_datetime(value: Option<&String>) -> Option<chrono::NaiveDateTime> {
     value.and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok())
-        .map(|date| {
-            ((date.year().max(0) as u64) << 26)
-                | ((date.month() as u64) << 22)
-                | ((date.day() as u64) << 17)
-                | ((date.hour() as u64) << 12)
-                | ((date.minute() as u64) << 6)
-                | (date.second() as u64)
-        })
-        .unwrap_or(0)
+}
+
+/// NASC's date converted to the packed NEX timestamp format.
+fn server_time(value: Option<&String>) -> u64 {
+    parse_nasc_datetime(value).map(|date| {
+        ((date.year().max(0) as u64) << 26)
+            | ((date.month() as u64) << 22)
+            | ((date.day() as u64) << 17)
+            | ((date.hour() as u64) << 12)
+            | ((date.minute() as u64) << 6)
+            | (date.second() as u64)
+    }).unwrap_or(0)
+}
+
+/// libctru's FRD_GetServerTimeDifference reports nanoseconds, signed as a
+/// two's-complement value in the u64 output word pair.
+fn server_time_difference_ns(value: Option<&String>) -> u64 {
+    let Some(server_time) = parse_nasc_datetime(value)
+        .and_then(|date| date.and_utc().timestamp_nanos_opt())
+    else { return 0 };
+    let Some(device_time) = chrono::Utc::now().timestamp_nanos_opt() else { return 0 };
+    (server_time.saturating_sub(device_time)) as u64
 }
 
 fn make_nasc_job(
@@ -574,8 +589,15 @@ fn make_nasc_job(
     {
         return Err("sysdata/nasc.json must contain valid 12-hex-digit mac_address and bssid values".to_owned());
     }
-    if device.apinfo.is_empty() || device.device_name.is_empty() || device.serial_number.is_empty() {
-        return Err("sysdata/nasc.json is missing apinfo, device_name, or serial_number".to_owned());
+    let apinfo = device.apinfo.as_bytes();
+    if apinfo.len() != 13
+        || apinfo[2] != b':'
+        || !apinfo[..2].iter().chain(apinfo[3..].iter()).all(u8::is_ascii_hexdigit)
+    {
+        return Err("sysdata/nasc.json apinfo must have the format AA:BBBBBBBBBB (for example 01:0000000000)".to_owned());
+    }
+    if device.device_name.is_empty() || device.serial_number.is_empty() {
+        return Err("sysdata/nasc.json is missing device_name or serial_number".to_owned());
     }
     if fcdcert.len() != 0x110 {
         return Err(format!("LocalFriendCodeSeed_B must be exactly 0x110 bytes (got 0x{:X})", fcdcert.len()));
@@ -697,6 +719,7 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
                 data.server_port = port;
                 data.token = fixed_string::<0x100>(token).to_vec();
                 data.server_time = timestamp;
+                data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
             }
             _ => data.nasc_result = u32::MAX,
         }
@@ -718,8 +741,10 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
             (Some(host), Some(token), timestamp) if timestamp != 0 => {
                 data.service_host = fixed_string::<0x80>(host).to_vec();
                 data.service_token = fixed_string::<0x100>(token).to_vec();
+                data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
                 data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
                 data.server_time = timestamp;
+                data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
             }
             _ => data.nasc_result = u32::MAX,
         }
@@ -829,6 +854,8 @@ pub struct FrdState {
     #[serde(skip)]
     logged_in: bool,
     last_response_result: u32,
+    #[serde(default)]
+    server_time_difference_ns: u64,
     #[serde(skip)]
     pending_game: Option<PendingNasc<GameAuthenticationData>>,
     #[serde(skip)]
@@ -858,6 +885,7 @@ pub fn poll(system: &mut System) {
         match result {
             Ok(data) => {
                 system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.server_time_difference_ns = data.server_time_difference_ns;
                 system.services.frd.game_authentication = Some(data);
             }
             Err(error) => {
@@ -884,6 +912,7 @@ pub fn poll(system: &mut System) {
         match result {
             Ok(data) => {
                 system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.server_time_difference_ns = data.server_time_difference_ns;
                 system.services.frd.service_locator = Some(data);
             }
             Err(error) => {
@@ -1184,6 +1213,16 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
             None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
         },
+        // GetServerTimeDifference returns signed nanoseconds as a u64 pair.
+        0x002E => {
+            let difference = system.services.frd.server_time_difference_ns;
+            buffer.reply(&mut system.memory, command, &[
+                difference as u32,
+                (difference >> 32) as u32,
+            ]);
+        }
+        // AllowHalfAwake: accepted by the server-side Friends module.
+        0x002F => buffer.reply(&mut system.memory, command, &[]),
         // GetServerTypes: bytes from the imported Friends account.
         0x0030 => {
             match load_friend_account(system) {
@@ -1271,6 +1310,22 @@ mod tests {
             (2024u64 << 26) | (2u64 << 22) | (9u64 << 17)
                 | (12u64 << 12) | (16u64 << 6) | 3u64
         );
+    }
+
+    #[test]
+    fn server_time_difference_is_nanoseconds_not_unix_seconds() {
+        let now = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
+        let difference = server_time_difference_ns(Some(&now));
+        assert!(difference.unsigned_abs() < 2_000_000_000);
+    }
+
+    #[test]
+    fn apinfo_requires_two_hex_slot_digits_and_ten_hex_access_point_digits() {
+        let valid = "01:0000000000";
+        let bytes = valid.as_bytes();
+        assert_eq!(bytes.len(), 13);
+        assert!(bytes[2] == b':' && bytes[..2].iter().chain(bytes[3..].iter()).all(u8::is_ascii_hexdigit));
+        assert_ne!("1:0000000000".len(), 13);
     }
 
     #[test]
