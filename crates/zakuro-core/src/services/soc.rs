@@ -29,7 +29,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 enum HostSocket {
     UdpUnbound,
-    Udp(UdpSocket),
+    Udp { socket: UdpSocket, peer: Option<SocketAddr> },
     TcpUnbound,
     TcpConnecting(Receiver<io::Result<TcpStream>>),
     Tcp(TcpStream),
@@ -154,7 +154,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                         HostSocket::UdpUnbound => match UdpSocket::bind(address) {
                             Ok(socket) => {
                                 let _ = socket.set_nonblocking(true);
-                                entry.socket = HostSocket::Udp(socket);
+                                entry.socket = HostSocket::Udp { socket, peer: None };
                                 0
                             }
                             Err(error) => errno(&error),
@@ -186,16 +186,17 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                         HostSocket::UdpUnbound => match UdpSocket::bind("0.0.0.0:0") {
                             Ok(socket) => {
                                 let _ = socket.set_nonblocking(true);
-                                match socket.connect(SocketAddr::V4(address)) {
-                                    Ok(()) => { entry.socket = HostSocket::Udp(socket); 0 }
-                                    Err(error) => errno(&error),
-                                }
+                                // Do not call UdpSocket::connect here. A connected
+                                // host UDP socket filters incoming datagrams by peer,
+                                // but NEX also uses this socket for race peer traffic.
+                                entry.socket = HostSocket::Udp { socket, peer: Some(SocketAddr::V4(address)) };
+                                0
                             }
                             Err(error) => errno(&error),
                         },
-                        HostSocket::Udp(socket) => match socket.connect(SocketAddr::V4(address)) {
-                            Ok(()) => 0,
-                            Err(error) => errno(&error),
+                        HostSocket::Udp { peer, .. } => {
+                            *peer = Some(SocketAddr::V4(address));
+                            0
                         },
                         HostSocket::TcpUnbound => {
                             let (send, receive) = mpsc::channel();
@@ -270,7 +271,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                         let how = match how { 0 => std::net::Shutdown::Read, 1 => std::net::Shutdown::Write, 2 => std::net::Shutdown::Both, _ => { buffer.reply(&mut system.memory, command, &[(-22i32) as u32]); return true; } };
                         stream.shutdown(how).map_or_else(|error| errno(&error), |_| 0)
                     }
-                    HostSocket::Udp(_) | HostSocket::UdpUnbound => 0,
+                    HostSocket::Udp { .. } | HostSocket::UdpUnbound => 0,
                     HostSocket::TcpListener(_) => -22,
                     HostSocket::TcpUnbound | HostSocket::TcpConnecting(_) => -107,
                     HostSocket::TcpFailed(code) => *code,
@@ -540,16 +541,17 @@ fn send_data(entry: Option<&mut SocketEntry>, payload: &[u8], address: Option<So
             match UdpSocket::bind("0.0.0.0:0") {
                 Ok(socket) => {
                     let _ = socket.set_nonblocking(true);
-                    entry.socket = HostSocket::Udp(socket);
+                    entry.socket = HostSocket::Udp { socket, peer: None };
                     send_data(Some(entry), payload, address)
                 }
                 Err(error) => errno(&error),
             }
         }
-        HostSocket::Udp(socket) => {
-            let result = match address {
+        HostSocket::Udp { socket, peer } => {
+            let destination = address.or(*peer);
+            let result = match destination {
                 Some(address) => socket.send_to(payload, address),
-                None => socket.send(payload),
+                None => return -56,
             };
             result.map_or_else(|error| errno(&error), |sent| sent as i32)
         }
@@ -568,7 +570,7 @@ fn receive(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, l
             entry.update();
             let mut payload = vec![0; length];
             match &mut entry.socket {
-                HostSocket::Udp(socket) => {
+                HostSocket::Udp { socket, .. } => {
                     let received = if flags & 2 != 0 { socket.peek_from(&mut payload) } else { socket.recv_from(&mut payload) };
                     received.map(|(size, address)| (size, Some(address)))
                         .map_err(|error| errno(&error))
@@ -626,7 +628,7 @@ fn accept(system: &mut System, buffer: &CommandBuffer, command: u16, id: u32, ma
 fn socket_address(entry: &mut SocketEntry, peer: bool) -> Option<SocketAddr> {
     entry.update();
     match &entry.socket {
-        HostSocket::Udp(socket) => if peer { socket.peer_addr().ok() } else { socket.local_addr().ok() },
+        HostSocket::Udp { socket, peer: remote } => if peer { *remote } else { socket.local_addr().ok() },
         HostSocket::Tcp(stream) => if peer { stream.peer_addr().ok() } else { stream.local_addr().ok() },
         HostSocket::TcpListener(listener) if !peer => listener.local_addr().ok(),
         _ => None,
@@ -636,7 +638,7 @@ fn socket_address(entry: &mut SocketEntry, peer: bool) -> Option<SocketAddr> {
 fn poll_ready(entry: &mut SocketEntry) -> (bool, bool, bool) {
     entry.update();
     match &mut entry.socket {
-        HostSocket::Udp(socket) => {
+        HostSocket::Udp { socket, .. } => {
             let mut byte = [0u8; 1];
             let readable = match socket.peek_from(&mut byte) {
                 Ok(_) => true,
@@ -787,7 +789,7 @@ fn get_sock_opt(entry: Option<&mut SocketEntry>, _level: u32, option: u32, lengt
     let Some(entry) = entry else { return (-8, Vec::new()) };
     entry.update();
     let value: i32 = match option {
-        0x1008 => match entry.socket { HostSocket::Udp(_) | HostSocket::UdpUnbound => SOCK_DGRAM as i32, _ => SOCK_STREAM as i32 },
+        0x1008 => match entry.socket { HostSocket::Udp { .. } | HostSocket::UdpUnbound => SOCK_DGRAM as i32, _ => SOCK_STREAM as i32 },
         0x1009 => match entry.socket { HostSocket::TcpFailed(code) => -code, _ => 0 },
         _ => 0,
     };
@@ -879,7 +881,7 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
             entry.update();
             let mut bytes = vec![0; capacity];
             match &mut entry.socket {
-                HostSocket::Udp(socket) => socket.recv_from(&mut bytes).map(|(size, address)| {
+                HostSocket::Udp { socket, .. } => socket.recv_from(&mut bytes).map(|(size, address)| {
                     bytes.truncate(size);
                     (bytes, address_bytes(address))
                 }).map_err(|error| errno(&error)),
@@ -954,6 +956,36 @@ mod tests {
             rewrite_network_url("https://example.com/path", NetworkProvider::Pretendo),
             "https://example.com/path"
         );
+    }
+
+    /// a UDP socket connected to the NEX station must still accept peer
+    /// datagrams from other source addresses for race traffic.
+    #[test]
+    fn udp_default_peer_does_not_filter_peer_to_peer_race_packets() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let socket_address = socket.local_addr().unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let server_address = server.local_addr().unwrap();
+
+        let mut entry = SocketEntry::new(HostSocket::Udp {
+            socket,
+            peer: Some(server_address),
+        });
+        assert_eq!(send_data(Some(&mut entry), b"nex station", None), 11);
+        let mut received = [0u8; 32];
+        let (server_size, _) = server.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..server_size], b"nex station");
+
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.send_to(b"race peer", socket_address).unwrap();
+        let HostSocket::Udp { socket, .. } = &mut entry.socket else {
+            panic!("expected UDP socket");
+        };
+        let (peer_size, peer_address) = socket.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..peer_size], b"race peer");
+        assert_eq!(peer_address, peer.local_addr().unwrap());
     }
 
     #[test]
