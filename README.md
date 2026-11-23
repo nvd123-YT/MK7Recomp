@@ -21,6 +21,8 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Unreleased improvements
 
+- Adds F4 toggleable fast-forward: switch between normal speed and uncapped emulation without holding Tab or a controller trigger; the existing hold-to-fast-forward controls remain available.
+
 - Adds configurable racing-wheel input for devices exposed by the system through Gilrs: bind steering, accelerator and brake independently (including across separate wheel/pedal devices), select pedal axis range, invert individual axes, and tune steering deadzone. Steering drives the circle pad; accelerator and brake map to A and B. Force feedback is not implemented, and device availability depends on OS/driver enumeration.
 - Applies a rescaled radial deadzone to controller sticks, filtering drift while preserving full travel.
 - Reduces controller polling overhead by sharing Pro Controller report snapshots instead of cloning their button vectors every frame.
