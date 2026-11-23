@@ -150,6 +150,7 @@ pub fn run_with(linked: Option<Linked>, overlay: Option<Box<dyn GameOverlay>>) {
         spent: Spent::default(),
         paused: false,
         fast_forward_key: false,
+        fast_forward_toggle: false,
         fast_forwarding: false,
         next_shown: Instant::now(),
         stop: false,
@@ -614,6 +615,8 @@ struct App {
     paused: bool,
     /// Tab is held down, for fast forward.
     fast_forward_key: bool,
+    /// F4 toggles fast forward without having to hold a key or trigger.
+    fast_forward_toggle: bool,
     /// the game runs as fast as it can, its sound left out.
     fast_forwarding: bool,
     /// when fast forward shows its next frame, on a grid at the console's
@@ -1043,6 +1046,13 @@ impl App {
                     self.apply_volume();
                     self.menus.toast = Some((
                         format!("Sound {}", if self.settings.mute { "muted" } else { "unmuted" }),
+                        Instant::now(),
+                    ));
+                }
+                KeyCode::F4 if self.game.is_some() => {
+                    self.fast_forward_toggle = !self.fast_forward_toggle;
+                    self.menus.toast = Some((
+                        format!("Fast forward {}", if self.fast_forward_toggle { "on" } else { "off" }),
                         Instant::now(),
                     ));
                 }
@@ -1651,7 +1661,7 @@ impl App {
         // while ZR has the trigger, whichever no button of the console's is on
         let free = |button: gilrs::Button| self.settings.pad.map().iter().all(|&(_, bound)| bound != button);
         let trigger = [gilrs::Button::RightTrigger2, gilrs::Button::RightThumb].into_iter().find(|&button| free(button));
-        let fast = playing && (self.fast_forward_key || trigger.is_some_and(|trigger| self.gamepads.holding(trigger)));
+        let fast = playing && (self.fast_forward_toggle || self.fast_forward_key || trigger.is_some_and(|trigger| self.gamepads.holding(trigger)));
         if fast {
             // the output waits out fast forward rather than run dry
             if let Some(audio) = &self.audio {
