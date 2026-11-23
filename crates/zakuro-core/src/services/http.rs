@@ -585,6 +585,11 @@ fn reply_mapped(system: &mut System, buffer: &CommandBuffer, command: u16, value
     buffer.set(&mut system.memory, normal + 2, pointer);
 }
 
+fn reply_result(system: &mut System, buffer: &CommandBuffer, command: u16, result: u32) {
+    buffer.set(&mut system.memory, 0, Header::new(command, 1, 0).0);
+    buffer.set(&mut system.memory, 1, result);
+}
+
 fn reply_mapped_error(system: &mut System, buffer: &CommandBuffer, command: u16, error: u32, descriptor: u32, pointer: u32) {
     buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
     buffer.set(&mut system.memory, 1, error);
@@ -621,13 +626,13 @@ fn receive_data(system: &mut System, buffer: &CommandBuffer, header: Header) {
 
     if let Some(error) = response_error {
         log::warn!("http:C receive failed: {error}");
-        reply_mapped(system, buffer, command, &[not_connected()], descriptor, pointer);
+        reply_result(system, buffer, command, not_connected());
         return;
     }
     system.memory.write_bytes(pointer, &chunk);
-    // A zero-sized response completes immediately. Otherwise the guest reads
-    // sequential chunks until its own declared response size has arrived.
-    reply_mapped(system, buffer, command, &[if is_complete { 0 } else { 0xD840_A02B }], descriptor, pointer);
+    // libctru treats HTTP's BufferTooSmall/WouldBlock result as the signal
+    // that another ReceiveData call is needed to collect the remaining body.
+    reply_result(system, buffer, command, if is_complete { 0 } else { 0xD840_A02B });
 }
 
 #[cfg(test)]
