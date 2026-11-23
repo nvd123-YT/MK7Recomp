@@ -919,17 +919,21 @@ impl Menus {
                 ui.checkbox(&mut settings.wheel.enabled, "Enable racing wheel and pedals");
                 ui.label(RichText::new("Click a binding, then move the wheel or pedal axis. Native axis codes let you bind axes that are not exposed as ordinary gamepad sticks or triggers.").weak().small());
                 let wheel_bindings = [
-                    ("Steering", settings.wheel.steering),
-                    ("Accelerator", settings.wheel.accelerator),
-                    ("Brake", settings.wheel.brake),
+                    ("Steering", settings.wheel.steering, settings.wheel.steering_device_name.as_deref()),
+                    ("Accelerator", settings.wheel.accelerator, settings.wheel.accelerator_device_name.as_deref()),
+                    ("Brake", settings.wheel.brake, settings.wheel.brake_device_name.as_deref()),
                 ];
-                for (index, (name, code)) in wheel_bindings.into_iter().enumerate() {
+                for (index, (name, code, device_name)) in wheel_bindings.into_iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(name);
                         let label = if self.rebinding_wheel == Some(index) {
                             "move axis…".to_owned()
                         } else {
-                            code.map(|code| format!("{code:?}")).unwrap_or_else(|| "not bound".to_owned())
+                            match (code, device_name) {
+                                (Some(code), Some(device)) => format!("{code:?} · {device}"),
+                                (Some(code), None) => format!("{code:?}"),
+                                (None, _) => "not bound".to_owned(),
+                            }
                         };
                         if ui.add_sized([130.0, 22.0], egui::Button::new(label)).clicked() {
                             self.rebinding_wheel = Some(index);
@@ -943,9 +947,6 @@ impl Menus {
                         }
                     });
                 }
-                if let Some(device) = &settings.wheel.device_name {
-                    ui.label(RichText::new(format!("Bound device: {device}")).weak().small());
-                }
                 egui::ComboBox::from_label("Pedal axis range")
                     .selected_text(settings.wheel.pedal_axis_range.name())
                     .show_ui(ui, |ui| {
@@ -956,6 +957,12 @@ impl Menus {
                 if ui.button("Clear wheel bindings").clicked() {
                     settings.wheel.device_id = None;
                     settings.wheel.device_name = None;
+                    settings.wheel.steering_device_id = None;
+                    settings.wheel.steering_device_name = None;
+                    settings.wheel.accelerator_device_id = None;
+                    settings.wheel.accelerator_device_name = None;
+                    settings.wheel.brake_device_id = None;
+                    settings.wheel.brake_device_name = None;
                     settings.wheel.steering = None;
                     settings.wheel.accelerator = None;
                     settings.wheel.brake = None;

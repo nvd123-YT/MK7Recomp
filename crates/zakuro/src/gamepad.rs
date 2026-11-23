@@ -137,8 +137,7 @@ impl Gamepads {
             let right = [pad.value(Axis::RightStickX), pad.value(Axis::RightStickY)];
             sticks(&mut state, left, right);
 
-            let device_id = pad.uuid();
-            if wheel.enabled && wheel.device_id.as_ref() == Some(&device_id) {
+            if wheel.enabled {
                 apply_wheel(&mut state, &pad, wheel);
             }
         }
@@ -147,18 +146,25 @@ impl Gamepads {
 }
 
 fn apply_wheel(state: &mut InputState, pad: &Gamepad, wheel: &WheelSettings) {
-    if let Some(code) = wheel.steering {
-        let mut value = pad.state().value(code).clamp(-1.0, 1.0);
-        if wheel.steering_inverted {
-            value = -value;
+    let device_id = pad.uuid();
+    let uses_device = |specific: Option<&[u8; 16]>| {
+        specific.or(wheel.device_id.as_ref()) == Some(&device_id)
+    };
+
+    if uses_device(wheel.steering_device_id.as_ref()) {
+        if let Some(code) = wheel.steering {
+            let mut value = pad.state().value(code).clamp(-1.0, 1.0);
+            if wheel.steering_inverted {
+                value = -value;
+            }
+            let deadzone = f32::from(wheel.steering_deadzone.min(35)) / 100.0;
+            let magnitude = value.abs();
+            state.circle_x = if magnitude <= deadzone {
+                0.0
+            } else {
+                value.signum() * ((magnitude - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0)
+            };
         }
-        let deadzone = f32::from(wheel.steering_deadzone.min(35)) / 100.0;
-        let magnitude = value.abs();
-        state.circle_x = if magnitude <= deadzone {
-            0.0
-        } else {
-            value.signum() * ((magnitude - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0)
-        };
     }
 
     let pedal_pressed = |code: Option<Code>, inverted: bool| -> bool {
@@ -173,10 +179,14 @@ fn apply_wheel(state: &mut InputState, pad: &Gamepad, wheel: &WheelSettings) {
         }
         value >= 0.5
     };
-    if pedal_pressed(wheel.accelerator, wheel.accelerator_inverted) {
+    if uses_device(wheel.accelerator_device_id.as_ref())
+        && pedal_pressed(wheel.accelerator, wheel.accelerator_inverted)
+    {
         state.buttons.insert(PadState::A);
     }
-    if pedal_pressed(wheel.brake, wheel.brake_inverted) {
+    if uses_device(wheel.brake_device_id.as_ref())
+        && pedal_pressed(wheel.brake, wheel.brake_inverted)
+    {
         state.buttons.insert(PadState::B);
     }
 }

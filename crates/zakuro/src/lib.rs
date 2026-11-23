@@ -1039,13 +1039,27 @@ impl App {
         }
 
         if let (Some(index), Some(axis)) = (self.menus.rebinding_wheel, self.gamepads.take_axis()) {
-            self.settings.wheel.device_id = Some(axis.device_id);
-            self.settings.wheel.device_name = Some(axis.device_name.clone());
+            let device_id = axis.device_id;
+            let device_name = axis.device_name.clone();
+            self.settings.wheel.device_id = Some(device_id);
+            self.settings.wheel.device_name = Some(device_name.clone());
             self.settings.wheel.enabled = true;
             match index {
-                0 => self.settings.wheel.steering = Some(axis.code),
-                1 => self.settings.wheel.accelerator = Some(axis.code),
-                2 => self.settings.wheel.brake = Some(axis.code),
+                0 => {
+                    self.settings.wheel.steering = Some(axis.code);
+                    self.settings.wheel.steering_device_id = Some(device_id);
+                    self.settings.wheel.steering_device_name = Some(device_name.clone());
+                }
+                1 => {
+                    self.settings.wheel.accelerator = Some(axis.code);
+                    self.settings.wheel.accelerator_device_id = Some(device_id);
+                    self.settings.wheel.accelerator_device_name = Some(device_name.clone());
+                }
+                2 => {
+                    self.settings.wheel.brake = Some(axis.code);
+                    self.settings.wheel.brake_device_id = Some(device_id);
+                    self.settings.wheel.brake_device_name = Some(device_name.clone());
+                }
                 _ => {}
             }
             self.menus.rebinding_wheel = None;

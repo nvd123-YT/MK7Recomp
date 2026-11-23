@@ -523,8 +523,15 @@ impl PedalAxisRange {
 #[serde(default)]
 pub struct WheelSettings {
     pub enabled: bool,
+    /// Legacy shared device identity, retained for existing settings files.
     pub device_id: Option<[u8; 16]>,
     pub device_name: Option<String>,
+    pub steering_device_id: Option<[u8; 16]>,
+    pub steering_device_name: Option<String>,
+    pub accelerator_device_id: Option<[u8; 16]>,
+    pub accelerator_device_name: Option<String>,
+    pub brake_device_id: Option<[u8; 16]>,
+    pub brake_device_name: Option<String>,
     pub steering: Option<Code>,
     pub accelerator: Option<Code>,
     pub brake: Option<Code>,
@@ -541,6 +548,12 @@ impl Default for WheelSettings {
             enabled: false,
             device_id: None,
             device_name: None,
+            steering_device_id: None,
+            steering_device_name: None,
+            accelerator_device_id: None,
+            accelerator_device_name: None,
+            brake_device_id: None,
+            brake_device_name: None,
             steering: None,
             accelerator: None,
             brake: None,
