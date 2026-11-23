@@ -2,7 +2,7 @@
 //! hands out.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zakuro_common::result::{errors, ResultCode};
 
@@ -319,8 +319,12 @@ fn host_archive_for(system: &System, archive_id: u32, path: &[u8]) -> Option<Hos
 fn open_host_archive(system: &System, archive_id: u32, path: &[u8]) -> Result<HostArchive, ResultCode> {
     let archive = host_archive_for(system, archive_id, path).ok_or(errors::FS_NOT_FOUND)?;
     if archive_id == ARCHIVE_SDMC {
-        // the SD card is simply there.
-        let _ = std::fs::create_dir_all(archive.resolve("").unwrap_or_default());
+        // The guest SD card root must exist before reporting a successful mount.
+        let root = archive.resolve("")?;
+        std::fs::create_dir_all(&root).map_err(|error| {
+            log::error!("fs: creating SDMC root {} failed: {error}", root.display());
+            errors::FS_NOT_IMPLEMENTED
+        })?;
         return Ok(archive);
     }
     let id = path.get(4..8).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
@@ -621,9 +625,11 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             true
         }
 
-        // GetFreeBytes(archive handle) -> u64. Plenty.
+        // GetFreeBytes(archive handle). SDMC reports 1 GiB.
         0x0812 => {
-            let free: u64 = 512 * 1024 * 1024;
+            let handle = read_u64(system, buffer, 1);
+            let is_sdmc = system.services.fs.archives.get(&handle).is_some_and(|archive| archive.id == ARCHIVE_SDMC);
+            let free: u64 = if is_sdmc { 1024 * 1024 * 1024 } else { 512 * 1024 * 1024 };
             buffer.reply(&mut system.memory, command, &[free as u32, (free >> 32) as u32]);
             true
         }
@@ -634,10 +640,13 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             true
         }
 
-        // GetSdmcArchiveResource / GetNandArchiveResource /
-        // GetArchiveResource(media type), sector size, cluster size, total
-        // and free clusters.
-        0x0814 | 0x0815 | 0x0849 => {
+        // GetSdmcArchiveResource: 1 GiB in 16 KiB clusters.
+        0x0814 => {
+            buffer.reply(&mut system.memory, command, &[0x200, 0x4000, 0x1_0000, 0x1_0000]);
+            true
+        }
+        // GetNandArchiveResource / GetArchiveResource(media type).
+        0x0815 | 0x0849 => {
             buffer.reply(&mut system.memory, command, &[0x200, 0x4000, 0x8_0000, 0x8_0000]);
             true
         }
@@ -667,15 +676,20 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             let path_size = buffer.get(&mut system.memory, 3);
             let path_ptr = buffer.get(&mut system.memory, 5);
             let path = path_bytes(system, path_size, path_ptr);
-            match host_archive_for(system, archive_id, &path).and_then(|a| a.format_info()) {
-                Some(info) => buffer.reply(
-                    &mut system.memory,
-                    command,
-                    &[info.total_size, info.directories, info.files, info.duplicate_data as u32],
-                ),
-                None => {
-                    log::debug!("fs: format info of archive 0x{archive_id:08X}: not formatted");
-                    buffer.reply_error(&mut system.memory, command, errors::FS_NOT_FORMATTED.0);
+            if archive_id == ARCHIVE_SDMC {
+                // SDMC does not expose archive format information.
+                buffer.reply_error(&mut system.memory, command, errors::FS_NOT_IMPLEMENTED.0);
+            } else {
+                match host_archive_for(system, archive_id, &path).and_then(|a| a.format_info()) {
+                    Some(info) => buffer.reply(
+                        &mut system.memory,
+                        command,
+                        &[info.total_size, info.directories, info.files, info.duplicate_data as u32],
+                    ),
+                    None => {
+                        log::debug!("fs: format info of archive 0x{archive_id:08X}: not formatted");
+                        buffer.reply_error(&mut system.memory, command, errors::FS_NOT_FORMATTED.0);
+                    }
                 }
             }
             true
@@ -765,6 +779,9 @@ fn open_host_file(
     let result = host.open_file(&path, flags & OPEN_CREATE != 0);
     log::debug!("fs: open '{path}' (flags {flags:#X}) -> {:?}", result.as_ref().map(|_| ()));
     let host_path = result?;
+    if is_sdmc_path(&system.services.fs.user_dir, &host_path) {
+        wait_for_medium(system, 1, SDMC_OPEN_DELAY_NS);
+    }
     Ok(system.services.fs.add_file(OpenFile {
         path,
         backing: FileBacking::Host(host_path),
@@ -819,17 +836,19 @@ fn file_command(
             buffer.set(&mut system.memory, 2, read);
             buffer.set(&mut system.memory, 3, (size << 4) | 0xC);
             buffer.set(&mut system.memory, 4, dest);
-            // the thread waits as long as the console would take, after the
-            // reads the medium is still busy with
-            let medium = match &backing {
-                Some(FileBacking::Host(_)) => 1,
-                _ => 0,
+            // Game-card and SDMC reads use their own measured timing curves.
+            let (medium, delay) = match &backing {
+                Some(FileBacking::Host(path)) => {
+                    let delay = if is_sdmc_path(&system.services.fs.user_dir, path) {
+                        sdmc_read_delay(read)
+                    } else {
+                        read_delay(read)
+                    };
+                    (1, delay)
+                }
+                _ => (0, read_delay(read)),
             };
-            let tick = system.cpu.cycles;
-            let busy = &mut system.services.fs.busy_until[medium];
-            *busy = (*busy).max(tick) + nanos_to_ticks(read_delay(read));
-            let wait = *busy - tick;
-            system.kernel.sleep_current(wait, tick);
+            wait_for_medium(system, medium, delay);
             true
         }
         // write(offset u64, size, flags, <mapped buffer>)
@@ -1261,6 +1280,25 @@ fn read_delay(length: u32) -> u64 {
     (u64::from(length) * 94 + 582_778).max(663_124)
 }
 
+/// SDMC read latency measured on Old 3DS / Old 2DS, in nanoseconds.
+fn sdmc_read_delay(length: u32) -> u64 {
+    (u64::from(length) * 183 + 524_879).max(631_826)
+}
+
+const SDMC_OPEN_DELAY_NS: u64 = 269_082;
+
+fn is_sdmc_path(user_dir: &Path, path: &Path) -> bool {
+    path.starts_with(user_dir.join("sdmc"))
+}
+
+fn wait_for_medium(system: &mut System, medium: usize, nanoseconds: u64) {
+    let tick = system.cpu.cycles;
+    let busy = &mut system.services.fs.busy_until[medium];
+    *busy = (*busy).max(tick) + nanos_to_ticks(nanoseconds);
+    let wait = *busy - tick;
+    system.kernel.sleep_current(wait, tick);
+}
+
 fn read_file(system: &mut System, file_id: u32, offset: u64, size: u32, dest: u32) -> u32 {
     let Some(file) = system.services.fs.files.get(&file_id).cloned() else {
         return 0;
@@ -1337,6 +1375,26 @@ fn decode_path(system: &mut System, path_type: u32, path_size: u32, path_ptr: u3
 /// kept so the descriptor helper stays in scope for the mapped-buffer replies
 /// above, which build their descriptors by hand.
 pub const _MAPPED_BUFFER_RW: u32 = Descriptor::static_buffer(0, 0);
+
+#[cfg(test)]
+mod sdmc_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn sdmc_read_and_open_delays_match_the_measured_model() {
+        assert_eq!(sdmc_read_delay(0), 631_826);
+        assert_eq!(sdmc_read_delay(1024), 712_271);
+        assert_eq!(SDMC_OPEN_DELAY_NS, 269_082);
+    }
+
+    #[test]
+    fn only_the_guest_sdmc_root_uses_sdmc_timing() {
+        let root = Path::new("/user");
+        assert!(is_sdmc_path(root, Path::new("/user/sdmc/Nintendo 3DS/title.bin")));
+        assert!(!is_sdmc_path(root, Path::new("/user/savedata/title.bin")));
+        assert!(!is_sdmc_path(root, Path::new("/user/sdmc-other/title.bin")));
+    }
+}
 
 #[cfg(test)]
 mod executable_code_tests {
