@@ -640,13 +640,10 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             true
         }
 
-        // GetSdmcArchiveResource: 1 GiB in 16 KiB clusters.
-        0x0814 => {
-            buffer.reply(&mut system.memory, command, &[0x200, 0x4000, 0x1_0000, 0x1_0000]);
-            true
-        }
-        // GetNandArchiveResource / GetArchiveResource(media type).
-        0x0815 | 0x0849 => {
+        // GetSdmcArchiveResource / GetNandArchiveResource /
+        // GetArchiveResource(media type), sector size, cluster size, total
+        // and free clusters. These are independent of GetFreeBytes.
+        0x0814 | 0x0815 | 0x0849 => {
             buffer.reply(&mut system.memory, command, &[0x200, 0x4000, 0x8_0000, 0x8_0000]);
             true
         }
@@ -678,7 +675,7 @@ fn user_command(system: &mut System, buffer: &CommandBuffer, header: Header) -> 
             let path = path_bytes(system, path_size, path_ptr);
             if archive_id == ARCHIVE_SDMC {
                 // SDMC does not expose archive format information.
-                buffer.reply_error(&mut system.memory, command, errors::FS_NOT_IMPLEMENTED.0);
+                buffer.reply_error(&mut system.memory, command, errors::UNKNOWN_RESULT.0);
             } else {
                 match host_archive_for(system, archive_id, &path).and_then(|a| a.format_info()) {
                     Some(info) => buffer.reply(

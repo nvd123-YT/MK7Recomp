@@ -308,6 +308,9 @@ pub mod errors {
     pub const UNIMPLEMENTED: ResultCode =
         ResultCode::new(Level::Permanent, Summary::NotSupported, Module::Common, 1023);
 
+    /// matches Citra/Azahar ResultUnknown for operations without a known code.
+    pub const UNKNOWN_RESULT: ResultCode = ResultCode(u32::MAX);
+
     /// not a real hardware code either, but a deliberately chosen one, "this
     /// online feature is unavailable" for the network-facing services we have
     /// not implemented (frd:u, boss:U, http:C, ...). local wireless answers
