@@ -458,7 +458,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     });
                     id as i32
                 };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0003 => {
             let id = buffer.get(&mut system.memory, 1);
@@ -471,14 +471,14 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                             let address = local.unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)));
                             match TcpListener::bind(address).and_then(|listener| { listener.set_nonblocking(true)?; Ok(listener) }) {
                                 Ok(listener) => { entry.socket = Socket::Listener(listener); 0 }
-                                Err(error) => { entry.socket = Socket::Unbound { kind, local }; errno(&error) }
+                                Err(error) => { entry.socket = Socket::Unbound { kind: SOCK_STREAM, local }; errno(&error) }
                             }
                         }
                         other => { entry.socket = other; -22 }
                     }
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0004 => {
             let id = buffer.get(&mut system.memory, 1);
@@ -539,7 +539,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 (None, _) => -22,
                 (_, None) => -9
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0006 => {
             let id = buffer.get(&mut system.memory, 1);
@@ -553,8 +553,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                         let old = std::mem::replace(&mut entry.socket, Socket::Unbound { kind: SOCK_DGRAM, local: None });
                         match old {
                             Socket::Unbound { kind: SOCK_DGRAM, local } => {
-                                let local = local.unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)));
-                                match new_udp(local, entry.blocking).and_then(|socket| { socket.connect(address)?; Ok(socket) }) {
+                                let bind_address = local.unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)));
+                                match new_udp(bind_address, entry.blocking).and_then(|socket| { socket.connect(address)?; Ok(socket) }) {
                                     Ok(socket) => { entry.socket = Socket::Udp(socket); 0 }
                                     Err(error) => { entry.socket = Socket::Unbound { kind: SOCK_DGRAM, local }; errno(&error) }
                                 }
@@ -568,7 +568,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     }
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0008 => {
             let id = buffer.get(&mut system.memory, 1);
@@ -621,11 +621,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     }
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x000B => {
             let id = buffer.get(&mut system.memory, 1);
-            reply(system, buffer, command, if system.services.soc.sockets.remove(&id).is_some() { 0 } else { -9 });
+            reply_ret(system, buffer, command, if system.services.soc.sockets.remove(&id).is_some() { 0 } else { -9 });
         }
         0x000C => {
             let id = buffer.get(&mut system.memory, 1);
@@ -641,7 +641,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     _ => 0
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x000D => get_host_by_name(system, buffer, command),
         0x000F => get_addr_info(system, buffer, tls, command),
@@ -655,13 +655,13 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 None => -9,
                 Some(entry) => {
                     let option_value = match option {
-                        0x1008 => Some(socket_type(entry)),
-                        0x1009 => Some(0),
-                        0x2001 => match &entry.socket { Socket::Tcp(socket) => Some(socket.nodelay().unwrap_or(false) as u32), _ => Some(0) },
+                        0x1008 => Some(socket_type(entry) as i32),
+                        0x1009 => Some(0i32),
+                        0x2001 => match &entry.socket { Socket::Tcp(socket) => Some(socket.nodelay().unwrap_or(false) as i32), _ => Some(0i32) },
                         _ => None
                     };
                     if let Some(option_value) = option_value {
-                        if value.len() >= 4 { value[..4].copy_from_slice(&option_value.to_le_bytes()); }
+                        if value.len() >= 4 { value[..4].copy_from_slice(&(option_value as u32).to_le_bytes()); }
                         0
                     } else { -92 }
                 }
@@ -692,7 +692,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     _ => -92
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0013 => {
             let id = buffer.get(&mut system.memory, 1);
@@ -706,7 +706,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                     _ => -22
                 }
             };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0014 => {
             let count = buffer.get(&mut system.memory, 1) as usize;
@@ -740,14 +740,14 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
                 .and_then(|socket| { socket.connect(("8.8.8.8", 53))?; socket.local_addr() });
             let ret = match route { Ok(SocketAddr::V4(address)) => u32::from_ne_bytes(address.ip().octets()) as i32, _ => 0 };
-            reply(system, buffer, command, ret);
+            reply_ret(system, buffer, command, ret);
         }
         0x0017 => reply_socket_address(system, buffer, tls, command, false),
         0x0018 => reply_socket_address(system, buffer, tls, command, true),
         0x0019 | 0x0021 => {
             system.services.soc.sockets.clear();
             if command == 0x0019 { system.services.soc.initialized = false; }
-            reply(system, buffer, command, 0);
+            reply(system, buffer, command, &[]);
         }
         0x001A => get_network_option(system, buffer, tls, command),
         _ => return false,
