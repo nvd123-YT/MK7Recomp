@@ -31,6 +31,9 @@ const STATE_CONNECTING: u32 = 5;
 const STATE_RECEIVED: u32 = 9;
 const STATE_COMPLETED: u32 = 10;
 const CLIENT_CERT_DEFAULT: u32 = 0x40;
+const ERROR_HEADER_NOT_FOUND: u32 = 0xD8A0_A028;
+const ERROR_HTTP_STATE: u32 = 0xD8A0_A066;
+const ERROR_TIMEOUT: u32 = 0xD820_A069;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
@@ -329,7 +332,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 } else { false }
             }).unwrap_or(false);
             if result { buffer.reply(&mut system.memory, command, &[]); }
-            else { buffer.reply_error(&mut system.memory, command, not_connected()); }
+            else { buffer.reply_error(&mut system.memory, command, ERROR_HTTP_STATE); }
         }
         // GetResponseStatusCode(handle)
         0x0022 | 0x0023 => {
@@ -355,41 +358,57 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
-            let value = system.services.http.contexts.get_mut(&handle).and_then(|context| {
+            let result = system.services.http.contexts.get_mut(&handle).and_then(|context| {
                 context.refresh();
-                context.response.as_ref().and_then(|response| {
-                    response.headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(&name)).map(|(_, value)| value.clone())
+                context.response.as_ref().map(|response| {
+                    response.headers.iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+                        .map(|(_, value)| value.clone())
                 })
-            }).unwrap_or_default();
-            let mut bytes = value.into_bytes();
-            if capacity > 0 {
-                bytes.truncate(capacity - 1);
-                bytes.push(0);
-            } else {
-                bytes.clear();
+            });
+            match result {
+                Some(Some(value)) => {
+                    let copied_size = value.len() as u32;
+                    let mut bytes = value.into_bytes();
+                    if capacity > 0 {
+                        bytes.truncate(capacity - 1);
+                        bytes.push(0);
+                    } else {
+                        bytes.clear();
+                    }
+                    system.memory.write_bytes(pointer, &bytes);
+                    reply_mapped(system, buffer, command, &[copied_size], descriptor, pointer);
+                }
+                Some(None) => reply_mapped_error(system, buffer, command, ERROR_HEADER_NOT_FOUND, descriptor, pointer),
+                None => reply_mapped_error(system, buffer, command, ERROR_TIMEOUT, descriptor, pointer),
             }
-            system.memory.write_bytes(pointer, &bytes);
-            reply_mapped(system, buffer, command, &[bytes.len() as u32], descriptor, pointer);
         }
         // GetResponseData(handle, capacity, mapped output), response header block.
         0x0020 | 0x0021 => {
             let (handle, capacity) = (buffer.get(&mut system.memory, 1), buffer.get(&mut system.memory, 2) as usize);
-            let Some((descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_BODY)) else {
+            let Some((_descriptor, pointer, _)) = mapped_bytes(system, buffer, header, 0, capacity.min(MAX_BODY)) else {
                 buffer.reply_error(&mut system.memory, command, not_connected());
                 return true;
             };
-            let bytes = system.services.http.contexts.get_mut(&handle).and_then(|context| {
+            let response = system.services.http.contexts.get_mut(&handle).and_then(|context| {
                 context.refresh();
                 context.response.as_ref().map(|response| {
                     let mut text = format!("HTTP/1.1 {}\r\n", response.status);
-                    for (name, value) in &response.headers { text.push_str(&format!("{name}: {value}\r\n")); }
+                    for (name, value) in &response.headers {
+                        text.push_str(&format!("{name}: {value}\r\n"));
+                    }
                     text.push_str("\r\n");
                     text.into_bytes()
                 })
-            }).unwrap_or_default();
-            let count = bytes.len().min(capacity);
-            system.memory.write_bytes(pointer, &bytes[..count]);
-            buffer.reply(&mut system.memory, command, &[count as u32]);
+            });
+            match response {
+                Some(bytes) => {
+                    let count = bytes.len().min(capacity);
+                    system.memory.write_bytes(pointer, &bytes[..count]);
+                    buffer.reply(&mut system.memory, command, &[count as u32]);
+                }
+                None => buffer.reply_error(&mut system.memory, command, ERROR_TIMEOUT),
+            }
         }
         // RegisterURLReplacement(pattern length, replacement length, two static buffers)
         0x0C00 => {

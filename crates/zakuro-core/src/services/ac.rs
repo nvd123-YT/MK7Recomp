@@ -91,11 +91,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // GetCloseResult.
         0x0009 => buffer.reply(&mut system.memory, command, &[]),
-        // GetLastErrorCode / GetCurrentAPInfo (not associated with a failing
-        // connection in Pretendo mode; there is no physical AP to describe).
+        // GetLastErrorCode has no active error after a successful local setup.
         0x000A => buffer.reply(&mut system.memory, command, &[0]),
         // GetInfraPriority returns the default infrastructure priority.
-        0x000E => buffer.reply(&mut system.memory, command, &[0]),
+        0x0027 => buffer.reply(&mut system.memory, command, &[0]),
         // GetStatus: 3 means internet reachable/available to the guest.
         0x000C => {
             let status = if online_provider { 3 } else { 0 };
