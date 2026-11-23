@@ -73,6 +73,7 @@ impl HttpContext {
                     self.state = STATE_RECEIVED;
                 }
                 Err(error) => {
+                    log::warn!("http:C request failed: {error}");
                     self.error = Some(error);
                     self.state = STATE_COMPLETED;
                 }
@@ -239,7 +240,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                         post_fields: context.request.post_fields.clone(),
                         raw_body: context.request.raw_body.clone(),
                         use_client_certificate: context.request.use_client_certificate
-                            || (provider == NetworkProvider::Pretendo && context.request.url.contains("nasc.")),
+                            || (provider == NetworkProvider::Pretendo && context.request.url.to_ascii_lowercase().contains("nasc.")),
                         data_dir,
                     };
                     let (send, receive) = mpsc::channel();
@@ -434,6 +435,9 @@ struct RequestToRun {
 
 fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
     if request.url.len() > MAX_URL { return Err("URL exceeds the HTTP service limit".to_owned()); }
+    if !(request.url.starts_with("http://") || request.url.starts_with("https://")) {
+        return Err("only HTTP and HTTPS URLs are supported by the guest HTTP service".to_owned());
+    }
     let method = match request.method {
         HTTP_GET => "GET",
         HTTP_POST | HTTP_POST_EMPTY => "POST",
@@ -465,6 +469,7 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
         let mut command = Command::new("curl");
         command.args([
             "--silent", "--show-error", "--location",
+            "--proto", "=http,https", "--proto-redir", "=http,https",
             "--connect-timeout", "12", "--max-time", "35",
             "--dump-header", header_path.to_str().ok_or_else(|| "invalid HTTP header output path".to_owned())?,
             "--output", body_path.to_str().ok_or_else(|| "invalid HTTP body output path".to_owned())?,

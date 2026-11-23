@@ -196,34 +196,7 @@ pub fn handle(
         },
 
         // -- Wifi connection ------------------------------------------------
-        "ac:u" | "ac:i" => match command {
-            // GetWifiStatus, 0 = not connected, which is the truth.
-            0x000D => {
-                buffer.reply(&mut system.memory, command, &[0]);
-                true
-            }
-            // GetLastErrorCode / GetStatus
-            0x000A | 0x000E => {
-                buffer.reply(&mut system.memory, command, &[0]);
-                true
-            }
-            // CloseAsync and friends still have to signal their event.
-            0x0005 | 0x0008 => {
-                buffer.reply(&mut system.memory, command, &[]);
-                true
-            }
-            // RegisterDisconnectEvent and SetClientVersion
-            0x0030 | 0x0040 => {
-                buffer.reply(&mut system.memory, command, &[]);
-                true
-            }
-            // IsConnected, no
-            0x003E => {
-                buffer.reply(&mut system.memory, command, &[0]);
-                true
-            }
-            _ => false,
-        },
+
 
         // -- Accounts, background downloads and http ------------------------
         // setting a session up works offline, only its requests need the

@@ -5,26 +5,64 @@
 
 use zakuro_common::result::errors;
 
-use crate::kernel::ipc::{CommandBuffer, Header};
+use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
+use crate::kernel::object::KObject;
+use crate::kernel::sync::ResetType;
 use crate::services::cfg::REGION_USA;
-use crate::System;
+use crate::{NetworkProvider, System};
 
 /// the platform a profile names, the 3DS.
 const PLATFORM_CTR: u32 = 2;
 
+/// Local FRD state. The server-side friends service still needs a successful
+/// NASC/NEX session; this only implements the console-side login event.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct FrdState {
+    #[serde(skip)]
+    logged_in: bool,
+    last_response_result: u32,
+}
+
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
     let command = header.command_id();
     let (region, language) = (system.config.region, system.config.language);
-    let memory = &mut system.memory;
     match command {
-        // HasLoggedIn and IsOnline, neither
-        0x0001 | 0x0002 => buffer.reply(memory, command, &[0]),
-        // Logout, AttachToEventNotification, SetNotificationMask and
-        // SetClientSdkVersion
-        0x0004 | 0x0020 | 0x0021 | 0x0032 => buffer.reply(memory, command, &[]),
+        // HasLoggedIn and IsOnline reflect the local FRD login. This is not a
+        // substitute for the title's independent NASC and NEX authentication.
+        0x0001 | 0x0002 => {
+            let logged_in = system.services.frd.logged_in && system.config.network_provider == NetworkProvider::Pretendo;
+            buffer.reply(&mut system.memory, command, &[u32::from(logged_in)]);
+        }
+        // Login(event) completes the local friends module's login handshake.
+        0x0003 => {
+            let descriptor = buffer.get(&mut system.memory, header.normal_params() + 1);
+            let event_handle = match Descriptor::parse(descriptor) {
+                Descriptor::Handles { count, .. } if count > 0 => Some(buffer.get(&mut system.memory, header.normal_params() + 2)),
+                _ => None,
+            };
+            if system.config.network_provider != NetworkProvider::Pretendo {
+                system.services.frd.logged_in = false;
+                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            } else {
+                system.services.frd.logged_in = true;
+                system.services.frd.last_response_result = 0;
+                if let Some(object) = event_handle.and_then(|handle| system.kernel.handles.resolve(handle)) {
+                    system.kernel.signal_event(object);
+                }
+                buffer.reply(&mut system.memory, command, &[]);
+            }
+        }
+        // Logout, AttachToEventNotification, SetNotificationMask and SetClientSdkVersion.
+        0x0004 => {
+            system.services.frd.logged_in = false;
+            system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+            buffer.reply(&mut system.memory, command, &[]);
+        }
+        0x0020 | 0x0021 | 0x0032 => buffer.reply(&mut system.memory, command, &[]),
         // GetMyFriendKey, a principal id, padding and a friend code seed,
         // none of which a console that never logged in has
-        0x0005 => buffer.reply(memory, command, &[0; 4]),
+        0x0005 => buffer.reply(&mut system.memory, command, &[0; 4]),
         // GetMyPreference, private, showing neither game
         0x0006 => buffer.reply(memory, command, &[0; 3]),
         // GetMyProfile, region, country, area and language, then platform
@@ -38,7 +76,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // GetMyScreenName, the user's name in eleven UTF-16 units
         0x0009 => {
             let mut name = [0u8; 24];
-            for (i, unit) in "Zakuro".encode_utf16().enumerate() {
+            for (i, unit) in system.config.username.chars().take(10).collect::<String>().encode_utf16().enumerate() {
                 name[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
             }
             let words: Vec<u32> = name.as_chunks::<4>().0.iter().map(|&w| u32::from_le_bytes(w)).collect();

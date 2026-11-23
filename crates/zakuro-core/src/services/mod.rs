@@ -1,5 +1,6 @@
 //! high-level service emulation.
 
+pub mod ac;
 pub mod apt;
 pub mod boss;
 pub mod cam;
@@ -101,6 +102,10 @@ pub struct ServiceState {
     // HTTP requests hold host worker channels and temporary response data.
     #[serde(skip)]
     pub http: http::HttpState,
+    #[serde(default)]
+    pub frd: frd::FrdState,
+    #[serde(skip)]
+    pub ac: ac::AcState,
 }
 
 /// entry point from svcSendSyncRequest.
@@ -135,6 +140,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "ir:rst" => ir_rst::handle(system, &buffer, header),
         "y2r:u" => y2r::handle(system, &buffer, header),
         "frd:u" | "frd:a" => frd::handle(system, &buffer, header),
+        "ac:u" | "ac:i" => ac::handle(system, &buffer, header),
         "nfc:u" | "nfc:m" => nfc::handle(system, &buffer, header),
         "cecd:u" | "cecd:s" => cecd::handle(system, &buffer, header),
         "boss:U" | "boss:P" => boss::handle(system, &buffer, header),
