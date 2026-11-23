@@ -942,6 +942,20 @@ mod tests {
     }
 
     #[test]
+    fn wheel_bindings_round_trip_with_separate_device_ids() {
+        let mut settings = Settings::default();
+        settings.wheel.enabled = true;
+        settings.wheel.steering_device_id = Some([1; 16]);
+        settings.wheel.accelerator_device_id = Some([2; 16]);
+        settings.wheel.brake_device_id = Some([3; 16]);
+        settings.wheel.steering_device_name = Some("wheelbase".to_owned());
+        settings.wheel.accelerator_device_name = Some("pedals".to_owned());
+        let encoded = toml::to_string_pretty(&settings).unwrap();
+        let decoded: Settings = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.wheel, settings.wheel);
+    }
+
+    #[test]
     fn layouts_go_round() {
         let mut layout = Screens::Stacked;
         for _ in 0..Screens::ALL.len() {

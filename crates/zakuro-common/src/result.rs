@@ -334,6 +334,11 @@ mod tests {
     }
 
     #[test]
+    fn unknown_result_matches_the_citra_azahar_sentinel() {
+        assert_eq!(errors::UNKNOWN_RESULT.0, u32::MAX);
+    }
+
+    #[test]
     fn success_is_zero() {
         assert!(RESULT_SUCCESS.is_success());
         assert!(!RESULT_SUCCESS.is_error());
