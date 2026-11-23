@@ -563,7 +563,9 @@ fn form_encode(fields: &[(String, String)]) -> String {
 fn url_encode(value: &str) -> String {
     let mut out = String::new();
     for byte in value.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+        if *byte == b' ' {
+            out.push('+');
+        } else if byte.is_ascii_alphanumeric() || matches!(*byte, b'*' | b'-' | b'.' | b'_') {
             out.push(*byte as char);
         } else {
             out.push_str(&format!("%{byte:02X}"));
@@ -758,7 +760,7 @@ mod tests {
             ("action".to_owned(), "LOGIN".to_owned()),
             ("ingamesn".to_owned(), "A B&c".to_owned()),
         ];
-        assert_eq!(form_encode(&fields), "action=LOGIN&ingamesn=A%20B%26c");
+        assert_eq!(form_encode(&fields), "action=LOGIN&ingamesn=A+B%26c");
     }
 
     #[test]
