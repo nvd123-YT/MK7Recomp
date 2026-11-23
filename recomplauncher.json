@@ -738,7 +738,7 @@
       "id": "network_provider",
       "label": "Network provider",
       "group": "Online",
-      "help": "Pretendo enables Nintendo service hostname and URL rewriting. HTTP/TLS, account authentication and NEX multiplayer remain in development; choosing Pretendo does not yet enable online races.",
+      "help": "Pretendo rewrites guest DNS hostnames for documented Nintendo Network service domains. HTTP/TLS, account authentication and NEX multiplayer remain in development; choosing Pretendo does not yet enable online races.",
       "choices": [
         {
           "label": "Off",

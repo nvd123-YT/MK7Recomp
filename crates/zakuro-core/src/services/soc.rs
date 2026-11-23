@@ -458,7 +458,7 @@ pub fn rewrite_network_url(url: &str, provider: NetworkProvider) -> String {
     let Some(scheme_end) = url.find("://") else { return url.to_owned() };
     let authority_start = scheme_end + 3;
     let authority_end = url[authority_start..]
-        .find(['/', '?', '#'])
+        .find(|ch| matches!(ch, '/' | '?' | '#'))
         .map_or(url.len(), |offset| authority_start + offset);
     let authority = &url[authority_start..authority_end];
     let host_start = authority.rfind('@').map_or(0, |at| at + 1);

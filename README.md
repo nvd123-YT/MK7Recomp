@@ -21,7 +21,7 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Unreleased improvements
 
-- Adds an experimental Pretendo network-provider setting. It rewrites the documented Nintendo service domains to Pretendo for guest DNS/URL routing only; HTTP/TLS, ACT/NASC authentication and NEX multiplayer are still under development, so online races are not yet supported.
+- Adds an experimental Pretendo network-provider setting. It rewrites the documented Nintendo service hostnames to Pretendo for guest DNS routing only; HTTP/TLS, ACT/NASC authentication and NEX multiplayer are still under development, so online races are not yet supported.
 
 - Adds F4 toggleable fast-forward: switch between normal speed and uncapped emulation without holding Tab or a controller trigger; the existing hold-to-fast-forward controls remain available.
 
