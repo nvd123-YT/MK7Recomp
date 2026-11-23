@@ -4690,6 +4690,7 @@ dependencies = [
  "bitflags 2.13.2",
  "chrono",
  "env_logger",
+ "getrandom 0.3.4",
  "log",
  "lz4_flex",
  "postcard",
@@ -4704,7 +4705,6 @@ dependencies = [
  "zakuro-cpu",
  "zakuro-fs",
  "zakuro-gpu",
- "getrandom 0.3.4",
 ]
 
 [[package]]
