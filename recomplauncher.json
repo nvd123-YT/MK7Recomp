@@ -70,7 +70,8 @@
         "volume": "1.0",
         "mute": "false",
         "show_fps": "false",
-        "network_provider": "\"off\""
+        "network_provider": "\"off\"",
+        "auto_repair_uidhmac": "false"
       }
     }
   ],
@@ -137,6 +138,24 @@
         "path": "{home}/.local/share/mario-kart-7/sysdata",
         "if": "{home}/.local/share/mario-kart-7/sysdata"
       }
+    ],
+    "friends_account": [
+      {
+        "path": "{config}/mario-kart-7/user/nand/system-save/0000000000010032",
+        "if": "{config}/mario-kart-7/user/nand/system-save/0000000000010032"
+      },
+      {
+        "path": "{local}/mario-kart-7/user/nand/system-save/0000000000010032",
+        "if": "{local}/mario-kart-7/user/nand/system-save/0000000000010032"
+      },
+      {
+        "path": "{home}/Library/Application Support/mario-kart-7/user/nand/system-save/0000000000010032",
+        "if": "{home}/Library/Application Support/mario-kart-7/user/nand/system-save/0000000000010032"
+      },
+      {
+        "path": "{home}/.local/share/mario-kart-7/user/nand/system-save/0000000000010032",
+        "if": "{home}/.local/share/mario-kart-7/user/nand/system-save/0000000000010032"
+      }
     ]
   },
   "actions": [
@@ -157,6 +176,12 @@
       "label": "Open online data",
       "help": "For Pretendo mutual TLS, place your own decrypted 3DS ctr-common-1-cert.pem and ctr-common-1-key.pem files here. These private files are never part of the game download. MK7's NASC login is automatic; PNID linking is optional.",
       "open": "online_data"
+    },
+    {
+      "id": "open_friends_account",
+      "label": "Open Friends account data",
+      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account. This private file contains your FRD PrincipalID and NEX password; do not share it.",
+      "open": "friends_account"
     }
   ],
   "settings": [
@@ -762,7 +787,7 @@
       "id": "network_provider",
       "label": "Network provider",
       "group": "Online",
-      "help": "Pretendo enables guest DNS/HTTP endpoint routing and local AC/FRD connection events. NASC/NEX authentication and actual races are not yet validated. MK7 normally obtains its game-server token automatically through NASC; PNID linking is optional.",
+      "help": "Pretendo enables guest DNS/HTTP endpoint routing and local AC/FRD connection events. A separate, opt-in UID-HMAC repair setting can send the imported Friends account PrincipalID and NEX password to Pretendo over HTTPS. Actual online races remain unverified.",
       "choices": [
         {
           "label": "Off",
@@ -779,6 +804,29 @@
       ],
       "defaults": {
         "network_provider": "\"off\""
+      }
+    },
+    {
+      "id": "auto_repair_uidhmac",
+      "label": "Repair UID-HMAC automatically",
+      "group": "Online",
+      "help": "Opt-in: sends the PrincipalID and NEX password from your imported Friends account to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. The original account file is backed up before its HMAC is changed. Off by default.",
+      "choices": [
+        {
+          "label": "Off (use imported HMAC)",
+          "set": {
+            "auto_repair_uidhmac": "false"
+          }
+        },
+        {
+          "label": "On (repair with Pretendo)",
+          "set": {
+            "auto_repair_uidhmac": "true"
+          }
+        }
+      ],
+      "defaults": {
+        "auto_repair_uidhmac": "false"
       }
     }
   ],
