@@ -333,7 +333,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // SockAtMark
         0x0015 => {
-            let result = if system.services.soc.sockets.contains_key(&word(system, 1)) { 0 } else { -8 };
+            let id = word(system, 1);
+            let result = if system.services.soc.sockets.contains_key(&id) { 0 } else { -8 };
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
         // GetHostId
@@ -373,7 +374,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // AddGlobalSocket
         0x0023 => {
-            let result = if system.services.soc.sockets.contains_key(&word(system, 1)) { 0 } else { -8 };
+            let id = word(system, 1);
+            let result = if system.services.soc.sockets.contains_key(&id) { 0 } else { -8 };
             buffer.reply(&mut system.memory, command, &[result as u32]);
         }
         _ => return false,
