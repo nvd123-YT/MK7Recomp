@@ -1316,7 +1316,7 @@ mod tests {
     fn server_time_difference_is_nanoseconds_not_unix_seconds() {
         let now = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
         let difference = server_time_difference_ns(Some(&now));
-        assert!(difference.unsigned_abs() < 2_000_000_000);
+        assert!((difference as i64).abs() < 2_000_000_000);
     }
 
     #[test]
