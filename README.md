@@ -19,6 +19,14 @@ This fork is deliberately limited to **Mario Kart 7 for Nintendo 3DS**. Other ga
 
 The application expects a legally obtained, decrypted dump of the game. It does not include the ROM, game code, textures, music, or other game assets.
 
+## Unreleased improvements
+
+- Adds configurable racing-wheel input for devices exposed by the system through Gilrs: bind steering, accelerator and brake independently, select pedal axis range, invert individual axes, and tune steering deadzone. Steering drives the circle pad; accelerator and brake map to A and B. Force feedback is not implemented, and device availability depends on OS/driver enumeration.
+- Applies a rescaled radial deadzone to controller sticks, filtering drift while preserving full travel.
+- Reduces controller polling overhead by sharing Pro Controller report snapshots instead of cloning their button vectors every frame.
+- Buffers input recordings and flushes periodically rather than synchronously flushing after every changed input.
+- Improves SDMC compatibility: reports the 1 GiB free-space stub, returns the same unknown-result sentinel for unsupported SDMC format information, propagates SD-root creation failures, and uses the measured SDMC read/open latency model.
+
 ## Version 1.0.6 changes
 
 - Adds timestamped backups of replaced save-state slots, automatically retaining the newest ten backups per slot.
