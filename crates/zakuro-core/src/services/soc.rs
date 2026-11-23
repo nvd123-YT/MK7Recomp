@@ -1321,7 +1321,7 @@ mod tests {
         socket.set_nonblocking(true).unwrap();
         let socket_address = socket.local_addr().unwrap();
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        server.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        server.set_nonblocking(true).unwrap();
         let server_address = server.local_addr().unwrap();
 
         let mut entry = SocketEntry::new(HostSocket::Udp {
@@ -1330,7 +1330,17 @@ mod tests {
         });
         assert_eq!(send_data(Some(&mut entry), b"nex station", None), 11);
         let mut received = [0u8; 32];
-        let (server_size, _) = server.recv_from(&mut received).unwrap();
+        let started = std::time::Instant::now();
+        let server_size = loop {
+            match server.recv_from(&mut received) {
+                Ok((size, _)) => break size,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+                    && started.elapsed() < Duration::from_secs(5) => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("NEX destination did not receive UDP datagram: {error}"),
+            }
+        };
         assert_eq!(&received[..server_size], b"nex station");
 
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1338,7 +1348,17 @@ mod tests {
         let HostSocket::Udp { socket, .. } = &mut entry.socket else {
             panic!("expected UDP socket");
         };
-        let (peer_size, peer_address) = socket.recv_from(&mut received).unwrap();
+        let started = std::time::Instant::now();
+        let (peer_size, peer_address) = loop {
+            match socket.recv_from(&mut received) {
+                Ok(received) => break received,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+                    && started.elapsed() < Duration::from_secs(5) => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("UDP socket filtered peer traffic: {error}"),
+            }
+        };
         assert_eq!(&received[..peer_size], b"race peer");
         assert_eq!(peer_address, peer.local_addr().unwrap());
     }
