@@ -52,6 +52,7 @@
         "language": "\"english\"",
         "renderer": "\"vulkan\"",
         "hardware_rasterizer": "true",
+        "vertex_shading": "\"auto\"",
         "resolution": "2",
         "mods_enabled": "true",
         "plugins_3gx_enabled": "false",
@@ -197,6 +198,35 @@
       ],
       "defaults": {
         "hardware_rasterizer": "true"
+      }
+    },
+    {
+      "id": "vertex_shading",
+      "label": "Vertex shading",
+      "group": "Graphics",
+      "help": "Auto keeps the device heuristic. Try GPU or CPU on geometry-heavy scenes and compare the F3 performance HUD. Takes effect after restarting the game.",
+      "choices": [
+        {
+          "label": "Auto",
+          "set": {
+            "vertex_shading": "\"auto\""
+          }
+        },
+        {
+          "label": "GPU",
+          "set": {
+            "vertex_shading": "\"gpu\""
+          }
+        },
+        {
+          "label": "CPU",
+          "set": {
+            "vertex_shading": "\"cpu\""
+          }
+        }
+      ],
+      "defaults": {
+        "vertex_shading": "\"auto\""
       }
     },
     {
