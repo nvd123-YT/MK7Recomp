@@ -242,9 +242,9 @@ fn reply_static_bytes(
 struct GameAuthenticationData {
     nasc_result: u32,
     http_status: u32,
-    server_address: [u8; 0x20],
+    server_address: Vec<u8>,
     server_port: u16,
-    token: [u8; 0x100],
+    token: Vec<u8>,
     server_time: u64,
 }
 
@@ -252,8 +252,8 @@ struct GameAuthenticationData {
 struct ServiceLocatorData {
     nasc_result: u32,
     http_status: u32,
-    service_host: [u8; 0x80],
-    service_token: [u8; 0x100],
+    service_host: Vec<u8>,
+    service_token: Vec<u8>,
     status_data: u8,
     server_time: u64,
 }
@@ -551,7 +551,7 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
         if let Some(locator) = fields.get("locator") {
             if let Some((host, port)) = locator.rsplit_once(':') {
                 if let Ok(port) = port.parse::<u16>() {
-                    data.server_address = fixed_string(host);
+                    data.server_address = fixed_string(host).to_vec();
                     data.server_port = port;
                 } else {
                     data.nasc_result = u32::MAX;
@@ -561,7 +561,7 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
             }
         }
         if let Some(token) = fields.get("token") {
-            data.token = fixed_string(token);
+            data.token = fixed_string(token).to_vec();
         }
         data.server_time = server_time(fields.get("datetime"));
     }
@@ -576,10 +576,10 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
     };
     if data.nasc_result == 7 {
         if let Some(host) = fields.get("svchost") {
-            data.service_host = fixed_string(host);
+            data.service_host = fixed_string(host).to_vec();
         }
         if let Some(token) = fields.get("servicetoken") {
-            data.service_token = fixed_string(token);
+            data.service_token = fixed_string(token).to_vec();
         }
         data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
         data.server_time = server_time(fields.get("datetime"));
