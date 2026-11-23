@@ -8,6 +8,7 @@ license.workspace = true
 symphonia-codec-aac = "0.6"
 symphonia-core = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+getrandom = "0.3.4"
 zakuro-common.workspace = true
 zakuro-cpu.workspace = true
 zakuro-fs.workspace = true

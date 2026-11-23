@@ -4704,6 +4704,7 @@ dependencies = [
  "zakuro-cpu",
  "zakuro-fs",
  "zakuro-gpu",
+ "getrandom 0.3.4",
 ]
 
 [[package]]

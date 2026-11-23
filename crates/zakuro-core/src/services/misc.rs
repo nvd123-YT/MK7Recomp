@@ -61,12 +61,20 @@ pub fn handle(
                 let size = buffer.get(&mut system.memory, 1).min(0x10_0000);
                 let descriptor = buffer.get(&mut system.memory, 2);
                 let pointer = buffer.get(&mut system.memory, 3);
-                let bytes = random_bytes(system.cpu.cycles, size as usize);
-                system.memory.write_bytes(pointer, &bytes);
-                buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
-                buffer.set(&mut system.memory, 1, 0);
-                buffer.set(&mut system.memory, 2, descriptor);
-                buffer.set(&mut system.memory, 3, pointer);
+                let mut bytes = vec![0; size as usize];
+                match getrandom::fill(&mut bytes) {
+                    Ok(()) => {
+                        system.memory.write_bytes(pointer, &bytes);
+                        buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
+                        buffer.set(&mut system.memory, 1, 0);
+                        buffer.set(&mut system.memory, 2, descriptor);
+                        buffer.set(&mut system.memory, 3, pointer);
+                    }
+                    Err(error) => {
+                        log::error!("ssl:C could not obtain secure random bytes: {error}");
+                        buffer.reply_error(&mut system.memory, command, zakuro_common::result::errors::NOT_CONNECTED.0);
+                    }
+                }
                 true
             }
             _ => false,
@@ -230,51 +238,5 @@ pub fn handle(
         },
 
         _ => false,
-    }
-}
-
-/// bytes no one can tell from random, the same for the same moment of a run
-/// so that runs repeat, SplitMix64 from the console's clock.
-fn random_bytes(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = seed;
-    let mut next = || {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    };
-    let mut bytes: Vec<u8> = Vec::with_capacity(len + 8);
-    while bytes.len() < len {
-        bytes.extend_from_slice(&next().to_le_bytes());
-    }
-    bytes.truncate(len);
-    bytes
-}
-
-/// the size of AM's description of a title's content.
-const CONTENT_INFO_SIZE: u32 = 0x18;
-
-/// a u64 the command passes as two words from index.
-fn read_u64(system: &mut System, buffer: &CommandBuffer, index: u32) -> u64 {
-    buffer.get(&mut system.memory, index) as u64 | (buffer.get(&mut system.memory, index + 1) as u64) << 32
-}
-
-/// writes AM's description of a content at at, its index, type, id and
-/// size, and that it is owned, and there, when the file holds it.
-fn write_content_info(system: &mut System, at: u32, content: &zakuro_fs::Content) {
-    use zakuro_cpu::Bus;
-    const OWNED: u32 = 0x02;
-    const DOWNLOADED: u32 = 0x01;
-    let ownership = OWNED | if content.offset.is_some() { DOWNLOADED } else { 0 };
-    for (offset, word) in [
-        (0, content.index as u32 | (content.flags as u32) << 16),
-        (4, content.id),
-        (8, content.size as u32),
-        (12, (content.size >> 32) as u32),
-        (16, ownership),
-        (20, 0),
-    ] {
-        system.memory.write32(at + offset, word);
     }
 }
