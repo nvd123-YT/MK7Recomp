@@ -675,7 +675,7 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
         if let Some(locator) = fields.get("locator") {
             if let Some((host, port)) = locator.rsplit_once(':') {
                 if let Ok(port) = port.parse::<u16>() {
-                    data.server_address = fixed_string(host).to_vec();
+                    data.server_address = fixed_string::<0x20>(host).to_vec();
                     data.server_port = port;
                 } else {
                     data.nasc_result = u32::MAX;
@@ -685,7 +685,7 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
             }
         }
         if let Some(token) = fields.get("token") {
-            data.token = fixed_string(token).to_vec();
+            data.token = fixed_string::<0x100>(token).to_vec();
         }
         data.server_time = server_time(fields.get("datetime"));
     }
@@ -700,10 +700,10 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
     };
     if data.nasc_result == 7 {
         if let Some(host) = fields.get("svchost") {
-            data.service_host = fixed_string(host).to_vec();
+            data.service_host = fixed_string::<0x80>(host).to_vec();
         }
         if let Some(token) = fields.get("servicetoken") {
-            data.service_token = fixed_string(token).to_vec();
+            data.service_token = fixed_string::<0x100>(token).to_vec();
         }
         data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
         data.server_time = server_time(fields.get("datetime"));
