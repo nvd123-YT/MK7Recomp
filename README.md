@@ -27,7 +27,7 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 - **UID-HMAC repair is opt-in and off by default.** Enable **Repair UID-HMAC automatically** only when you want the imported PrincipalID and NEX password sent to `https://api.pretendo.cc/v1/repair-uidhmac` over HTTPS. The returned eight-character HMAC is written at the documented account-record offset; the original is preserved as `account.pretendo-backup`. The password is sent to the HTTPS client through stdin and is never written into logs. You can leave the option off to use the HMAC already in your imported record.
 
-- When mutual TLS is requested, place your own decrypted 3DS `ctr-common-1-cert.pem` and `ctr-common-1-key.pem` pair at `sysdata/ctr-common-1-cert.pem` and `sysdata/ctr-common-1-key.pem` under the application's data directory. The project does not include Nintendo certificates or private keys.
+- For the FRD/NASC login transaction, also place your own `LocalFriendCodeSeed_B` (exactly 0x110 bytes), `ctr-common-1-cert.pem`, and `ctr-common-1-key.pem` in `sysdata/`. Add a `sysdata/nasc.json` containing your own MAC address, Wi-Fi BSSID, AP slot details, device name and serial number. A blank example is in `docs/pretendo-nasc.example.json`; fill it with your console's values rather than using sample addresses. Cartridge dumps additionally need the exact ROM ID in this file; digital CIA dumps do not. These identity files are private and are never included in the game download.
 
 - Adds F4 toggleable fast-forward: switch between normal speed and uncapped emulation without holding Tab or a controller trigger; the existing hold-to-fast-forward controls remain available.
 

@@ -174,7 +174,7 @@
     {
       "id": "open_online_data",
       "label": "Open online data",
-      "help": "For Pretendo mutual TLS, place your own decrypted 3DS ctr-common-1-cert.pem and ctr-common-1-key.pem files here. These private files are never part of the game download. MK7's NASC login is automatic; PNID linking is optional.",
+      "help": "For Pretendo NASC, place your own ctr-common-1-cert.pem, ctr-common-1-key.pem, LocalFriendCodeSeed_B, and a filled-in nasc.json here. Import the Friends save separately. These identity files are private and are never included in the game download.",
       "open": "online_data"
     },
     {

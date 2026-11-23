@@ -381,6 +381,9 @@ impl System {
 
     /// runs one frame's worth of emulation.
     pub fn run_frame(&mut self) -> FrameOutcome {
+        // Complete any asynchronous NASC requests while the guest advances,
+        // so FRD completion events wake its waiting threads.
+        services::frd::poll(self);
         // HID samples its inputs on its own, whether or not anyone pressed
         // anything
         let input = self.services.hid.input;
@@ -400,6 +403,7 @@ impl System {
         }
         self.next_frame_boundary = self.cpu.cycles + CYCLES_PER_FRAME;
         self.end_frame();
+        services::frd::poll(self);
         FrameOutcome::Completed
     }
 

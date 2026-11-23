@@ -3,13 +3,17 @@
 //! logged in and has no friends. what needs the servers is left to the
 //! offline reply.
 
+use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use zakuro_common::result::errors;
 
 use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
+use crate::kernel::object::ObjectId;
 use crate::services::cfg::REGION_USA;
 use crate::{NetworkProvider, System};
 
@@ -226,10 +230,435 @@ fn reply_static_bytes(
     let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
     let length = bytes.len().min(capacity as usize);
     system.memory.write_bytes(pointer, &bytes[..length]);
-    buffer.set(&mut system.memory, 0, Header::new(command, 1, 2).0);
-    buffer.set(&mut system.memory, 1, result);
-    buffer.set(&mut system.memory, 2, Descriptor::static_buffer(length as u32, 0));
-    buffer.set(&mut system.memory, 3, pointer);
+    if result == 0 {
+        buffer.reply(&mut system.memory, command, &[]);
+    } else {
+        buffer.reply_error(&mut system.memory, command, result);
+    }
+}
+
+/// The fixed-size FRD response structures, written into the guest's static buffer.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct GameAuthenticationData {
+    nasc_result: u32,
+    http_status: u32,
+    server_address: [u8; 0x20],
+    server_port: u16,
+    token: [u8; 0x100],
+    server_time: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ServiceLocatorData {
+    nasc_result: u32,
+    http_status: u32,
+    service_host: [u8; 0x80],
+    service_token: [u8; 0x100],
+    status_data: u8,
+    server_time: u64,
+}
+
+struct PendingNasc<T> {
+    receiver: Receiver<Result<T, String>>,
+    event: ObjectId,
+}
+
+/// User-supplied values that the operating system normally gets from the
+/// 3DS Wi-Fi and device configuration services.
+#[derive(Debug, serde::Deserialize)]
+struct NascDeviceConfig {
+    mac_address: String,
+    bssid: String,
+    apinfo: String,
+    device_name: String,
+    serial_number: String,
+    #[serde(default = "default_fpd_version")]
+    fpd_version: u16,
+    #[serde(default)]
+    romid: Option<String>,
+}
+fn default_fpd_version() -> u16 { 0x000F }
+
+struct NascJob {
+    body: String,
+    fpd_version: u16,
+    certificate: PathBuf,
+    private_key: PathBuf,
+    service_key: Option<String>,
+    service_type: Option<String>,
+}
+
+const MK7_NEX_SERVER_ID: u32 = 0x0001_DB00;
+const NASC_URL: &str = "https://nasc.pretendo.cc/ac";
+const NASC_HTTP_MARKER: &str = "\n__MK7_NASC_HTTP__";
+
+/// The NASC form uses custom base64: '+' -> '.', '/' -> '-', '=' -> '*'.
+fn nasc_base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        out.push(ALPHABET[(a >> 2) as usize] as char);
+        out.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(((b & 0x0F) << 2) | (c >> 6)) as usize] as char } else { '*' });
+        out.push(if chunk.len() > 2 { ALPHABET[(c & 0x3F) as usize] as char } else { '*' });
+    }
+    out
+}
+
+fn nasc_base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut quartet = [0u8; 4];
+    let mut used = 0usize;
+    for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'.' => 62,
+            b'-' => 63,
+            b'*' => 64,
+            _ => return None,
+        };
+        quartet[used] = value;
+        used += 1;
+        if used == 4 {
+            if quartet[0] >= 64 || quartet[1] >= 64 { return None; }
+            out.push((quartet[0] << 2) | (quartet[1] >> 4));
+            if quartet[2] < 64 {
+                out.push((quartet[1] << 4) | (quartet[2] >> 2));
+                if quartet[3] < 64 {
+                    out.push((quartet[2] << 6) | quartet[3]);
+                }
+            } else if quartet[3] != 64 {
+                return None;
+            }
+            used = 0;
+        }
+    }
+    if used != 0 { return None; }
+    Some(out)
+}
+
+fn form_url_encode(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.as_bytes() {
+        if *byte == b' ' {
+            output.push('+');
+        } else if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(*byte as char);
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
+}
+
+fn nasc_form_body(fields: &[(String, Vec<u8>)]) -> String {
+    fields.iter()
+        .map(|(name, value)| {
+            let encoded = nasc_base64_encode(value);
+            format!("{}={}", form_url_encode(name), form_url_encode(&encoded))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_decode(value: &str) -> Option<Vec<u8>> {
+    let source = value.as_bytes();
+    let mut out = Vec::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        match source[index] {
+            b'+' => { out.push(b' '); index += 1; }
+            b'%' => {
+                let hex = std::str::from_utf8(source.get(index + 1..index + 3)?).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            byte => { out.push(byte); index += 1; }
+        }
+    }
+    Some(out)
+}
+
+fn parse_nasc_form(body: &str) -> Option<BTreeMap<String, String>> {
+    let mut fields = BTreeMap::new();
+    for pair in body.trim().split('&') {
+        if pair.is_empty() { continue; }
+        let (key, value) = pair.split_once('=')?;
+        let key = String::from_utf8(percent_decode(key)?).ok()?;
+        let encoded = String::from_utf8(percent_decode(value)?).ok()?;
+        let decoded = nasc_base64_decode(&encoded)?;
+        fields.insert(key, String::from_utf8_lossy(&decoded).into_owned());
+    }
+    Some(fields)
+}
+
+fn fixed_string<const N: usize>(value: &str) -> [u8; N] {
+    let mut output = [0u8; N];
+    let count = value.len().min(N.saturating_sub(1));
+    output[..count].copy_from_slice(&value.as_bytes()[..count]);
+    output
+}
+
+fn server_time(value: Option<&String>) -> u64 {
+    value.and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok())
+        .map(|date| date.and_utc().timestamp().max(0) as u64)
+        .unwrap_or(0)
+}
+
+fn make_nasc_job(
+    system: &System,
+    account: &FriendAccount,
+    device: &NascDeviceConfig,
+    fcdcert: &[u8],
+    action: &str,
+    extra: &[(&str, Vec<u8>)],
+) -> Result<NascJob, String> {
+    let title = system.title.as_ref().ok_or_else(|| "no game title is loaded for NASC".to_owned())?;
+    if title.media_type == 2 && device.romid.as_deref().unwrap_or_default().is_empty() {
+        return Err("this cartridge image needs its ROM ID in sysdata/nasc.json; it is not guessed from the NCSD media ID".to_owned());
+    }
+    let data_dir = system.config.data_dir.as_ref().ok_or_else(|| "the application data directory is unavailable".to_owned())?;
+    let certificate = data_dir.join("sysdata/ctr-common-1-cert.pem");
+    let private_key = data_dir.join("sysdata/ctr-common-1-key.pem");
+    if !certificate.is_file() || !private_key.is_file() {
+        return Err("NASC requires your own ctr-common-1-cert.pem and ctr-common-1-key.pem in sysdata".to_owned());
+    }
+
+    let normalize_mac = |value: &str| value.replace(':', "").replace('-', "").to_ascii_lowercase();
+    let mac = normalize_mac(&device.mac_address);
+    let bssid = normalize_mac(&device.bssid);
+    if mac.len() != 12 || bssid.len() != 12
+        || !mac.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !bssid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("sysdata/nasc.json must contain valid 12-hex-digit mac_address and bssid values".to_owned());
+    }
+    if device.apinfo.is_empty() || device.device_name.is_empty() || device.serial_number.is_empty() {
+        return Err("sysdata/nasc.json is missing apinfo, device_name, or serial_number".to_owned());
+    }
+    if fcdcert.len() != 0x110 {
+        return Err(format!("LocalFriendCodeSeed_B must be exactly 0x110 bytes (got 0x{:X})", fcdcert.len()));
+    }
+    if account.uidhmac.len() != 8 {
+        return Err("the imported Friends account has no valid eight-character UID-HMAC; enable UID-HMAC repair or import a repaired account".to_owned());
+    }
+
+    let mut fields: Vec<(String, Vec<u8>)> = vec![
+        ("gameid".into(), format!("{MK7_NEX_SERVER_ID:08X}").into_bytes()),
+        ("sdkver".into(), b"000000".to_vec()),
+        ("titleid".into(), format!("{:016X}", title.program_id()).into_bytes()),
+        ("gamecd".into(), title.ncch.product_code.trim_end_matches('\0').as_bytes().to_vec()),
+        ("gamever".into(), format!("{:04X}", title.ncch.version).into_bytes()),
+        ("mediatype".into(), title.media_type.to_string().into_bytes()),
+        ("makercd".into(), title.ncch.maker_code.as_bytes().to_vec()),
+        ("unitcd".into(), b"2".to_vec()),
+        ("macadr".into(), mac.into_bytes()),
+        ("bssid".into(), bssid.into_bytes()),
+        ("apinfo".into(), device.apinfo.as_bytes().to_vec()),
+        ("fcdcert".into(), fcdcert.to_vec()),
+        ("devname".into(), device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect()),
+        ("servertype".into(), format!("{}{}", account.server_type as char, account.server_type_number as char).into_bytes()),
+        ("fpdver".into(), format!("{:04X}", device.fpd_version).into_bytes()),
+        ("devtime".into(), chrono::Utc::now().format("%y%m%d%H%M%S").to_string().into_bytes()),
+        ("lang".into(), format!("{:02X}", system.config.language).into_bytes()),
+        ("region".into(), format!("{:02X}", system.config.region).into_bytes()),
+        ("csnum".into(), device.serial_number.as_bytes().to_vec()),
+        ("uidhmac".into(), account.uidhmac.as_bytes().to_vec()),
+        ("userid".into(), account.principal_id.to_string().into_bytes()),
+        ("action".into(), action.as_bytes().to_vec()),
+    ];
+    if title.media_type == 2 {
+        fields.push(("romid".into(), device.romid.as_deref().unwrap_or_default().as_bytes().to_vec()));
+    }
+    for (name, value) in extra {
+        fields.push(((*name).to_owned(), value.clone()));
+    }
+
+    Ok(NascJob {
+        body: nasc_form_body(&fields),
+        fpd_version: device.fpd_version,
+        certificate,
+        private_key,
+        service_key: None,
+        service_type: None,
+    })
+}
+
+fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), String> {
+    let mut child = Command::new("curl")
+        .args([
+            "--silent", "--show-error",
+            "--connect-timeout", "8", "--max-time", "25",
+            "--request", "POST",
+            "--header", "X-GameId: 0001DB00",
+            "--header", &format!("User-Agent: CTR FPD/{:04X}", job.fpd_version),
+            "--header", "Content-Type: application/x-www-form-urlencoded",
+            "--header", "Content-Type: application/x-www-form-urlencoded",
+            "--cert", job.certificate.to_string_lossy().as_ref(),
+            "--key", job.private_key.to_string_lossy().as_ref(),
+            "--data-binary", "@-",
+            "--write-out", "\n__MK7_NASC_HTTP__%{http_code}",
+            NASC_URL,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start NASC HTTPS request: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(job.body.as_bytes())
+            .map_err(|error| format!("could not write NASC request: {error}"))?;
+    }
+    let output = child.wait_with_output()
+        .map_err(|error| format!("could not read NASC response: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            format!("NASC HTTPS client failed ({})", output.status)
+        } else {
+            detail
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (body, status) = stdout.rsplit_once(NASC_HTTP_MARKER)
+        .ok_or_else(|| "NASC HTTPS response omitted its HTTP status".to_owned())?;
+    let status = status.trim().parse::<u32>()
+        .map_err(|_| "NASC HTTPS response contained an invalid HTTP status".to_owned())?;
+    let fields = parse_nasc_form(body)
+        .ok_or_else(|| "NASC returned a malformed custom-base64 form response".to_owned())?;
+    Ok((status, fields))
+}
+
+fn parse_return_code(fields: &BTreeMap<String, String>) -> u32 {
+    fields.get("returncd").and_then(|value| value.parse::<u32>().ok()).unwrap_or(u32::MAX)
+}
+
+fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthenticationData {
+    let mut data = GameAuthenticationData {
+        nasc_result: parse_return_code(fields),
+        http_status: status,
+        ..GameAuthenticationData::default()
+    };
+    if data.nasc_result == 1 {
+        if let Some(locator) = fields.get("locator") {
+            if let Some((host, port)) = locator.rsplit_once(':') {
+                if let Ok(port) = port.parse::<u16>() {
+                    data.server_address = fixed_string(host);
+                    data.server_port = port;
+                } else {
+                    data.nasc_result = u32::MAX;
+                }
+            } else {
+                data.nasc_result = u32::MAX;
+            }
+        }
+        if let Some(token) = fields.get("token") {
+            data.token = fixed_string(token);
+        }
+        data.server_time = server_time(fields.get("datetime"));
+    }
+    data
+}
+
+fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> ServiceLocatorData {
+    let mut data = ServiceLocatorData {
+        nasc_result: parse_return_code(fields),
+        http_status: status,
+        ..ServiceLocatorData::default()
+    };
+    if data.nasc_result == 7 {
+        if let Some(host) = fields.get("svchost") {
+            data.service_host = fixed_string(host);
+        }
+        if let Some(token) = fields.get("servicetoken") {
+            data.service_token = fixed_string(token);
+        }
+        data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
+        data.server_time = server_time(fields.get("datetime"));
+    }
+    data
+}
+
+fn static_output(system: &mut System, buffer: &CommandBuffer, command: u16, bytes: &[u8]) {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
+    if capacity < bytes.len() as u32 {
+        buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+        return;
+    }
+    system.memory.write_bytes(pointer, bytes);
+    buffer.reply(&mut system.memory, command, &[]);
+}
+
+fn start_game_auth(
+    system: &mut System,
+    server_id: u32,
+    ingamesn: &[u8],
+    event: ObjectId,
+) -> Result<PendingNasc<GameAuthenticationData>, String> {
+    if server_id != MK7_NEX_SERVER_ID {
+        return Err(format!("unexpected NEX server ID 0x{server_id:08X} for Mario Kart 7"));
+    }
+    repair_uidhmac_if_enabled(system)?;
+    let account = load_friend_account(system).ok_or_else(|| "no valid imported Friends account is available".to_owned())?;
+    let data_dir = system.config.data_dir.as_ref().ok_or_else(|| "application data directory is unavailable".to_owned())?;
+    let device: NascDeviceConfig = serde_json::from_slice(
+        &std::fs::read(data_dir.join("sysdata/nasc.json"))
+            .map_err(|error| format!("could not read sysdata/nasc.json: {error}"))?
+    ).map_err(|error| format!("sysdata/nasc.json is invalid: {error}"))?;
+    let fcdcert = std::fs::read(data_dir.join("sysdata/LocalFriendCodeSeed_B"))
+        .map_err(|error| format!("could not read sysdata/LocalFriendCodeSeed_B: {error}"))?;
+    let mut extra = Vec::new();
+    let end = ingamesn.chunks_exact(2).position(|pair| pair == [0, 0]).map_or(ingamesn.len(), |i| i * 2);
+    if end > 0 {
+        extra.push(("ingamesn", ingamesn[..end].to_vec()));
+    } else {
+        extra.push(("ingamesn", Vec::new()));
+    }
+    let job = make_nasc_job(system, &account, &device, &fcdcert, "LOGIN", &extra)?;
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let result = perform_nasc_http(job).map(|(status, fields)| parse_game_auth(&fields, status));
+        let _ = send.send(result);
+    });
+    Ok(PendingNasc { receiver: receive, event })
+}
+
+fn start_service_locator(
+    system: &mut System,
+    server_id: u32,
+    key_hash: &str,
+    service_type: &str,
+    event: ObjectId,
+) -> Result<PendingNasc<ServiceLocatorData>, String> {
+    if server_id != MK7_NEX_SERVER_ID {
+        return Err(format!("unexpected NEX server ID 0x{server_id:08X} for Mario Kart 7"));
+    }
+    repair_uidhmac_if_enabled(system)?;
+    let account = load_friend_account(system).ok_or_else(|| "no valid imported Friends account is available".to_owned())?;
+    let data_dir = system.config.data_dir.as_ref().ok_or_else(|| "application data directory is unavailable".to_owned())?;
+    let device: NascDeviceConfig = serde_json::from_slice(
+        &std::fs::read(data_dir.join("sysdata/nasc.json"))
+            .map_err(|error| format!("could not read sysdata/nasc.json: {error}"))?
+    ).map_err(|error| format!("sysdata/nasc.json is invalid: {error}"))?;
+    let fcdcert = std::fs::read(data_dir.join("sysdata/LocalFriendCodeSeed_B"))
+        .map_err(|error| format!("could not read sysdata/LocalFriendCodeSeed_B: {error}"))?;
+    let extra = [
+        ("keyhash", key_hash.as_bytes().to_vec()),
+        ("svc", service_type.as_bytes().to_vec()),
+    ];
+    let job = make_nasc_job(system, &account, &device, &fcdcert, "SVCLOC", &extra)?;
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let result = perform_nasc_http(job).map(|(status, fields)| parse_service_locator(&fields, status));
+        let _ = send.send(result);
+    });
+    Ok(PendingNasc { receiver: receive, event })
 }
 
 /// Local FRD state. The server-side friends service still needs a successful
@@ -239,6 +668,70 @@ pub struct FrdState {
     #[serde(skip)]
     logged_in: bool,
     last_response_result: u32,
+    #[serde(skip)]
+    pending_game: Option<PendingNasc<GameAuthenticationData>>,
+    #[serde(skip)]
+    pending_service: Option<PendingNasc<ServiceLocatorData>>,
+    #[serde(default)]
+    game_authentication: Option<GameAuthenticationData>,
+    #[serde(default)]
+    service_locator: Option<ServiceLocatorData>,
+}
+
+/// Polls asynchronous NASC work on the emulation thread and signals the
+/// original guest completion events when responses are ready.
+pub fn poll(system: &mut System) {
+    let game_ready = system.services.frd.pending_game.as_ref().and_then(|pending| {
+        match pending.receiver.try_recv() {
+            Ok(result) => Some((pending.event, result)),
+            Err(mpsc::TryRecvError::Disconnected) => Some((pending.event, Err("NASC worker stopped".to_owned()))),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    });
+    if let Some((event, result)) = game_ready {
+        system.services.frd.pending_game = None;
+        match result {
+            Ok(data) => {
+                system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.game_authentication = Some(data);
+            }
+            Err(error) => {
+                log::warn!("frd:u NASC LOGIN failed: {error}");
+                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                system.services.frd.game_authentication = Some(GameAuthenticationData {
+                    nasc_result: u32::MAX,
+                    ..GameAuthenticationData::default()
+                });
+            }
+        }
+        system.kernel.signal_event(event);
+    }
+
+    let service_ready = system.services.frd.pending_service.as_ref().and_then(|pending| {
+        match pending.receiver.try_recv() {
+            Ok(result) => Some((pending.event, result)),
+            Err(mpsc::TryRecvError::Disconnected) => Some((pending.event, Err("NASC worker stopped".to_owned()))),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    });
+    if let Some((event, result)) = service_ready {
+        system.services.frd.pending_service = None;
+        match result {
+            Ok(data) => {
+                system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.service_locator = Some(data);
+            }
+            Err(error) => {
+                log::warn!("frd:u NASC SVCLOC failed: {error}");
+                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                system.services.frd.service_locator = Some(ServiceLocatorData {
+                    nasc_result: u32::MAX,
+                    ..ServiceLocatorData::default()
+                });
+            }
+        }
+        system.kernel.signal_event(event);
+    }
 }
 
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
@@ -363,6 +856,152 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0012..=0x001A => buffer.reply(&mut system.memory, command, &[]),
         // IsIncludedInFriendList
         0x001B => buffer.reply(&mut system.memory, command, &[0]),
+        // RequestGameAuthentication(server ID, UTF-16 in-game name, SDK version,
+        // process ID, completion event). The request runs off-thread and signals
+        // the event only after NASC has returned.
+        0x0028 => {
+            let server_id = buffer.get(&mut system.memory, 1);
+            let mut ingamesn = Vec::with_capacity(12);
+            for index in 2..8 {
+                ingamesn.extend_from_slice(&buffer.get(&mut system.memory, index).to_le_bytes());
+            }
+            let process_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 10));
+            let event_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 12));
+            let event_handle = match (process_descriptor, event_descriptor) {
+                (Descriptor::CurrentProcessId, Descriptor::Handles { count, .. }) if count > 0 => Some(buffer.get(&mut system.memory, 13)),
+                (_, Descriptor::Handles { count, .. }) if count > 0 => Some(buffer.get(&mut system.memory, 13)),
+                _ => None,
+            };
+            let event = event_handle.and_then(|handle| system.kernel.handles.resolve(handle));
+            match event {
+                Some(event) if system.services.frd.pending_game.is_none() => {
+                    match start_game_auth(system, server_id, &ingamesn, event) {
+                        Ok(pending) => {
+                            system.services.frd.game_authentication = None;
+                            system.services.frd.pending_game = Some(pending);
+                            system.services.frd.last_response_result = 0;
+                            buffer.reply(&mut system.memory, command, &[]);
+                        }
+                        Err(error) => {
+                            log::warn!("frd:u NASC LOGIN could not start: {error}");
+                            system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                            buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+                        }
+                    }
+                }
+                _ => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+            }
+        }
+        // GetGameAuthenticationData writes the 0x138-byte response structure
+        // into static buffer slot 0.
+        0x0029 => {
+            match &system.services.frd.game_authentication {
+                Some(data) => {
+                    let mut bytes = vec![0u8; 0x138];
+                    bytes[0x00..0x04].copy_from_slice(&data.nasc_result.to_le_bytes());
+                    bytes[0x04..0x08].copy_from_slice(&data.http_status.to_le_bytes());
+                    bytes[0x08..0x28].copy_from_slice(&data.server_address);
+                    bytes[0x28..0x2A].copy_from_slice(&data.server_port.to_le_bytes());
+                    bytes[0x30..0x130].copy_from_slice(&data.token);
+                    bytes[0x130..0x138].copy_from_slice(&data.server_time.to_le_bytes());
+                    static_output(system, buffer, command, &bytes);
+                }
+                None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+            }
+        }
+        // RequestServiceLocator(server ID, keyhash, service type, SDK version,
+        // process ID, completion event).
+        0x002A => {
+            let server_id = buffer.get(&mut system.memory, 1);
+            let key_words = [
+                buffer.get(&mut system.memory, 2),
+                buffer.get(&mut system.memory, 3),
+                buffer.get(&mut system.memory, 4),
+            ];
+            let mut key_bytes = Vec::new();
+            for word in key_words { key_bytes.extend_from_slice(&word.to_le_bytes()); }
+            let key_end = key_bytes.iter().position(|byte| *byte == 0).unwrap_or(8).min(8);
+            let key_hash = String::from_utf8_lossy(&key_bytes[..key_end]).to_string();
+
+            let service_words = [buffer.get(&mut system.memory, 5), buffer.get(&mut system.memory, 6)];
+            let mut service_bytes = Vec::new();
+            for word in service_words { service_bytes.extend_from_slice(&word.to_le_bytes()); }
+            let service_end = service_bytes.iter().position(|byte| *byte == 0).unwrap_or(4).min(4);
+            let service_type = String::from_utf8_lossy(&service_bytes[..service_end]).to_string();
+
+            let process_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 9));
+            let event_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 11));
+            let event_handle = match (process_descriptor, event_descriptor) {
+                (Descriptor::CurrentProcessId, Descriptor::Handles { count, .. }) if count > 0 => Some(buffer.get(&mut system.memory, 12)),
+                (_, Descriptor::Handles { count, .. }) if count > 0 => Some(buffer.get(&mut system.memory, 12)),
+                _ => None,
+            };
+            let event = event_handle.and_then(|handle| system.kernel.handles.resolve(handle));
+            match event {
+                Some(event) if system.services.frd.pending_service.is_none() => {
+                    match start_service_locator(system, server_id, &key_hash, &service_type, event) {
+                        Ok(pending) => {
+                            system.services.frd.service_locator = None;
+                            system.services.frd.pending_service = Some(pending);
+                            system.services.frd.last_response_result = 0;
+                            buffer.reply(&mut system.memory, command, &[]);
+                        }
+                        Err(error) => {
+                            log::warn!("frd:u NASC SVCLOC could not start: {error}");
+                            system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                            buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+                        }
+                    }
+                }
+                _ => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+            }
+        }
+        // GetServiceLocatorData writes the 0x198-byte response structure into
+        // static buffer slot 0.
+        0x002B => {
+            match &system.services.frd.service_locator {
+                Some(data) => {
+                    let mut bytes = vec![0u8; 0x198];
+                    bytes[0x00..0x04].copy_from_slice(&data.nasc_result.to_le_bytes());
+                    bytes[0x04..0x08].copy_from_slice(&data.http_status.to_le_bytes());
+                    bytes[0x08..0x88].copy_from_slice(&data.service_host);
+                    bytes[0x88..0x188].copy_from_slice(&data.service_token);
+                    bytes[0x188] = data.status_data;
+                    bytes[0x190..0x198].copy_from_slice(&data.server_time.to_le_bytes());
+                    static_output(system, buffer, command, &bytes);
+                }
+                None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+            }
+        }
+        // DetectNatProperties completes with unknown mapping/filtering until
+        // a real STUN implementation supplies measured values.
+        0x002C => {
+            let descriptor = Descriptor::parse(buffer.get(&mut system.memory, 1));
+            let handle = match descriptor {
+                Descriptor::Handles { count, .. } if count > 0 => Some(buffer.get(&mut system.memory, 2)),
+                _ => None,
+            };
+            if let Some(event) = handle.and_then(|handle| system.kernel.handles.resolve(handle)) {
+                system.kernel.signal_event(event);
+                buffer.reply(&mut system.memory, command, &[]);
+            } else {
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            }
+        }
+        // GetNatProperties: unknown until the host has completed a real STUN
+        // classification. Never claim endpoint-independent NAT by default.
+        0x002D => buffer.reply(&mut system.memory, command, &[0, 0]),
+        // GetServerTypes: bytes from the imported Friends account.
+        0x0030 => {
+            match load_friend_account(system) {
+                Some(account) => buffer.reply(&mut system.memory, command, &[
+                    account.nasc_environment as u32,
+                    account.server_type as u32,
+                    account.server_type_number as u32,
+                ]),
+                None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+            }
+        }
         // GetLastResponseResult, what the last request to the servers got
         0x0023 => {
             let result = if system.services.frd.logged_in {
@@ -413,6 +1052,22 @@ mod tests {
         assert_eq!(account.nasc_environment, 1);
         assert_eq!(account.server_type, b'M');
         assert_eq!(account.server_type_number, b'K');
+    }
+
+    #[test]
+    fn nasc_custom_base64_uses_the_nintendo_alphabet_and_round_trips() {
+        assert_eq!(nasc_base64_encode(b"0001DB00"), "MDAxREIwMA**");
+        assert_eq!(nasc_base64_decode("MDAxREIwMA**").unwrap(), b"0001DB00");
+        assert_eq!(nasc_base64_encode(b"+/="), "Ky89");
+        assert_eq!(nasc_base64_decode("Ky89").unwrap(), b"+/=");
+    }
+
+    #[test]
+    fn nasc_response_decodes_form_and_custom_base64_fields() {
+        let fields = parse_nasc_form("returncd=MDAx&locator=MTI3LjAuMC4xOjQwNDA*&token=YWJj*") .unwrap();
+        assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
+        assert_eq!(fields.get("locator").map(String::as_str), Some("127.0.0.1:4040"));
+        assert_eq!(fields.get("token").map(String::as_str), Some("abc"));
     }
 
     #[test]

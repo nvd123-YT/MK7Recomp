@@ -127,6 +127,8 @@ pub struct Title {
     /// offset of the CXI inside the image.
     ncch_offset: u64,
     pub ncch: NcchHeader,
+    /// source container: 0 = executable/system, 1 = digital CIA, 2 = cartridge NCSD.
+    pub media_type: u8,
     pub exheader: ExHeader,
     /// Whether this title's own NCCH .code entry is BLZ-compressed.
     /// Kept separately because `exheader` is replaced by an installed update.
@@ -163,7 +165,7 @@ impl Update {
         if content.encrypted() {
             return Err(FsError::EncryptedCia);
         }
-        let title = Title::from_image(image, offset)?;
+        let title = Title::from_image(image, offset, 1)?;
         Ok(Update { title, title_id: cia.title_id, version: cia.version })
     }
 }
@@ -218,28 +220,28 @@ impl Title {
         let image = Arc::new(RomImage::open(path)?);
         let data = image.data();
 
-        let ncch_offset = if Ncsd::detect(data) {
+        let (ncch_offset, media_type) = if Ncsd::detect(data) {
             let ncsd = Ncsd::parse(data)?;
             log::info!(
                 "NCSD cartridge, media id {:016X}, image size {} MiB",
                 ncsd.media_id,
                 ncsd.image_size / (1024 * 1024)
             );
-            ncsd.executable_partition()?.offset
+            (ncsd.executable_partition()?.offset, 2)
         } else if Cia::detect(data) {
             let cia = Cia::parse(data)?;
             log::info!("CIA archive, title {:016X}", cia.title_id);
-            cia.executable().ok_or(FsError::NoExecutablePartition)?.0
+            (cia.executable().ok_or(FsError::NoExecutablePartition)?.0, 1)
         } else if NcchHeader::detect(data) {
-            0
+            (0, 0)
         } else {
             return Err(FsError::UnknownFormat);
         };
-        Title::from_image(image, ncch_offset)
+        Title::from_image(image, ncch_offset, media_type)
     }
 
     /// the title whose NCCH is at ncch_offset in image.
-    fn from_image(image: Arc<RomImage>, ncch_offset: u64) -> Result<Title, FsError> {
+    fn from_image(image: Arc<RomImage>, ncch_offset: u64, media_type: u8) -> Result<Title, FsError> {
         let data = image.data();
         let ncch_data = data.get(ncch_offset as usize..).ok_or(FsError::NoExecutablePartition)?;
         let ncch = NcchHeader::parse(ncch_data)?;
@@ -269,6 +271,7 @@ impl Title {
             image,
             ncch_offset,
             ncch,
+            media_type,
             exheader,
             base_code_compressed,
             exefs,
