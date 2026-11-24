@@ -842,13 +842,10 @@ fn start_game_auth(
     ).map_err(|error| format!("sysdata/nasc.json is invalid: {error}"))?;
     let fcdcert = std::fs::read(data_dir.join("sysdata/LocalFriendCodeSeed_B"))
         .map_err(|error| format!("could not read sysdata/LocalFriendCodeSeed_B: {error}"))?;
-    let mut extra = Vec::new();
-    let end = ingamesn.chunks_exact(2).position(|pair| pair == [0, 0]).map_or(ingamesn.len(), |i| i * 2);
-    if end > 0 {
-        extra.push(("ingamesn", ingamesn[..end].to_vec()));
-    } else {
-        extra.push(("ingamesn", Vec::new()));
-    }
+    // libctru's NASC_INGAMESN_LEN is 12 UTF-16 units: 11 characters
+    // followed by a NUL. Preserve all 24 bytes from the FRD IPC command,
+    // including its terminator and zero padding.
+    let extra = vec![("ingamesn", ingamesn.to_vec())];
     let job = make_nasc_job(
         system, &account, &device, &fcdcert, "LOGIN", sdk_major, sdk_minor, &extra
     )?;
@@ -1461,6 +1458,16 @@ mod tests {
         assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
         assert_eq!(fields.get("locator").map(String::as_str), Some("127.0.0.1:4040"));
         assert_eq!(fields.get("token").map(String::as_str), Some("abc"));
+    }
+
+    #[test]
+    fn frd_ingame_nickname_keeps_the_fixed_24_byte_utf16_buffer() {
+        let mut ingamesn = vec![0u8; 24];
+        ingamesn[0..4].copy_from_slice(&[b'M', 0, b'K', 0]);
+        assert_eq!(ingamesn.len(), 12 * 2);
+        assert_eq!(&ingamesn[4..6], &[0, 0]);
+        // NASC form values carry the full fixed array, not just "MK".
+        assert_eq!(nasc_base64_decode(&nasc_base64_encode(&ingamesn)).unwrap(), ingamesn);
     }
 
     #[test]
