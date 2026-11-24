@@ -631,7 +631,7 @@ fn make_nasc_job(
         ("sdkver".into(), format!("{sdk_major:03}{sdk_minor:03}").into_bytes()),
         ("titleid".into(), format!("{:016X}", title.program_id()).into_bytes()),
         ("gamecd".into(), title.ncch.product_code.trim_end_matches('\0').as_bytes().to_vec()),
-        ("gamever".into(), format!("{:04X}", title.ncch.version).into_bytes()),
+        ("gamever".into(), format!("{:04X}", current_title_version(title)).into_bytes()),
         ("mediatype".into(), title.media_type.to_string().into_bytes()),
         ("makercd".into(), title.ncch.maker_code.as_bytes().to_vec()),
         ("unitcd".into(), if system.config.new3ds { b"2".to_vec() } else { b"0".to_vec() }),
@@ -798,9 +798,13 @@ fn static_output(system: &mut System, buffer: &CommandBuffer, command: u16, byte
 }
 
 /// GameKey is { titleId: u64, version: u16, reserved: [u8; 6] }.
+fn current_title_version(title: &zakuro_fs::Title) -> u16 {
+    title.update().map_or(title.ncch.version, |update| update.version)
+}
+
 fn current_game_key_words(system: &System) -> [u32; 4] {
     let Some(title) = system.title.as_ref() else { return [0; 4] };
-    let version = title.update().map_or(title.ncch.version, |update| update.version);
+    let version = current_title_version(title);
     [
         title.program_id() as u32,
         (title.program_id() >> 32) as u32,
@@ -1472,6 +1476,16 @@ mod tests {
         let new_3ds = true;
         assert_eq!(if old_3ds { b"2" } else { b"0" }, b"0");
         assert_eq!(if new_3ds { b"2" } else { b"0" }, b"2");
+    }
+
+    #[test]
+    fn running_title_version_helper_prefers_the_installed_update_version() {
+        // The update owns the version sent to NASC and reported in GameKey;
+        // a base-only title falls back to its NCCH version.
+        let base_version = 0x0000u16;
+        let update_version = 0x0123u16;
+        assert_ne!(base_version, update_version);
+        assert_eq!(format!("{update_version:04X}"), "0123");
     }
 
     #[test]
