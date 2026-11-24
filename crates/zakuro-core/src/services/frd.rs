@@ -591,7 +591,7 @@ fn detect_nat_properties(servers: Vec<String>) -> (u32, u32, u32) {
         Ok(socket) => socket,
         Err(error) => {
             log::warn!("FRD NAT probe could not create a UDP socket: {error}");
-            return (0, 0);
+            return (0, 0, 0);
         }
     };
 
