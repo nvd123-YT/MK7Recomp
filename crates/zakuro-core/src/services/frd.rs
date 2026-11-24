@@ -634,12 +634,16 @@ fn make_nasc_job(
         ("gamever".into(), format!("{:04X}", title.ncch.version).into_bytes()),
         ("mediatype".into(), title.media_type.to_string().into_bytes()),
         ("makercd".into(), title.ncch.maker_code.as_bytes().to_vec()),
-        ("unitcd".into(), b"2".to_vec()),
+        ("unitcd".into(), if system.config.new3ds { b"2".to_vec() } else { b"0".to_vec() }),
         ("macadr".into(), mac.into_bytes()),
         ("bssid".into(), bssid.into_bytes()),
         ("apinfo".into(), device.apinfo.as_bytes().to_vec()),
         ("fcdcert".into(), fcdcert.to_vec()),
-        ("devname".into(), device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect()),
+        ("devname".into(), {
+            let mut name: Vec<u8> = device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            name.extend_from_slice(&[0, 0]);
+            name
+        }),
         ("servertype".into(), format!("{}{}", account.server_type as char, account.server_type_number as char).into_bytes()),
         ("fpdver".into(), format!("{:04X}", device.fpd_version).into_bytes()),
         ("devtime".into(), chrono::Utc::now().format("%y%m%d%H%M%S").to_string().into_bytes()),
@@ -725,6 +729,10 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
         ..GameAuthenticationData::default()
     };
     if data.nasc_result == 1 {
+        if !(200..300).contains(&status) {
+            data.nasc_result = u32::MAX;
+            return data;
+        }
         let endpoint = fields.get("locator").and_then(|locator| {
             let (host, port) = locator.rsplit_once(':')?;
             let port = port.parse::<u16>().ok()?;
@@ -754,6 +762,10 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
         ..ServiceLocatorData::default()
     };
     if data.nasc_result == 7 {
+        if !(200..300).contains(&status) {
+            data.nasc_result = u32::MAX;
+            return data;
+        }
         let host = fields.get("svchost");
         let token = fields.get("servicetoken");
         let timestamp = server_time(fields.get("datetime"));
@@ -1398,6 +1410,36 @@ mod tests {
         assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
         assert_eq!(fields.get("locator").map(String::as_str), Some("127.0.0.1:4040"));
         assert_eq!(fields.get("token").map(String::as_str), Some("abc"));
+    }
+
+    #[test]
+    fn device_name_is_encoded_as_nul_terminated_utf16le() {
+        let mut encoded: Vec<u8> = "N3DS".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]);
+        assert_eq!(encoded, [b'N', 0, b'3', 0, b'D', 0, b'S', 0, 0, 0]);
+    }
+
+    #[test]
+    fn nasc_unit_code_tracks_the_selected_console_model() {
+        let old_3ds = false;
+        let new_3ds = true;
+        assert_eq!(if old_3ds { b"2" } else { b"0" }, b"0");
+        assert_eq!(if new_3ds { b"2" } else { b"0" }, b"2");
+    }
+
+    #[test]
+    fn nasc_success_codes_are_not_accepted_with_http_failure_status() {
+        let mut fields = BTreeMap::new();
+        fields.insert("returncd".to_owned(), "001".to_owned());
+        fields.insert("locator".to_owned(), "127.0.0.1:4040".to_owned());
+        fields.insert("token".to_owned(), "token".to_owned());
+        fields.insert("datetime".to_owned(), "20261124100000".to_owned());
+        assert_eq!(parse_game_auth(&fields, 503).nasc_result, u32::MAX);
+
+        fields.insert("returncd".to_owned(), "007".to_owned());
+        fields.insert("svchost".to_owned(), "127.0.0.1".to_owned());
+        fields.insert("servicetoken".to_owned(), "token".to_owned());
+        assert_eq!(parse_service_locator(&fields, 503).nasc_result, u32::MAX);
     }
 
     #[test]
