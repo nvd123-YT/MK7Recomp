@@ -763,12 +763,21 @@ fn static_output(system: &mut System, buffer: &CommandBuffer, command: u16, byte
     buffer.reply(&mut system.memory, command, &[]);
 }
 
+fn require_pretendo_provider(system: &System) -> Result<(), String> {
+    if system.config.network_provider == NetworkProvider::Pretendo {
+        Ok(())
+    } else {
+        Err("Pretendo networking is disabled; select Pretendo in Online settings first".to_owned())
+    }
+}
+
 fn start_game_auth(
     system: &mut System,
     server_id: u32,
     ingamesn: &[u8],
     event: ObjectId,
 ) -> Result<PendingNasc<GameAuthenticationData>, String> {
+    require_pretendo_provider(system)?;
     if server_id != MK7_NEX_SERVER_ID {
         return Err(format!("unexpected NEX server ID 0x{server_id:08X} for Mario Kart 7"));
     }
@@ -822,6 +831,7 @@ fn start_service_locator(
     service_type: &str,
     event: ObjectId,
 ) -> Result<PendingNasc<ServiceLocatorData>, String> {
+    require_pretendo_provider(system)?;
     if server_id != MK7_NEX_SERVER_ID {
         return Err(format!("unexpected NEX server ID 0x{server_id:08X} for Mario Kart 7"));
     }
@@ -1358,6 +1368,12 @@ mod tests {
     #[test]
     fn repair_form_encoding_is_safe_for_password_characters() {
         assert_eq!(form_encode_component("a b&c"), "a+b%26c");
+    }
+
+    #[test]
+    fn nasс_requests_are_blocked_when_network_provider_is_off() {
+        let (system, _) = crate::services::tests::system_with_thread();
+        assert!(require_pretendo_provider(&system).is_err());
     }
 
     #[test]
