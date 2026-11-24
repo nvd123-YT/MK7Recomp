@@ -174,7 +174,7 @@
     {
       "id": "open_online_data",
       "label": "Open online data",
-      "help": "For NASC/FRD, place your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json here. Device name is UTF-16LE without a NUL terminator; unit code is 2 for both 3DS models. Cartridge images require a 17-byte ROM ID as 34 hex digits in romid_hex. Private files are never bundled.",
+      "help": "For NASC/FRD, place your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json here. Device name is UTF-16LE without a NUL terminator; unit code is 2 for both 3DS models; NASC sdkver is always 000000. Cartridge images require a 17-byte ROM ID as 34 hex digits in romid_hex. Private files are never bundled.",
       "open": "online_data"
     },
     {

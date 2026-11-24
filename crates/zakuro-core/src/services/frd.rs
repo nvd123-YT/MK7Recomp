@@ -350,6 +350,10 @@ fn nasc_device_name_bytes(value: &str) -> Vec<u8> {
     value.encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 
+fn nasc_sdk_version() -> &'static [u8] {
+    b"000000"
+}
+
 fn nasc_unit_code() -> &'static [u8] {
     // The 3DS platform code is 2 for both Old and New 3DS models.
     b"2"
@@ -702,7 +706,9 @@ fn make_nasc_job(
 
     let mut fields: Vec<(String, Vec<u8>)> = vec![
         ("gameid".into(), format!("{MK7_NEX_SERVER_ID:08X}").into_bytes()),
-        ("sdkver".into(), format!("{sdk_major:03}{sdk_minor:03}").into_bytes()),
+        // The 3DS NASC wire protocol specifies 000000 for sdkver, independent
+        // of the SDK version words supplied to FRD_RequestGameAuthentication.
+        ("sdkver".into(), nasc_sdk_version().to_vec()),
         ("titleid".into(), format!("{:016X}", title.program_id()).into_bytes()),
         ("gamecd".into(), title.ncch.product_code.trim_end_matches('\0').as_bytes().to_vec()),
         ("gamever".into(), format!("{:04X}", current_title_version(title)).into_bytes()),
@@ -1561,6 +1567,11 @@ mod tests {
         );
         let other_transaction = [0x22u8; 12];
         assert_eq!(parse_stun_response(&packet, &other_transaction), None);
+    }
+
+    #[test]
+    fn nascrequest_sdk_version_is_the_protocol_constant() {
+        assert_eq!(nasc_sdk_version(), b"000000");
     }
 
     #[test]
