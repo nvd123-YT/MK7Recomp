@@ -940,6 +940,11 @@ fn get_addr_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
     let node_length = buffer.get(&mut system.memory, 1) as usize;
     let service_length = buffer.get(&mut system.memory, 2) as usize;
     let hints_length = buffer.get(&mut system.memory, 3) as usize;
+    // POSIX/libctru returns EAI_NONAME when both arguments are null.
+    if node_length == 0 && service_length == 0 {
+        reply_static(system, buffer, command, &[(-305i32) as u32, 0], &[]);
+        return;
+    }
     let output_size = (buffer.get(&mut system.memory, 4) as usize).min(0x10000);
     let node = c_string(read_static(system, buffer, 0, node_length.min(256)));
     let node_for_dns = rewrite_network_hostname(&node, system.config.network_provider);
@@ -960,12 +965,17 @@ fn get_addr_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
             for address in addresses {
                 let SocketAddr::V4(address) = address else { continue };
                 let mut info = vec![0; 0x130];
+                if hints.len() >= 4 {
+                    info[0..4].copy_from_slice(&hints[0..4]);
+                }
                 info[4..8].copy_from_slice(&AF_INET.to_le_bytes());
                 let resolved_type = if socktype != 0 { socktype } else if protocol == IPPROTO_TCP { SOCK_STREAM } else { SOCK_DGRAM };
                 let resolved_protocol = if protocol != 0 { protocol } else if resolved_type == SOCK_STREAM { IPPROTO_TCP } else { IPPROTO_UDP };
                 info[8..12].copy_from_slice(&resolved_type.to_le_bytes());
                 info[12..16].copy_from_slice(&resolved_protocol.to_le_bytes());
-                info[16..20].copy_from_slice(&8i32.to_le_bytes());
+                // The 3DS sockaddr is 8 bytes inside a 28-byte sockaddr_storage.
+                // libctru expands ai_addrlen to the host's 16-byte sockaddr_in.
+                info[16..20].copy_from_slice(&8u32.to_le_bytes());
                 info[276..304].copy_from_slice(&address_bytes(SocketAddr::V4(address)));
                 if output.len() + info.len() <= output_size { output.extend_from_slice(&info); }
                 count += 1;
@@ -1442,6 +1452,26 @@ mod tests {
     fn unsupported_socket_options_report_protocol_option_not_supported() {
         let mut udp = SocketEntry::new(HostSocket::UdpUnbound);
         assert_eq!(set_sock_opt(Some(&mut udp), 0xFFFF, 0x7777, &0i32.to_le_bytes()), -92);
+    }
+
+    #[test]
+    fn addrinfo_3ds_ipv4_record_has_libctru_storage_offsets() {
+        // 3DS addrinfo: flags/family/type/protocol/addrlen, canonname[256],
+        // then 28-byte sockaddr_storage. IPv4 fields use the 8-byte 3DS sock.
+        let mut info = vec![0; 0x130];
+        info[4..8].copy_from_slice(&AF_INET.to_le_bytes());
+        info[8..12].copy_from_slice(&SOCK_DGRAM.to_le_bytes());
+        info[12..16].copy_from_slice(&IPPROTO_UDP.to_le_bytes());
+        info[16..20].copy_from_slice(&8u32.to_le_bytes());
+        let address = address_bytes(SocketAddr::from((
+            Ipv4Addr::new(192, 0, 2, 10),
+            40460,
+        )));
+        assert_eq!(address.len(), 28);
+        info[276..304].copy_from_slice(&address);
+        assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), AF_INET);
+        assert_eq!(u32::from_le_bytes(info[16..20].try_into().unwrap()), 8);
+        assert_eq!(&info[276..284], &[8, 2, 0x9E, 0x2C, 192, 0, 2, 10]);
     }
 
     #[test]
