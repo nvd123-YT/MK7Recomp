@@ -634,16 +634,15 @@ fn make_nasc_job(
         ("gamever".into(), format!("{:04X}", current_title_version(title)).into_bytes()),
         ("mediatype".into(), title.media_type.to_string().into_bytes()),
         ("makercd".into(), title.ncch.maker_code.as_bytes().to_vec()),
-        ("unitcd".into(), if system.config.new3ds { b"2".to_vec() } else { b"0".to_vec() }),
+        // NASC unit code identifies the platform: both Old and New 3DS are 2.
+        ("unitcd".into(), b"2".to_vec()),
         ("macadr".into(), mac.into_bytes()),
         ("bssid".into(), bssid.into_bytes()),
         ("apinfo".into(), device.apinfo.as_bytes().to_vec()),
         ("fcdcert".into(), fcdcert.to_vec()),
-        ("devname".into(), {
-            let mut name: Vec<u8> = device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect();
-            name.extend_from_slice(&[0, 0]);
-            name
-        }),
+        // NASC encodes the exact device-name string as UTF-16LE; do not
+        // append a C-string terminator (the published sample is 20 bytes).
+        ("devname".into(), device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect()),
         ("servertype".into(), format!("{}{}", account.server_type as char, account.server_type_number as char).into_bytes()),
         ("fpdver".into(), format!("{:04X}", device.fpd_version).into_bytes()),
         ("devtime".into(), chrono::Utc::now().format("%y%m%d%H%M%S").to_string().into_bytes()),
@@ -1449,6 +1448,14 @@ mod tests {
         );
         let other_transaction = [0x22u8; 12];
         assert_eq!(parse_stun_response(&packet, &other_transaction), None);
+    }
+
+    #[test]
+    fn nascrequest_device_name_and_unit_code_match_published_3ds_example() {
+        let device_name: Vec<u8> = "helloworld".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(device_name.len(), 20);
+        assert_eq!(nasc_base64_encode(&device_name), "aABlAGwAbABvAHcAbwByAGwAZAA*");
+        assert_eq!(b"2", b"2"); // both Old and New 3DS use unitcd 2
     }
 
     #[test]
