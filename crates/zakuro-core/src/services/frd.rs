@@ -742,7 +742,8 @@ fn parse_game_auth(fields: &BTreeMap<String, String>, status: u32) -> GameAuthen
         let token = fields.get("token");
         let timestamp = server_time(fields.get("datetime"));
         match (endpoint, token, timestamp) {
-            (Some((host, port)), Some(token), timestamp) if timestamp != 0 => {
+            (Some((host, port)), Some(token), timestamp)
+                if timestamp != 0 && !token.is_empty() => {
                 data.server_address = fixed_string::<0x20>(host).to_vec();
                 data.server_port = port;
                 data.token = fixed_string::<0x100>(token).to_vec();
@@ -770,7 +771,8 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
         let token = fields.get("servicetoken");
         let timestamp = server_time(fields.get("datetime"));
         match (host, token, timestamp) {
-            (Some(host), Some(token), timestamp) if timestamp != 0 => {
+            (Some(host), Some(token), timestamp)
+                if timestamp != 0 && !host.is_empty() && !token.is_empty() => {
                 data.service_host = fixed_string::<0x80>(host).to_vec();
                 data.service_token = fixed_string::<0x100>(token).to_vec();
                 data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
@@ -1086,7 +1088,12 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0006 => buffer.reply(&mut system.memory, command, &[0; 3]),
         // GetMyProfile, region, country, area and language, then platform
         0x0007 => {
-            let country: u32 = if region == REGION_USA { 49 } else { 110 };
+            let country: u32 = match region {
+                crate::services::cfg::REGION_JAPAN => 1,
+                REGION_USA => 49,
+                crate::services::cfg::REGION_EUROPE => 110,
+                _ => 49,
+            };
             let first = region as u32 | country << 8 | (language as u32) << 24;
             buffer.reply(&mut system.memory, command, &[first, PLATFORM_CTR]);
         }
@@ -1469,6 +1476,39 @@ mod tests {
             (2024u64 << 26) | (2u64 << 22) | (9u64 << 17)
                 | (12u64 << 12) | (16u64 << 6) | 3u64
         );
+    }
+
+    #[test]
+    fn nasclogin_success_requires_nonempty_token() {
+        let mut fields = BTreeMap::new();
+        fields.insert("returncd".to_owned(), "001".to_owned());
+        fields.insert("locator".to_owned(), "127.0.0.1:4040".to_owned());
+        fields.insert("token".to_owned(), String::new());
+        fields.insert("datetime".to_owned(), "20261124100000".to_owned());
+        assert_eq!(parse_game_auth(&fields, 200).nasc_result, u32::MAX);
+    }
+
+    #[test]
+    fn nasc_service_locator_success_requires_nonempty_host_and_token() {
+        let mut fields = BTreeMap::new();
+        fields.insert("returncd".to_owned(), "007".to_owned());
+        fields.insert("svchost".to_owned(), String::new());
+        fields.insert("servicetoken".to_owned(), "token".to_owned());
+        fields.insert("datetime".to_owned(), "20261124100000".to_owned());
+        assert_eq!(parse_service_locator(&fields, 200).nasc_result, u32::MAX);
+    }
+
+    #[test]
+    fn japan_frd_profile_does_not_use_europe_country_code() {
+        let country_for = |region: u8| match region {
+            crate::services::cfg::REGION_JAPAN => 1u32,
+            REGION_USA => 49u32,
+            crate::services::cfg::REGION_EUROPE => 110u32,
+            _ => 49u32,
+        };
+        assert_eq!(country_for(crate::services::cfg::REGION_JAPAN), 1);
+        assert_eq!(country_for(REGION_USA), 49);
+        assert_eq!(country_for(crate::services::cfg::REGION_EUROPE), 110);
     }
 
     #[test]
