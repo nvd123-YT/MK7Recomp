@@ -999,6 +999,11 @@ fn get_sock_opt(entry: Option<&mut SocketEntry>, _level: u32, option: u32, lengt
     let Some(entry) = entry else { return (-8, Vec::new()) };
     entry.update();
     let value: i32 = match option {
+        // SO_BROADCAST is defined as zero by libctru for compatibility.
+        0x0000 => match &entry.socket {
+            HostSocket::Udp { socket, .. } => socket.broadcast().unwrap_or(false) as i32,
+            _ => 0,
+        },
         0x1008 => match entry.socket { HostSocket::Udp { .. } | HostSocket::UdpUnbound => SOCK_DGRAM as i32, _ => SOCK_STREAM as i32 },
         0x1009 => match entry.socket { HostSocket::TcpFailed(code) => -code, _ => 0 },
         _ => 0,
@@ -1010,6 +1015,14 @@ fn get_sock_opt(entry: Option<&mut SocketEntry>, _level: u32, option: u32, lengt
 fn set_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, value: &[u8]) -> i32 {
     let Some(entry) = entry else { return -8 };
     entry.update();
+    if level == 0xFFFF && option == 0x0000 {
+        // libctru exposes SO_BROADCAST as option 0.
+        let enabled = value.first().copied().unwrap_or(0) != 0;
+        if let HostSocket::Udp { socket, .. } = &entry.socket {
+            return socket.set_broadcast(enabled).map_or_else(|error| errno(&error), |_| 0);
+        }
+        return 0;
+    }
     if level == 0xFFFF && option == 0x0004 { return 0; } // SO_REUSEADDR
     if level == 0xFFFF && option == 0x1001 { return 0; } // SO_SNDBUF
     if level == 0xFFFF && option == 0x1002 { return 0; } // SO_RCVBUF
@@ -1163,6 +1176,10 @@ fn network_option(system: &System, level: u32, option: u32, length: usize) -> Ve
                 return Vec::new();
             };
             bytes[..6].copy_from_slice(&mac);
+        }
+        // NETOPT_IP_MTU, the IPv4 path's standard Ethernet MTU.
+        0x4004 if bytes.len() >= 4 => {
+            bytes[..4].copy_from_slice(&1500u32.to_le_bytes());
         }
         // SOC_CONFIG_IP_INFO: [IPv4, netmask, broadcast]. We can determine
         // the selected outbound address portably with std::net, but standard
@@ -1328,6 +1345,16 @@ mod tests {
         assert_eq!(parse_mac_address("02:11:22:33:44:55"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac_address("021122334455"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac_address("02:11:22:33:44"), None);
+    }
+
+    #[test]
+    fn udp_broadcast_option_is_applied_to_the_host_socket() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut entry = SocketEntry::new(HostSocket::Udp { socket, peer: None });
+        assert_eq!(set_sock_opt(Some(&mut entry), 0xFFFF, 0, &[1]), 0);
+        let (result, bytes) = get_sock_opt(Some(&mut entry), 0xFFFF, 0, 4);
+        assert_eq!(result, 0);
+        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), 1);
     }
 
     #[test]
