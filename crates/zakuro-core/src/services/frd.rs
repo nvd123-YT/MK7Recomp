@@ -1204,6 +1204,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // DetectNatProperties runs independent STUN mappings and an
         // alternate-source probe asynchronously, then signals the event.
         0x002C => {
+            if let Err(error) = require_pretendo_provider(system) {
+                log::debug!("frd:u skipping NAT probe: {error}");
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+                return true;
+            }
             let descriptor = Descriptor::parse(buffer.get(&mut system.memory, 1));
             let handle = match descriptor {
                 Descriptor::Handles { count, .. } if count > 0 => Some(buffer.get(&mut system.memory, 2)),
@@ -1219,9 +1224,15 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             }
         }
         // GetNatProperties only returns once the asynchronous probe finishes.
-        0x002D => match system.services.frd.nat_properties {
-            Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
-            None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+        0x002D => {
+            if require_pretendo_provider(system).is_err() {
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            } else {
+                match system.services.frd.nat_properties {
+                    Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
+                    None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+                }
+            }
         },
         // GetServerTimeDifference returns signed nanoseconds as a u64 pair.
         0x002E => {
@@ -1371,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn nasс_requests_are_blocked_when_network_provider_is_off() {
+    fn nasc_requests_are_blocked_when_network_provider_is_off() {
         let (system, _) = crate::services::tests::system_with_thread();
         assert!(require_pretendo_provider(&system).is_err());
     }
