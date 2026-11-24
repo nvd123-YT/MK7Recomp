@@ -906,9 +906,11 @@ fn poll(system: &mut System, buffer: &CommandBuffer, command: u16, count: usize,
 }
 
 fn host_by_name(name: &str) -> (i32, Vec<u8>) {
+    // libctru's hostent IPC buffer is 0x1A88 bytes:
+    //   +0x00 reserved, +0x04 u32 address count, +0x08 hostname[0x100],
+    //   +0x108 aliases[24][0x100], +0x1908 addresses[16][0x10].
+    // Its public hostent limits h_addr_list to 16 IPv4 results.
     let mut data = vec![0; 0x1A88];
-    data[0..2].copy_from_slice(&2u16.to_le_bytes());
-    data[2..4].copy_from_slice(&4u16.to_le_bytes());
     if name.is_empty() { return (-305, data); }
     let mut addresses = Vec::new();
     if let Ok(iter) = (name, 0u16).to_socket_addrs() {
@@ -919,13 +921,17 @@ fn host_by_name(name: &str) -> (i32, Vec<u8>) {
         }
     }
     if addresses.is_empty() { return (-305, data); }
-    data[4..6].copy_from_slice(&(addresses.len().min(24) as u16).to_le_bytes());
+
+    let count = addresses.len().min(16) as u32;
+    data[4..8].copy_from_slice(&count.to_le_bytes());
     let hostname = name.as_bytes();
     let host_length = hostname.len().min(255);
     data[8..8 + host_length].copy_from_slice(&hostname[..host_length]);
-    let start = 8 + 256 + 24 * 256;
-    for (index, address) in addresses.iter().take(24).enumerate() {
-        data[start + index * 16..start + index * 16 + 4].copy_from_slice(&address.octets());
+    // Byte 8 + hostname length remains NUL because the structure is zeroed.
+    const ADDRESS_LIST_OFFSET: usize = 0x1908;
+    for (index, address) in addresses.iter().take(count as usize).enumerate() {
+        let offset = ADDRESS_LIST_OFFSET + index * 16;
+        data[offset..offset + 4].copy_from_slice(&address.octets());
     }
     (0, data)
 }
@@ -1338,6 +1344,18 @@ mod tests {
 
         assert_eq!(read_static(&mut system, &buffer, 0, 4), b"DATA");
         assert_eq!(read_static(&mut system, &buffer, 1, 4), b"ADDR");
+    }
+
+    #[test]
+    fn hostent_buffer_matches_libctru_offsets_and_ipv4_address_records() {
+        let (error, data) = host_by_name("127.0.0.1");
+        assert_eq!(error, 0);
+        assert_eq!(data.len(), 0x1A88);
+        let count = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        assert_eq!(count, 1);
+        assert_eq!(&data[8..17], b"127.0.0.1");
+        assert_eq!(&data[0x1908..0x190C], &[127, 0, 0, 1]);
+        assert!(data[0..4].iter().all(|byte| *byte == 0));
     }
 
     #[test]
