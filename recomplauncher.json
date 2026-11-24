@@ -174,7 +174,7 @@
     {
       "id": "open_online_data",
       "label": "Open online data",
-      "help": "For NASC/FRD, add your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json. Cartridge images require the exact 17-byte ROM ID as 34 hex digits in romid_hex. Device name, serial, MAC/BSSID, AP info and FPD version must match your own console. Private files are never bundled.",
+      "help": "For NASC/FRD, place your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json here. Device name is UTF-16LE without a NUL terminator; unit code is 2 for both 3DS models. Cartridge images require a 17-byte ROM ID as 34 hex digits in romid_hex. Private files are never bundled.",
       "open": "online_data"
     },
     {
@@ -787,7 +787,7 @@
       "id": "network_provider",
       "label": "Network provider",
       "group": "Online",
-      "help": "Pretendo enables guest DNS/HTTP endpoint routing and local AC/FRD connection events. A separate, opt-in UID-HMAC repair setting can send the imported Friends account PrincipalID and NEX password to Pretendo over HTTPS. Actual online races remain unverified.",
+      "help": "Pretendo mode enables guest DNS/UDP/TCP routing, HTTP requests, FRD NASC LOGIN/SVCLOC and measured NAT data. Full NEX authentication, matchmaking, peer traversal and a live race remain experimental and have not been end-to-end tested.",
       "choices": [
         {
           "label": "Off",

@@ -240,7 +240,7 @@ fn reply_static_bytes(
     }
 }
 
-/// The fixed-size FRD response structures, written into the guest's static buffer.
+/// FRD responses are cached here as byte vectors and emitted at the exact packed 3DS structure sizes.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct GameAuthenticationData {
     nasc_result: u32,
