@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn cartridge_romid_is_decoded_from_hex_to_the_17_byte_binary_value() {
-        let hex = "2892774E7B2B770D2A647D146505FE5438";
+        let hex = "2892774E7B2B770D2A647D146505FF5438";
         let bytes = decode_hex_bytes(hex).unwrap();
         assert_eq!(bytes.len(), 17);
         assert_eq!(nasc_base64_encode(&bytes), "KJJ3Tnsrdw0qZH0UZQX-VDg*");
