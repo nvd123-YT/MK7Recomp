@@ -800,10 +800,11 @@ fn static_output(system: &mut System, buffer: &CommandBuffer, command: u16, byte
 /// GameKey is { titleId: u64, version: u16, reserved: [u8; 6] }.
 fn current_game_key_words(system: &System) -> [u32; 4] {
     let Some(title) = system.title.as_ref() else { return [0; 4] };
+    let version = title.update().map_or(title.ncch.version, |update| update.version);
     [
         title.program_id() as u32,
         (title.program_id() >> 32) as u32,
-        title.ncch.version as u32,
+        version as u32,
         0,
     ]
 }
