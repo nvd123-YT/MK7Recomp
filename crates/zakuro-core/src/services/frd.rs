@@ -1242,13 +1242,16 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             ];
             let mut key_bytes = Vec::new();
             for word in key_words { key_bytes.extend_from_slice(&word.to_le_bytes()); }
-            let key_end = key_bytes.iter().position(|byte| *byte == 0).unwrap_or(12).min(12);
+            // libctru NASC_KEYHASH_LEN is 8 characters plus NUL (9 bytes),
+            // even though IPC reserves three u32 words for this field.
+            let key_end = key_bytes.iter().position(|byte| *byte == 0).unwrap_or(9).min(9);
             let key_hash = String::from_utf8_lossy(&key_bytes[..key_end]).to_string();
 
             let service_words = [buffer.get(&mut system.memory, 5), buffer.get(&mut system.memory, 6)];
             let mut service_bytes = Vec::new();
             for word in service_words { service_bytes.extend_from_slice(&word.to_le_bytes()); }
-            let service_end = service_bytes.iter().position(|byte| *byte == 0).unwrap_or(4).min(4);
+            // libctru NASC_SVC_LEN is 4 characters plus NUL (5 bytes).
+            let service_end = service_bytes.iter().position(|byte| *byte == 0).unwrap_or(5).min(5);
             let service_type = String::from_utf8_lossy(&service_bytes[..service_end]).to_string();
 
             let process_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 9));
@@ -1596,11 +1599,18 @@ mod tests {
     }
 
     #[test]
-    fn nasc_keyhash_parser_preserves_all_twelve_bytes() {
-        let bytes = *b"123456789012";
-        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(12).min(12);
-        assert_eq!(end, 12);
-        assert_eq!(&bytes[..end], b"123456789012");
+    fn frd_nasc_keyhash_and_service_fields_match_libctru_lengths() {
+        // The IPC reserves 12 bytes for keyhash, but the SDK sends max 8 ASCII
+        // characters plus a NUL. NASC_SVC_LEN is max 4 characters plus NUL.
+        let key = *b"12345678\0XYZ";
+        let key_end = key.iter().position(|byte| *byte == 0).unwrap_or(9).min(9);
+        assert_eq!(&key[..key_end], b"12345678");
+        let service = *b"RV4\0XABC";
+        let service_end = service.iter().position(|byte| *byte == 0).unwrap_or(5).min(5);
+        assert_eq!(&service[..service_end], b"RV4");
+        let full_key = *b"123456789012";
+        assert_eq!(full_key.len(), 12);
+        assert_eq!(full_key[..9], *b"123456789");
     }
 
     #[test]
