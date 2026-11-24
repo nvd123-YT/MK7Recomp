@@ -1300,6 +1300,30 @@ mod tests {
     }
 
     #[test]
+    fn static_buffer_reads_use_translate_order_not_embedded_slot_id() {
+        let (mut system, buffer) = crate::services::tests::system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let page = tls & !0xFFF;
+        let payload_pointer = page + 0x800;
+        let address_pointer = page + 0x900;
+        system.memory.write_bytes(payload_pointer, b"DATA");
+        system.memory.write_bytes(address_pointer, b"ADDR");
+
+        // SendToSingle: PID descriptor, payload static descriptor(slot 2),
+        // then address static descriptor(slot 1).
+        buffer.set(&mut system.memory, 0, Header::new(0x000A, 4, 6).0);
+        buffer.set(&mut system.memory, 5, 0x20); // current-process descriptor
+        buffer.set(&mut system.memory, 6, 0x1234);
+        buffer.set(&mut system.memory, 7, Descriptor::static_buffer(4, 2));
+        buffer.set(&mut system.memory, 8, payload_pointer);
+        buffer.set(&mut system.memory, 9, Descriptor::static_buffer(4, 1));
+        buffer.set(&mut system.memory, 10, address_pointer);
+
+        assert_eq!(read_static(&mut system, &buffer, 0, 4), b"DATA");
+        assert_eq!(read_static(&mut system, &buffer, 1, 4), b"ADDR");
+    }
+
+    #[test]
     fn mac_address_parser_accepts_colon_and_compact_formats() {
         assert_eq!(parse_mac_address("02:11:22:33:44:55"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac_address("021122334455"), Some([2, 0x11, 0x22, 0x33, 0x44, 0x55]));

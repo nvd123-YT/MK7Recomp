@@ -125,6 +125,21 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
     true
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::tests::system_with_thread;
+
+    #[test]
+    fn wifi_status_uses_the_libctru_slot_one_bit() {
+        let (mut system, buffer) = system_with_thread();
+        system.config.network_provider = NetworkProvider::Pretendo;
+        buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
+        handle(&mut system, &buffer, buffer.header(&mut system.memory));
+        assert_eq!(buffer.get(&mut system.memory, 2), 0x02);
+    }
+}
+
 /// walks the IPC translate descriptors, returning all copied/moved handles.
 /// ProcessId and buffers consume two words; each handle descriptor consumes
 /// the descriptor plus the number of handle words it names.
