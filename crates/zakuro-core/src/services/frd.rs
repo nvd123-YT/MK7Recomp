@@ -1012,24 +1012,43 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let logged_in = system.services.frd.logged_in && system.config.network_provider == NetworkProvider::Pretendo;
             buffer.reply(&mut system.memory, command, &[u32::from(logged_in)]);
         }
-        // Login(event) completes the local friends module's login handshake.
+        // Login(event) initializes the local Friends session only after a
+        // real imported FRD account is available. Game-server authentication
+        // still happens separately through RequestGameAuthentication/NASC.
         0x0003 => {
             let descriptor = buffer.get(&mut system.memory, header.normal_params() + 1);
             let event_handle = match Descriptor::parse(descriptor) {
                 Descriptor::Handles { count, .. } if count > 0 => Some(buffer.get(&mut system.memory, header.normal_params() + 2)),
                 _ => None,
             };
-            if system.config.network_provider != NetworkProvider::Pretendo {
-                system.services.frd.logged_in = false;
-                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
-                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            let event = event_handle.and_then(|handle| system.kernel.handles.resolve(handle));
+            let login_result = if system.config.network_provider != NetworkProvider::Pretendo {
+                Err("Pretendo networking is disabled".to_owned())
+            } else if event.is_none() {
+                Err("FRD Login requires a valid completion event handle".to_owned())
             } else {
-                system.services.frd.logged_in = true;
-                system.services.frd.last_response_result = 0;
-                if let Some(object) = event_handle.and_then(|handle| system.kernel.handles.resolve(handle)) {
-                    system.kernel.signal_event(object);
+                repair_uidhmac_if_enabled(system).and_then(|()| {
+                    let account = load_friend_account(system)
+                        .ok_or_else(|| "no valid imported Friends account is available".to_owned())?;
+                    if account.uidhmac.len() != 8 {
+                        return Err("the imported Friends account has no valid eight-character UID-HMAC; enable UID-HMAC repair or import a repaired account".to_owned());
+                    }
+                    Ok(())
+                })
+            };
+            match login_result {
+                Ok(()) => {
+                    system.services.frd.logged_in = true;
+                    system.services.frd.last_response_result = 0;
+                    system.kernel.signal_event(event.unwrap());
+                    buffer.reply(&mut system.memory, command, &[]);
                 }
-                buffer.reply(&mut system.memory, command, &[]);
+                Err(error) => {
+                    log::warn!("frd:u Login failed: {error}");
+                    system.services.frd.logged_in = false;
+                    system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                    buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+                }
             }
         }
         // Logout, AttachToEventNotification, SetNotificationMask and SetClientSdkVersion.
@@ -1477,6 +1496,19 @@ mod tests {
     fn nasc_requests_are_blocked_when_network_provider_is_off() {
         let (system, _) = crate::services::tests::system_with_thread();
         assert!(require_pretendo_provider(&system).is_err());
+    }
+
+    #[test]
+    fn a_nasc_ready_friend_account_requires_principal_password_and_uidhmac() {
+        let account = parse_friend_account(&account_bytes()).unwrap();
+        assert_ne!(account.principal_id, 0);
+        assert!(!account.password.is_empty());
+        assert_eq!(account.uidhmac.len(), 8);
+
+        let mut no_hmac = account_bytes();
+        no_hmac[0x42..0x54].fill(0);
+        let no_hmac = parse_friend_account(&no_hmac).unwrap();
+        assert!(no_hmac.uidhmac.is_empty());
     }
 
     #[test]
