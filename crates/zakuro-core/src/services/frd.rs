@@ -504,7 +504,71 @@ fn stun_binding(
 /// Infer mapping from two different STUN endpoints. Filtering is reported as
 /// port-independent only when an RFC 3489 change-request gets an answer from
 /// the alternate endpoint; otherwise it remains unknown.
-fn detect_nat_properties(servers: Vec<String>) -> (u32, u32) {
+fn infer_nat_port_increment(probes: &[(u16, SocketAddr)]) -> u32 {
+    if probes.len() < 3 { return 0; }
+    let mut ordered = probes.to_vec();
+    ordered.sort_by_key(|(local_port, _)| *local_port);
+    let (SocketAddr::V4(first), SocketAddr::V4(second), SocketAddr::V4(third)) =
+        (&ordered[0].1, &ordered[1].1, &ordered[2].1) else { return 0 };
+    if first.ip() != second.ip() || first.ip() != third.ip() {
+        return 0;
+    }
+    if ordered[1].0.checked_sub(ordered[0].0) != Some(1)
+        || ordered[2].0.checked_sub(ordered[1].0) != Some(1)
+    {
+        return 0;
+    }
+    match (
+        second.port().checked_sub(first.port()),
+        third.port().checked_sub(second.port()),
+    ) {
+        (Some(step), Some(next)) if step > 0 && step == next => u32::from(step),
+        _ => 0,
+    }
+}
+
+/// Try to secure three adjacent local UDP ports and ask the same STUN server
+/// for each public mapping. Report an increment only when all mapped ports
+/// are on the same public IPv4 address and advance by a consistent amount.
+fn detect_nat_port_increment(server: SocketAddr) -> u32 {
+    let mut random = [0u8; 2];
+    if getrandom::fill(&mut random).is_err() { return 0; }
+    let first_candidate = 40_000u16 + (u16::from_le_bytes(random) % 20_000);
+
+    for attempt in 0..64u16 {
+        let base = 40_000u16 + ((first_candidate - 40_000 + attempt) % 20_000);
+        if base > 60_000 { continue; }
+        let mut sockets = Vec::with_capacity(3);
+        let mut local_ports = Vec::with_capacity(3);
+        let mut bind_failed = false;
+        for offset in 0..3u16 {
+            match UdpSocket::bind(("0.0.0.0", base + offset)) {
+                Ok(socket) => {
+                    match socket.local_addr() {
+                        Ok(address) => local_ports.push(address.port()),
+                        Err(_) => { bind_failed = true; break; }
+                    }
+                    sockets.push(socket);
+                }
+                Err(_) => { bind_failed = true; break; }
+            }
+        }
+        if bind_failed || sockets.len() != 3 { continue; }
+
+        let mut probes = Vec::with_capacity(3);
+        for (socket, local_port) in sockets.iter().zip(local_ports) {
+            let Some((mapped, source)) = stun_binding(socket, server, false) else {
+                return 0;
+            };
+            if source != server { return 0; }
+            probes.push((local_port, mapped));
+        }
+        return infer_nat_port_increment(&probes);
+    }
+    0
+}
+
+fn detect_nat_properties(servers: Vec<String>) -> (u32, u32, u32) {
     let mut endpoints = Vec::new();
     for server in servers {
         let resolved = match server.to_socket_addrs() {
@@ -521,7 +585,7 @@ fn detect_nat_properties(servers: Vec<String>) -> (u32, u32) {
     }
     if endpoints.len() < 2 {
         log::warn!("FRD NAT probe needs two resolvable IPv4 STUN endpoints");
-        return (0, 0);
+        return (0, 0, 0);
     }
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => socket,
@@ -543,7 +607,8 @@ fn detect_nat_properties(servers: Vec<String>) -> (u32, u32) {
     let filtering = stun_binding(&socket, endpoints[0], true)
         .filter(|(_, source)| *source != endpoints[0])
         .map_or(0, |_| 1);
-    (mapping, filtering)
+    let port_increment = detect_nat_port_increment(endpoints[0]);
+    (mapping, filtering, port_increment)
 }
 
 fn fixed_string<const N: usize>(value: &str) -> [u8; N] {
@@ -864,7 +929,7 @@ fn start_game_auth(
     Ok(PendingNasc { receiver: receive, event })
 }
 
-fn start_nat_detection(system: &System, event: ObjectId) -> PendingNasc<(u32, u32)> {
+fn start_nat_detection(system: &System, event: ObjectId) -> PendingNasc<(u32, u32, u32)> {
     let configured = system.config.data_dir.as_ref()
         .and_then(|dir| std::fs::read(dir.join("sysdata/nasc.json")).ok())
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -933,9 +998,9 @@ pub struct FrdState {
     #[serde(skip)]
     pending_service: Option<PendingNasc<ServiceLocatorData>>,
     #[serde(skip)]
-    pending_nat: Option<PendingNasc<(u32, u32)>>,
+    pending_nat: Option<PendingNasc<(u32, u32, u32)>>,
     #[serde(default)]
-    nat_properties: Option<(u32, u32)>,
+    nat_properties: Option<(u32, u32, u32)>,
     #[serde(default)]
     game_authentication: Option<GameAuthenticationData>,
     #[serde(default)]
@@ -1010,13 +1075,13 @@ pub fn poll(system: &mut System) {
         system.services.frd.pending_nat = None;
         match result {
             Ok(properties) => {
-                log::info!("frd:u detected NAT mapping={} filtering={}", properties.0, properties.1);
+                log::info!("frd:u detected NAT mapping={} filtering={} port_increment={}", properties.0, properties.1, properties.2);
                 system.services.frd.nat_properties = Some(properties);
                 system.services.frd.last_response_result = 0;
             }
             Err(error) => {
                 log::warn!("frd:u NAT detection failed: {error}");
-                system.services.frd.nat_properties = Some((0, 0));
+                system.services.frd.nat_properties = Some((0, 0, 0));
                 system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
             }
         }
@@ -1336,7 +1401,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
             } else {
                 match system.services.frd.nat_properties {
-                    Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
+                    Some((mapping, filtering, _)) => buffer.reply(&mut system.memory, command, &[mapping, filtering]),
                     None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
                 }
             }
@@ -1349,7 +1414,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
             } else {
                 match system.services.frd.nat_properties {
-                    Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering, 0]),
+                    Some((mapping, filtering, port_increment)) => buffer.reply(&mut system.memory, command, &[mapping, filtering, port_increment]),
                     None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
                 }
             }
@@ -1430,6 +1495,34 @@ mod tests {
         assert_eq!(account.nasc_environment, 1);
         assert_eq!(account.server_type, b'L');
         assert_eq!(account.server_type_number, b'1');
+    }
+
+    #[test]
+    fn nat_port_increment_requires_three_consistent_adjacent_mappings() {
+        let ip = std::net::Ipv4Addr::new(198, 51, 100, 20);
+        let probes = [
+            (50_000, SocketAddr::from((ip, 60_000))),
+            (50_001, SocketAddr::from((ip, 60_002))),
+            (50_002, SocketAddr::from((ip, 60_004))),
+        ];
+        assert_eq!(infer_nat_port_increment(&probes), 2);
+    }
+
+    #[test]
+    fn nat_port_increment_is_unknown_for_nonconsecutive_or_inconsistent_mappings() {
+        let ip = std::net::Ipv4Addr::new(198, 51, 100, 20);
+        let gap = [
+            (50_000, SocketAddr::from((ip, 60_000))),
+            (50_002, SocketAddr::from((ip, 60_004))),
+            (50_003, SocketAddr::from((ip, 60_006))),
+        ];
+        assert_eq!(infer_nat_port_increment(&gap), 0);
+        let inconsistent = [
+            (50_000, SocketAddr::from((ip, 60_000))),
+            (50_001, SocketAddr::from((ip, 60_002))),
+            (50_002, SocketAddr::from((ip, 60_005))),
+        ];
+        assert_eq!(infer_nat_port_increment(&inconsistent), 0);
     }
 
     #[test]
