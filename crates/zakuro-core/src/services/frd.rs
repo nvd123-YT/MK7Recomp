@@ -1336,8 +1336,8 @@ mod tests {
 
     #[test]
     fn nasc_custom_base64_uses_the_nintendo_alphabet_and_round_trips() {
-        assert_eq!(nasc_base64_encode(b"0001DB00"), "MDAxREIwMA**");
-        assert_eq!(nasc_base64_decode("MDAxREIwMA**").unwrap(), b"0001DB00");
+        assert_eq!(nasc_base64_encode(b"0001DB00"), "MDAwMURCMDA*");
+        assert_eq!(nasc_base64_decode("MDAwMURCMDA*").unwrap(), b"0001DB00");
         assert_eq!(nasc_base64_encode(b"+/="), "Ky89");
         assert_eq!(nasc_base64_decode("Ky89").unwrap(), b"+/=");
     }
