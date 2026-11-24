@@ -262,10 +262,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // SendToOther uses a mapped buffer.
         0x0009 => send_other(system, buffer, header),
-        // SendToSingle(fd, length, flags, address length), data in buffer 0, address in buffer 1.
+        // SendToSingle uses static buffer slot 2 for payload and slot 1 for address.
         0x000A => {
             let (id, length, address_length) = (word(system, 1), word(system, 2) as usize, word(system, 4) as usize);
-            let payload = read_static(system, buffer, 0, length.min(MAX_PACKET));
+            let payload = read_static(system, buffer, 2, length.min(MAX_PACKET));
             let address = if address_length > 0 {
                 parse_address(&read_static(system, buffer, 1, address_length.min(28))).ok()
             } else { None };
@@ -1188,7 +1188,7 @@ fn send_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
             let mut payload = vec![0; size];
             system.memory.read_bytes(pointer, &mut payload);
             let destination = if address_length > 0 {
-                parse_address(&read_static(system, buffer, 0, address_length.min(28))).ok()
+                parse_address(&read_static(system, buffer, 1, address_length.min(28))).ok()
             } else {
                 None
             };

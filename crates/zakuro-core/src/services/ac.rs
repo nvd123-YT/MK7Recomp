@@ -100,9 +100,9 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let status = if online_provider { 3 } else { 0 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
-        // GetWifiStatus: slot 1 is connected in infrastructure mode.
+        // GetWifiStatus returns AC_AP_TYPE_* flags; slot 1 is BIT(1) = 0x02.
         0x000D => {
-            let status = if online_provider { 1 } else { 0 };
+            let status = if online_provider { 0x02 } else { 0 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
         // RegisterDisconnectEvent(process id, event).
