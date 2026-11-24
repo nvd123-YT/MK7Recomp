@@ -279,10 +279,11 @@ struct NascDeviceConfig {
     serial_number: String,
     #[serde(default = "default_fpd_version")]
     fpd_version: u16,
+    /// The raw 17-byte cartridge ROM ID, represented as 34 hex digits.
     #[serde(default)]
-    romid: Option<String>,
+    romid_hex: Option<String>,
 }
-fn default_fpd_version() -> u16 { 0x000F }
+fn default_fpd_version() -> u16 { 0x0010 }
 
 struct NascJob {
     body: String,
@@ -357,6 +358,16 @@ fn form_url_encode(value: &str) -> String {
         }
     }
     output
+}
+
+fn decode_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    value.as_bytes().chunks_exact(2).map(|pair| {
+        let pair = std::str::from_utf8(pair).ok()?;
+        u8::from_str_radix(pair, 16).ok()
+    }).collect()
 }
 
 fn nasc_form_body(fields: &[(String, Vec<u8>)]) -> String {
@@ -567,12 +578,21 @@ fn make_nasc_job(
     device: &NascDeviceConfig,
     fcdcert: &[u8],
     action: &str,
+    sdk_major: u8,
+    sdk_minor: u8,
     extra: &[(&str, Vec<u8>)],
 ) -> Result<NascJob, String> {
     let title = system.title.as_ref().ok_or_else(|| "no game title is loaded for NASC".to_owned())?;
-    if title.media_type == 2 && device.romid.as_deref().unwrap_or_default().is_empty() {
-        return Err("this cartridge image needs its ROM ID in sysdata/nasc.json; it is not guessed from the NCSD media ID".to_owned());
-    }
+    let romid = if title.media_type == 2 {
+        let hex = device.romid_hex.as_deref().filter(|value| !value.is_empty())
+            .ok_or_else(|| "this cartridge image needs its 17-byte ROM ID as 34 hex digits in sysdata/nasc.json".to_owned())?;
+        let bytes = decode_hex_bytes(hex)
+            .filter(|bytes| bytes.len() == 17)
+            .ok_or_else(|| "romid_hex must contain exactly 34 hexadecimal digits (17 bytes)".to_owned())?;
+        Some(bytes)
+    } else {
+        None
+    };
     let data_dir = system.config.data_dir.as_ref().ok_or_else(|| "the application data directory is unavailable".to_owned())?;
     let certificate = data_dir.join("sysdata/ctr-common-1-cert.pem");
     let private_key = data_dir.join("sysdata/ctr-common-1-key.pem");
@@ -608,7 +628,7 @@ fn make_nasc_job(
 
     let mut fields: Vec<(String, Vec<u8>)> = vec![
         ("gameid".into(), format!("{MK7_NEX_SERVER_ID:08X}").into_bytes()),
-        ("sdkver".into(), b"000000".to_vec()),
+        ("sdkver".into(), format!("{sdk_major:03}{sdk_minor:03}").into_bytes()),
         ("titleid".into(), format!("{:016X}", title.program_id()).into_bytes()),
         ("gamecd".into(), title.ncch.product_code.trim_end_matches('\0').as_bytes().to_vec()),
         ("gamever".into(), format!("{:04X}", title.ncch.version).into_bytes()),
@@ -630,8 +650,8 @@ fn make_nasc_job(
         ("userid".into(), account.principal_id.to_string().into_bytes()),
         ("action".into(), action.as_bytes().to_vec()),
     ];
-    if title.media_type == 2 {
-        fields.push(("romid".into(), device.romid.as_deref().unwrap_or_default().as_bytes().to_vec()));
+    if let Some(romid) = romid {
+        fields.push(("romid".into(), romid));
     }
     for (name, value) in extra {
         fields.push(((*name).to_owned(), value.clone()));
@@ -775,6 +795,8 @@ fn start_game_auth(
     system: &mut System,
     server_id: u32,
     ingamesn: &[u8],
+    sdk_major: u8,
+    sdk_minor: u8,
     event: ObjectId,
 ) -> Result<PendingNasc<GameAuthenticationData>, String> {
     require_pretendo_provider(system)?;
@@ -797,7 +819,9 @@ fn start_game_auth(
     } else {
         extra.push(("ingamesn", Vec::new()));
     }
-    let job = make_nasc_job(system, &account, &device, &fcdcert, "LOGIN", &extra)?;
+    let job = make_nasc_job(
+        system, &account, &device, &fcdcert, "LOGIN", sdk_major, sdk_minor, &extra
+    )?;
     let (send, receive) = mpsc::channel();
     thread::spawn(move || {
         let result = perform_nasc_http(job).map(|(status, fields)| parse_game_auth(&fields, status));
@@ -829,6 +853,8 @@ fn start_service_locator(
     server_id: u32,
     key_hash: &str,
     service_type: &str,
+    sdk_major: u8,
+    sdk_minor: u8,
     event: ObjectId,
 ) -> Result<PendingNasc<ServiceLocatorData>, String> {
     require_pretendo_provider(system)?;
@@ -848,7 +874,9 @@ fn start_service_locator(
         ("keyhash", key_hash.as_bytes().to_vec()),
         ("svc", service_type.as_bytes().to_vec()),
     ];
-    let job = make_nasc_job(system, &account, &device, &fcdcert, "SVCLOC", &extra)?;
+    let job = make_nasc_job(
+        system, &account, &device, &fcdcert, "SVCLOC", sdk_major, sdk_minor, &extra
+    )?;
     let (send, receive) = mpsc::channel();
     thread::spawn(move || {
         let result = perform_nasc_http(job).map(|(status, fields)| parse_service_locator(&fields, status));
@@ -1093,6 +1121,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             for index in 2..8 {
                 ingamesn.extend_from_slice(&buffer.get(&mut system.memory, index).to_le_bytes());
             }
+            let sdk_major = buffer.get(&mut system.memory, 8).min(u8::MAX as u32) as u8;
+            let sdk_minor = buffer.get(&mut system.memory, 9).min(u8::MAX as u32) as u8;
             let process_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 10));
             let event_descriptor = Descriptor::parse(buffer.get(&mut system.memory, 12));
             let event_handle = match (process_descriptor, event_descriptor) {
@@ -1103,7 +1133,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let event = event_handle.and_then(|handle| system.kernel.handles.resolve(handle));
             match event {
                 Some(event) if system.services.frd.pending_game.is_none() => {
-                    match start_game_auth(system, server_id, &ingamesn, event) {
+                    match start_game_auth(system, server_id, &ingamesn, sdk_major, sdk_minor, event) {
                         Ok(pending) => {
                             system.services.frd.game_authentication = None;
                             system.services.frd.pending_game = Some(pending);
@@ -1141,6 +1171,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // process ID, completion event).
         0x002A => {
             let server_id = buffer.get(&mut system.memory, 1);
+            let sdk_major = buffer.get(&mut system.memory, 7).min(u8::MAX as u32) as u8;
+            let sdk_minor = buffer.get(&mut system.memory, 8).min(u8::MAX as u32) as u8;
             let key_words = [
                 buffer.get(&mut system.memory, 2),
                 buffer.get(&mut system.memory, 3),
@@ -1167,7 +1199,9 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let event = event_handle.and_then(|handle| system.kernel.handles.resolve(handle));
             match event {
                 Some(event) if system.services.frd.pending_service.is_none() => {
-                    match start_service_locator(system, server_id, &key_hash, &service_type, event) {
+                    match start_service_locator(
+                        system, server_id, &key_hash, &service_type, sdk_major, sdk_minor, event
+                    ) {
                         Ok(pending) => {
                             system.services.frd.service_locator = None;
                             system.services.frd.pending_service = Some(pending);
@@ -1340,6 +1374,22 @@ mod tests {
         assert_eq!(nasc_base64_decode("MDAwMURCMDA*").unwrap(), b"0001DB00");
         assert_eq!(nasc_base64_encode(b"+/="), "Ky89");
         assert_eq!(nasc_base64_decode("Ky89").unwrap(), b"+/=");
+    }
+
+    #[test]
+    fn cartridge_romid_is_decoded_from_hex_to_the_17_byte_binary_value() {
+        let hex = "2892774E7B2B770D2A647D146505FE5438";
+        let bytes = decode_hex_bytes(hex).unwrap();
+        assert_eq!(bytes.len(), 17);
+        assert_eq!(nasc_base64_encode(&bytes), "KJJ3Tnsrdw0qZH0UZQX-VDg*");
+    }
+
+    #[test]
+    fn nasc_sdk_version_is_encoded_as_two_three_digit_decimal_parts() {
+        let major = 0u8;
+        let minor = 0u8;
+        assert_eq!(format!("{major:03}{minor:03}"), "000000");
+        assert_eq!(format!("{:03}{:03}", 1u8, 16u8), "001016");
     }
 
     #[test]
