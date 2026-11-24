@@ -1279,10 +1279,18 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
         Ok((bytes, address)) => {
             system.memory.write_bytes(pointer, &bytes);
             let address = &address[..address.len().min(address_length)];
-            reply_static_mapped(system, buffer, command, &[bytes.len() as u32], address, descriptor, pointer);
+            reply_static_mapped(
+                system,
+                buffer,
+                command,
+                &[bytes.len() as u32, bytes.len() as u32],
+                address,
+                descriptor,
+                pointer,
+            );
         }
         Err(code) => {
-            reply_static_mapped(system, buffer, command, &[code as u32], &[], descriptor, pointer);
+            reply_static_mapped(system, buffer, command, &[code as u32, 0], &[], descriptor, pointer);
         }
     }
 }
@@ -1290,6 +1298,59 @@ fn receive_other(system: &mut System, buffer: &CommandBuffer, header: Header) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recvfrom_other_reply_has_errno_and_received_length_words() {
+        let (mut system, buffer) = crate::services::tests::system_with_thread();
+        let command = 0x0007;
+        let descriptor = (0x30 << 4) | 0xC;
+        let mapped_pointer = 0x0800_2000;
+        let address = [8u8, 2, 0x12, 0x34, 127, 0, 0, 1];
+
+        reply_static_mapped(
+            &mut system,
+            &buffer,
+            command,
+            &[5, 5],
+            &address,
+            descriptor,
+            mapped_pointer,
+        );
+
+        assert_eq!(
+            buffer.get(&mut system.memory, 0),
+            Header::new(command, 3, 4).0
+        );
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert_eq!(buffer.get(&mut system.memory, 2), 5);
+        assert_eq!(buffer.get(&mut system.memory, 3), 5);
+    }
+
+    #[test]
+    fn recvfrom_other_error_reply_keeps_zero_received_length() {
+        let (mut system, buffer) = crate::services::tests::system_with_thread();
+        let command = 0x0007;
+        let descriptor = (0x30 << 4) | 0xC;
+        let mapped_pointer = 0x0800_2000;
+
+        reply_static_mapped(
+            &mut system,
+            &buffer,
+            command,
+            &[(-11i32) as u32, 0],
+            &[],
+            descriptor,
+            mapped_pointer,
+        );
+
+        assert_eq!(
+            buffer.get(&mut system.memory, 0),
+            Header::new(command, 3, 4).0
+        );
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert_eq!(buffer.get(&mut system.memory, 2), (-11i32) as u32);
+        assert_eq!(buffer.get(&mut system.memory, 3), 0);
+    }
 
     #[test]
     fn socu_translation_walker_skips_pid_and_static_buffers() {
