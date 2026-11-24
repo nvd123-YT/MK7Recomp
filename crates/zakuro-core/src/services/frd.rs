@@ -346,6 +346,15 @@ fn nasc_base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn nasc_device_name_bytes(value: &str) -> Vec<u8> {
+    value.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+fn nasc_unit_code() -> &'static [u8] {
+    // The 3DS platform code is 2 for both Old and New 3DS models.
+    b"2"
+}
+
 fn form_url_encode(value: &str) -> String {
     let mut output = String::new();
     for byte in value.as_bytes() {
@@ -635,14 +644,14 @@ fn make_nasc_job(
         ("mediatype".into(), title.media_type.to_string().into_bytes()),
         ("makercd".into(), title.ncch.maker_code.as_bytes().to_vec()),
         // NASC unit code identifies the platform: both Old and New 3DS are 2.
-        ("unitcd".into(), b"2".to_vec()),
+        ("unitcd".into(), nasc_unit_code().to_vec()),
         ("macadr".into(), mac.into_bytes()),
         ("bssid".into(), bssid.into_bytes()),
         ("apinfo".into(), device.apinfo.as_bytes().to_vec()),
         ("fcdcert".into(), fcdcert.to_vec()),
         // NASC encodes the exact device-name string as UTF-16LE; do not
         // append a C-string terminator (the published sample is 20 bytes).
-        ("devname".into(), device.device_name.encode_utf16().flat_map(u16::to_le_bytes).collect()),
+        ("devname".into(), nasc_device_name_bytes(&device.device_name)),
         ("servertype".into(), format!("{}{}", account.server_type as char, account.server_type_number as char).into_bytes()),
         ("fpdver".into(), format!("{:04X}", device.fpd_version).into_bytes()),
         ("devtime".into(), chrono::Utc::now().format("%y%m%d%H%M%S").to_string().into_bytes()),
@@ -1405,8 +1414,8 @@ mod tests {
             bytes[0x42 + index * 2] = *byte;
         }
         bytes[0x54] = 1;
-        bytes[0x55] = b'M';
-        bytes[0x56] = b'K';
+        bytes[0x55] = b'L';
+        bytes[0x56] = b'1';
         bytes
     }
 
@@ -1419,8 +1428,8 @@ mod tests {
         assert_eq!(account.password, "ABCDEFGHIJKLMNOP");
         assert_eq!(account.uidhmac, "AB12CD34");
         assert_eq!(account.nasc_environment, 1);
-        assert_eq!(account.server_type, b'M');
-        assert_eq!(account.server_type_number, b'K');
+        assert_eq!(account.server_type, b'L');
+        assert_eq!(account.server_type_number, b'1');
     }
 
     #[test]
@@ -1452,10 +1461,10 @@ mod tests {
 
     #[test]
     fn nascrequest_device_name_and_unit_code_match_published_3ds_example() {
-        let device_name: Vec<u8> = "helloworld".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let device_name = nasc_device_name_bytes("helloworld");
         assert_eq!(device_name.len(), 20);
         assert_eq!(nasc_base64_encode(&device_name), "aABlAGwAbABvAHcAbwByAGwAZAA*");
-        assert_eq!(b"2", b"2"); // both Old and New 3DS use unitcd 2
+        assert_eq!(nasc_unit_code(), b"2");
     }
 
     #[test]
@@ -1483,6 +1492,30 @@ mod tests {
     }
 
     #[test]
+    fn published_nasc_login_response_produces_a_valid_authentication_result() {
+        let body = "locator=MzUuMTYzLjIuODk6NDA0NjA*&retry=MA**&returncd=MDAx&token=YWJj&datetime=MjAyNDAyMDkxMjE2MDM*";
+        let fields = parse_nasc_form(body).unwrap();
+        let result = parse_game_auth(&fields, 200);
+        assert_eq!(result.nasc_result, 1);
+        assert_eq!(&result.server_address[..], b"35.163.2.89");
+        assert_eq!(result.server_port, 40460);
+        assert_eq!(&result.token[..], b"abc");
+        assert_ne!(result.server_time, 0);
+    }
+
+    #[test]
+    fn published_nasc_svc_loc_response_accepts_na_host_for_service_zero() {
+        let body = "retry=MA**&returncd=MDA3&servicetoken=YWJj&statusdata=WQ**&svchost=bi9h&datetime=MjAyNDAyMDkxMjE2MDM*";
+        let fields = parse_nasc_form(body).unwrap();
+        let result = parse_service_locator(&fields, 200);
+        assert_eq!(result.nasc_result, 7);
+        assert_eq!(&result.service_host[..], b"n/a");
+        assert_eq!(&result.service_token[..], b"abc");
+        assert_eq!(result.status_data, b'Y');
+        assert_ne!(result.server_time, 0);
+    }
+
+    #[test]
     fn nasc_response_decodes_form_and_custom_base64_fields() {
         let fields = parse_nasc_form("returncd=MDAx&locator=MTI3LjAuMC4xOjQwNDA*&token=YWJj") .unwrap();
         assert_eq!(fields.get("returncd").map(String::as_str), Some("001"));
@@ -1498,21 +1531,6 @@ mod tests {
         assert_eq!(&ingamesn[4..6], &[0, 0]);
         // NASC form values carry the full fixed array, not just "MK".
         assert_eq!(nasc_base64_decode(&nasc_base64_encode(&ingamesn)).unwrap(), ingamesn);
-    }
-
-    #[test]
-    fn device_name_is_encoded_as_nul_terminated_utf16le() {
-        let mut encoded: Vec<u8> = "N3DS".encode_utf16().flat_map(u16::to_le_bytes).collect();
-        encoded.extend_from_slice(&[0, 0]);
-        assert_eq!(encoded, [b'N', 0, b'3', 0, b'D', 0, b'S', 0, 0, 0]);
-    }
-
-    #[test]
-    fn nasc_unit_code_tracks_the_selected_console_model() {
-        let old_3ds = false;
-        let new_3ds = true;
-        assert_eq!(if old_3ds { b"2" } else { b"0" }, b"0");
-        assert_eq!(if new_3ds { b"2" } else { b"0" }, b"2");
     }
 
     #[test]
