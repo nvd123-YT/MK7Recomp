@@ -135,7 +135,8 @@ mod tests {
         let (mut system, buffer) = system_with_thread();
         system.config.network_provider = NetworkProvider::Pretendo;
         buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
-        handle(&mut system, &buffer, buffer.header(&mut system.memory));
+        let header = buffer.header(&mut system.memory);
+        handle(&mut system, &buffer, header);
         assert_eq!(buffer.get(&mut system.memory, 2), 0x02);
     }
 }
