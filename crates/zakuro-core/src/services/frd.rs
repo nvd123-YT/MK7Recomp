@@ -791,6 +791,17 @@ fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), St
     Ok((status, fields))
 }
 
+/// Convert NASC return codes into the Result returned by FRD's
+/// GetLastResponseResult IPC command. NASC's success codes (001 LOGIN and
+/// 007 SVCLOC) are not 3DS Result values; FRD reports ResultSuccess (0).
+fn frd_result_from_nasc(action_success_code: u32, nasc_result: u32) -> u32 {
+    if nasc_result == action_success_code {
+        0
+    } else {
+        errors::NOT_CONNECTED.0
+    }
+}
+
 fn parse_return_code(fields: &BTreeMap<String, String>) -> u32 {
     fields.get("returncd").and_then(|value| value.parse::<u32>().ok()).unwrap_or(u32::MAX)
 }
@@ -1021,7 +1032,7 @@ pub fn poll(system: &mut System) {
         system.services.frd.pending_game = None;
         match result {
             Ok(data) => {
-                system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.last_response_result = frd_result_from_nasc(1, data.nasc_result);
                 system.services.frd.server_time_difference_ns = data.server_time_difference_ns;
                 system.services.frd.game_authentication = Some(data);
             }
@@ -1048,7 +1059,7 @@ pub fn poll(system: &mut System) {
         system.services.frd.pending_service = None;
         match result {
             Ok(data) => {
-                system.services.frd.last_response_result = data.nasc_result;
+                system.services.frd.last_response_result = frd_result_from_nasc(7, data.nasc_result);
                 system.services.frd.server_time_difference_ns = data.server_time_difference_ns;
                 system.services.frd.service_locator = Some(data);
             }
@@ -1558,6 +1569,20 @@ mod tests {
         assert_eq!(device_name.len(), 20);
         assert_eq!(nasc_base64_encode(&device_name), "aABlAGwAbABvAHcAbwByAGwAZAA*");
         assert_eq!(nasc_unit_code(), b"2");
+    }
+
+    #[test]
+    fn frd_last_response_maps_nasc_login_success_to_result_success() {
+        assert_eq!(frd_result_from_nasc(1, 1), 0);
+        assert_ne!(frd_result_from_nasc(1, 109), 0);
+        assert_ne!(frd_result_from_nasc(1, 7), 0);
+    }
+
+    #[test]
+    fn frd_last_response_maps_nasc_service_locator_success_to_result_success() {
+        assert_eq!(frd_result_from_nasc(7, 7), 0);
+        assert_ne!(frd_result_from_nasc(7, 112), 0);
+        assert_ne!(frd_result_from_nasc(7, 1), 0);
     }
 
     #[test]
