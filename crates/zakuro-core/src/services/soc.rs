@@ -1001,18 +1001,35 @@ fn get_name_info(system: &mut System, buffer: &CommandBuffer, command: u16) {
     reply_static_two(system, buffer, command, &[error as u32], &host_bytes, &service_bytes);
 }
 
-fn get_sock_opt(entry: Option<&mut SocketEntry>, _level: u32, option: u32, length: usize) -> (i32, Vec<u8>) {
+fn get_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, length: usize) -> (i32, Vec<u8>) {
     let Some(entry) = entry else { return (-8, Vec::new()) };
     entry.update();
-    let value: i32 = match option {
-        // SO_BROADCAST is defined as zero by libctru for compatibility.
-        0x0000 => match &entry.socket {
+    let value: i32 = match (level, option) {
+        // SOC_SOL_SOCKET options.
+        (0xFFFF, 0x0000) => match &entry.socket {
             HostSocket::Udp { socket, .. } => socket.broadcast().unwrap_or(false) as i32,
             _ => 0,
         },
-        0x1008 => match entry.socket { HostSocket::Udp { .. } | HostSocket::UdpUnbound => SOCK_DGRAM as i32, _ => SOCK_STREAM as i32 },
-        0x1009 => match entry.socket { HostSocket::TcpFailed(code) => -code, _ => 0 },
-        _ => 0,
+        (0xFFFF, 0x1008) => match entry.socket {
+            HostSocket::Udp { .. } | HostSocket::UdpUnbound => SOCK_DGRAM as i32,
+            _ => SOCK_STREAM as i32,
+        },
+        (0xFFFF, 0x1009) => match entry.socket {
+            HostSocket::TcpFailed(code) => -code,
+            _ => 0,
+        },
+        // These buffer-size values are accepted by SetSockOpt; the host
+        // standard library does not expose portable getters for them.
+        (0xFFFF, 0x1001 | 0x1002) => 0,
+        // SOC_SOL_TCP / TCP_NODELAY.
+        (0x0006, 0x2001) => match &entry.socket {
+            HostSocket::Tcp(stream) => match stream.nodelay() {
+                Ok(enabled) => enabled as i32,
+                Err(error) => return (errno(&error), Vec::new()),
+            },
+            _ => return (-92, Vec::new()),
+        },
+        _ => return (-92, Vec::new()), // ENOPROTOOPT
     };
     let bytes = value.to_le_bytes();
     (0, bytes[..bytes.len().min(length)].to_vec())
@@ -1029,17 +1046,20 @@ fn set_sock_opt(entry: Option<&mut SocketEntry>, level: u32, option: u32, value:
         }
         return 0;
     }
-    if level == 0xFFFF && option == 0x0004 { return 0; } // SO_REUSEADDR
-    if level == 0xFFFF && option == 0x1001 { return 0; } // SO_SNDBUF
-    if level == 0xFFFF && option == 0x1002 { return 0; } // SO_RCVBUF
+    if level == 0xFFFF && matches!(option, 0x0004 | 0x0080 | 0x0100 | 0x1001..=0x1004) {
+        // SO_REUSEADDR, SO_LINGER, SO_OOBINLINE and buffer/low-water marks
+        // are accepted for guest compatibility. std::net does not expose
+        // portable host setters for these options on every supported OS.
+        return 0;
+    }
     if level == 0x0006 && option == 0x2001 {
         let enabled = value.first().copied().unwrap_or(0) != 0;
         if let HostSocket::Tcp(stream) = &entry.socket {
             return stream.set_nodelay(enabled).map_or_else(|error| errno(&error), |_| 0);
         }
-        return 0;
+        return -92;
     }
-    0
+    -92 // ENOPROTOOPT
 }
 
 /// Select the host IPv4 address used for outbound Internet traffic.
@@ -1405,6 +1425,23 @@ mod tests {
 
         assert_eq!(read_static(&mut system, &buffer, 0, 4), b"DATA");
         assert_eq!(read_static(&mut system, &buffer, 1, 4), b"ADDR");
+    }
+
+    #[test]
+    fn getsockopt_respects_socket_and_tcp_option_levels() {
+        let mut udp = SocketEntry::new(HostSocket::UdpUnbound);
+        let (error, socket_type) = get_sock_opt(Some(&mut udp), 0xFFFF, 0x1008, 4);
+        assert_eq!(error, 0);
+        assert_eq!(i32::from_le_bytes(socket_type.try_into().unwrap()), SOCK_DGRAM as i32);
+
+        let (error, _) = get_sock_opt(Some(&mut udp), 0x0006, 0x2001, 4);
+        assert_eq!(error, -92); // TCP_NODELAY is not a UDP socket option.
+    }
+
+    #[test]
+    fn unsupported_socket_options_report_protocol_option_not_supported() {
+        let mut udp = SocketEntry::new(HostSocket::UdpUnbound);
+        assert_eq!(set_sock_opt(Some(&mut udp), 0xFFFF, 0x7777, &0i32.to_le_bytes()), -92);
     }
 
     #[test]
