@@ -797,6 +797,17 @@ fn static_output(system: &mut System, buffer: &CommandBuffer, command: u16, byte
     buffer.reply(&mut system.memory, command, &[]);
 }
 
+/// GameKey is { titleId: u64, version: u16, reserved: [u8; 6] }.
+fn current_game_key_words(system: &System) -> [u32; 4] {
+    let Some(title) = system.title.as_ref() else { return [0; 4] };
+    [
+        title.program_id() as u32,
+        (title.program_id() >> 32) as u32,
+        title.ncch.version as u32,
+        0,
+    ]
+}
+
 fn require_pretendo_provider(system: &System) -> Result<(), String> {
     if system.config.network_provider == NetworkProvider::Pretendo {
         Ok(())
@@ -1097,8 +1108,15 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let first = region as u32 | country << 8 | (language as u32) << 24;
             buffer.reply(&mut system.memory, command, &[first, PLATFORM_CTR]);
         }
-        // GetMyPresence, into a static buffer that stays as it is
-        0x0008 => buffer.reply(&mut system.memory, command, &[]),
+        // GetMyPresence writes MyPresence { Presence (44 bytes), UTF-16
+        // game-mode description (0x100 bytes) } into static buffer slot 0.
+        0x0008 => {
+            let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+            let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
+            let bytes = vec![0; 0x12C.min(capacity as usize)];
+            system.memory.write_bytes(pointer, &bytes);
+            buffer.reply(&mut system.memory, command, &[]);
+        }
         // GetMyScreenName, the user's name in eleven UTF-16 units
         0x0009 => {
             let mut name = [0u8; 24];
@@ -1116,9 +1134,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let id = load_friend_account(system).map_or(0, |account| account.local_account_id);
             buffer.reply(&mut system.memory, command, &[id]);
         }
-        // GetMyPlayingGame and GetMyFavoriteGame, a title id, its version
-        // and a word more
-        0x000C | 0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
+        // GetMyPlayingGame returns the loaded title's actual GameKey. No
+        // favorite title is configured, so GetMyFavoriteGame remains empty.
+        0x000C => buffer.reply(&mut system.memory, command, &current_game_key_words(system)),
+        0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
         // GetMyNcPrincipalId
         0x000E => buffer.reply(&mut system.memory, command, &[0]),
         // GetMyComment
@@ -1144,8 +1163,9 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 }
             }
         }
-        // GetFriendKeyList and GetEventNotification, none
-        0x0011 | 0x0022 => buffer.reply(&mut system.memory, command, &[0]),
+        // GetFriendKeyList and GetEventNotification: no local friends or
+        // queued notifications. Both APIs return a count in cmdbuf[3].
+        0x0011 | 0x0022 => buffer.reply(&mut system.memory, command, &[0, 0]),
         // lookups on friends the title names, of which it has none to name
         0x0012..=0x001A => buffer.reply(&mut system.memory, command, &[]),
         // IsIncludedInFriendList
@@ -1451,6 +1471,28 @@ mod tests {
         let new_3ds = true;
         assert_eq!(if old_3ds { b"2" } else { b"0" }, b"0");
         assert_eq!(if new_3ds { b"2" } else { b"0" }, b"2");
+    }
+
+    #[test]
+    fn game_key_words_encode_title_id_and_version() {
+        let program_id = 0x0004_0000_0030_6400u64;
+        let version = 0x0123u16;
+        let words = [
+            program_id as u32,
+            (program_id >> 32) as u32,
+            version as u32,
+            0,
+        ];
+        assert_eq!(u64::from(words[0]) | (u64::from(words[1]) << 32), program_id);
+        assert_eq!(words[2], version as u32);
+        assert_eq!(words[3], 0);
+    }
+
+    #[test]
+    fn my_presence_wire_buffer_includes_the_128_unit_game_mode_description() {
+        const PRESENCE_SIZE: usize = 6 * 4 + 20;
+        const GAME_MODE_DESCRIPTION_SIZE: usize = 128 * 2;
+        assert_eq!(PRESENCE_SIZE + GAME_MODE_DESCRIPTION_SIZE, 0x12C);
     }
 
     #[test]
