@@ -778,7 +778,6 @@ fn parse_service_locator(fields: &BTreeMap<String, String>, status: u32) -> Serv
                 data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
                 data.status_data = fields.get("statusdata").and_then(|value| value.as_bytes().first().copied()).unwrap_or(0);
                 data.server_time = timestamp;
-                data.server_time_difference_ns = server_time_difference_ns(fields.get("datetime"));
             }
             _ => data.nasc_result = u32::MAX,
         }
@@ -1138,7 +1137,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // GetMyPlayingGame returns the loaded title's actual GameKey. No
         // favorite title is configured, so GetMyFavoriteGame remains empty.
-        0x000C => buffer.reply(&mut system.memory, command, &current_game_key_words(system)),
+        0x000C => {
+            let words = current_game_key_words(system);
+            buffer.reply(&mut system.memory, command, &words);
+        }
         0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
         // GetMyNcPrincipalId
         0x000E => buffer.reply(&mut system.memory, command, &[0]),
@@ -1240,7 +1242,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             ];
             let mut key_bytes = Vec::new();
             for word in key_words { key_bytes.extend_from_slice(&word.to_le_bytes()); }
-            let key_end = key_bytes.iter().position(|byte| *byte == 0).unwrap_or(8).min(8);
+            let key_end = key_bytes.iter().position(|byte| *byte == 0).unwrap_or(12).min(12);
             let key_hash = String::from_utf8_lossy(&key_bytes[..key_end]).to_string();
 
             let service_words = [buffer.get(&mut system.memory, 5), buffer.get(&mut system.memory, 6)];
@@ -1328,6 +1330,19 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 }
             }
         },
+        // GetExtendedNatProperties: mapping, filtering, port increment.
+        // The first two values come from STUN; port increment remains zero
+        // (unknown) until the host can measure it across adjacent local ports.
+        0x0036 => {
+            if require_pretendo_provider(system).is_err() {
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            } else {
+                match system.services.frd.nat_properties {
+                    Some((mapping, filtering)) => buffer.reply(&mut system.memory, command, &[mapping, filtering, 0]),
+                    None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
+                }
+            }
+        }
         // GetServerTimeDifference returns signed nanoseconds as a u64 pair.
         0x002E => {
             let difference = system.services.frd.server_time_difference_ns;
@@ -1349,14 +1364,19 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 None => buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0),
             }
         }
-        // GetLastResponseResult, what the last request to the servers got
+        // GetLastResponseResult returns the prior server operation's
+        // result as the IPC result code (libctru reads cmdbuf[1]).
         0x0023 => {
             let result = if system.services.frd.logged_in {
                 system.services.frd.last_response_result
             } else {
                 errors::NOT_CONNECTED.0
             };
-            buffer.reply(&mut system.memory, command, &[result]);
+            if result == 0 {
+                buffer.reply(&mut system.memory, command, &[]);
+            } else {
+                buffer.reply_error(&mut system.memory, command, result);
+            }
         }
         // ResultToErrorCode, no code to show
         0x0027 => buffer.reply(&mut system.memory, command, &[0]),
@@ -1573,6 +1593,14 @@ mod tests {
         assert_eq!(country_for(crate::services::cfg::REGION_JAPAN), 1);
         assert_eq!(country_for(REGION_USA), 49);
         assert_eq!(country_for(crate::services::cfg::REGION_EUROPE), 110);
+    }
+
+    #[test]
+    fn nasc_keyhash_parser_preserves_all_twelve_bytes() {
+        let bytes = *b"123456789012";
+        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(12).min(12);
+        assert_eq!(end, 12);
+        assert_eq!(&bytes[..end], b"123456789012");
     }
 
     #[test]
