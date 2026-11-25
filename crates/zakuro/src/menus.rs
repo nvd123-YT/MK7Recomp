@@ -69,6 +69,8 @@ pub enum Action {
     /// leave only the game recompiling now, none of those waiting.
     CancelWaiting,
     ChooseFolder,
+    /// import the user's own 3DS NAND backup and extract its device identity.
+    ImportNand,
     ChooseBackground,
     /// pick the picture the cameras see.
     ChooseCameraPicture,
@@ -271,6 +273,9 @@ impl Menus {
                     None => ui.label(RichText::new("no games folder yet").weak()),
                 };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Import NAND…").on_hover_text("Import one GodMode9 NAND.zip or NAND.bin backup. The importer validates the embedded essential.exefs and extracts the device identity locally. Friends save decryption is still experimental.").clicked() {
+                        actions.push(Action::ImportNand);
+                    }
                     if ui.button("Settings").clicked() {
                         self.settings_open = true;
                     }
