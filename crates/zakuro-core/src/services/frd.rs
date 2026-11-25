@@ -1066,6 +1066,13 @@ pub struct FrdState {
     game_authentication: Option<GameAuthenticationData>,
     #[serde(default)]
     service_locator: Option<ServiceLocatorData>,
+    /// Presence state is local to this emulated console. The public friend
+    /// list/invitation service is not implemented, but titles can publish and
+    /// read their own 0x2C-byte presence and 0x100-byte game-mode description.
+    #[serde(skip)]
+    my_presence: Vec<u8>,
+    #[serde(skip)]
+    game_mode_description: Vec<u8>,
 }
 
 /// Polls asynchronous NASC work on the emulation thread and signals the
@@ -1243,14 +1250,17 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let first = region as u32 | country << 8 | (language as u32) << 24;
             buffer.reply(&mut system.memory, command, &[first, PLATFORM_CTR]);
         }
-        // GetMyPresence writes MyPresence { Presence (44 bytes), UTF-16
-        // game-mode description (0x100 bytes) } into static buffer slot 0.
+        // GetMyPresence writes MyPresence { Presence (0x2C bytes),
+        // game-mode description (0x100 bytes) } to static buffer slot 0.
         0x0008 => {
-            let tls = system.kernel.current().map_or(0, |thread| thread.tls);
-            let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
-            let bytes = vec![0; 0x12C.min(capacity as usize)];
-            system.memory.write_bytes(pointer, &bytes);
-            buffer.reply(&mut system.memory, command, &[]);
+            let mut bytes = vec![0; 0x12C];
+            if system.services.frd.my_presence.len() == 0x2C {
+                bytes[..0x2C].copy_from_slice(&system.services.frd.my_presence);
+            }
+            if system.services.frd.game_mode_description.len() == 0x100 {
+                bytes[0x2C..].copy_from_slice(&system.services.frd.game_mode_description);
+            }
+            static_output(system, buffer, command, &bytes);
         }
         // GetMyScreenName, the user's name in eleven UTF-16 units
         0x0009 => {
@@ -1276,7 +1286,49 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.reply(&mut system.memory, command, &words);
         }
         0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
-        // GetMyNcPrincipalId
+        // UpdateGameModeDescription reads the 0x100-byte static buffer in
+        // TLS slot 2. This state is returned by GetMyPresence.
+        0x001D => {
+            let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+            let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 2);
+            if capacity < 0x100 {
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            } else {
+                let mut description = vec![0; 0x100];
+                system.memory.read_bytes(pointer, &mut description);
+                system.services.frd.game_mode_description = description;
+                buffer.reply(&mut system.memory, command, &[]);
+            }
+        }
+        // UpdateMyPresence carries the 0x2C-byte Presence in normal IPC
+        // words and the 0x100-byte description in static buffer slot 2.
+        0x001E => {
+            let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+            let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 2);
+            if header.normal_params() < 11 || capacity < 0x100 {
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            } else {
+                let mut presence = Vec::with_capacity(0x2C);
+                for index in 1..=11 {
+                    presence.extend_from_slice(&buffer.get(&mut system.memory, index).to_le_bytes());
+                }
+                let mut description = vec![0; 0x100];
+                system.memory.read_bytes(pointer, &mut description);
+                system.services.frd.my_presence = presence;
+                system.services.frd.game_mode_description = description;
+                buffer.reply(&mut system.memory, command, &[]);
+            }
+        }
+        // Invitations need a populated friend list and server-side friends
+        // support. An empty invitation succeeds; a real invite fails honestly.
+        0x001F => {
+            if buffer.get(&mut system.memory, 1) == 0 {
+                buffer.reply(&mut system.memory, command, &[]);
+            } else {
+                system.services.frd.last_response_result = errors::NOT_CONNECTED.0;
+                buffer.reply_error(&mut system.memory, command, errors::NOT_CONNECTED.0);
+            }
+        }
         // GetMyNcPrincipalId is stored in the separate FPMD mydata record.
         0x000E => match nc_principal_id_result(system) {
             Ok(principal_id) => buffer.reply(&mut system.memory, command, &[principal_id]),
@@ -1305,9 +1357,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 }
             }
         }
-        // GetFriendKeyList and GetEventNotification: no local friends or
-        // queued notifications. Both APIs return a count in cmdbuf[3].
-        0x0011 | 0x0022 => buffer.reply(&mut system.memory, command, &[0, 0]),
+        // GetFriendKeyList reports no local friends (the returned count is
+        // cmdbuf[2]). GetEventNotification returns its event count in cmdbuf[3].
+        0x0011 => buffer.reply(&mut system.memory, command, &[0, 0]),
+        0x0022 => buffer.reply(&mut system.memory, command, &[0, 0, 0]),
         // lookups on friends the title names, of which it has none to name
         0x0012..=0x001A => buffer.reply(&mut system.memory, command, &[]),
         // IsIncludedInFriendList
@@ -1867,6 +1920,121 @@ mod tests {
         assert!(parse_friend_account(&account_bytes()[..0x57]).is_none());
     }
     
+    #[test]
+    fn update_and_get_my_presence_round_trip_both_packed_buffers() {
+        use zakuro_common::memory_map::TLS_IPC_STATIC_BUFFERS;
+
+        let (mut system, buffer) = system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let description_pointer = tls + 0x500;
+        let output_pointer = tls + 0x800;
+        let description_descriptor = Descriptor::static_buffer(0x100, 2);
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 2 * 8,
+            &description_descriptor.to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 2 * 8 + 4,
+            &description_pointer.to_le_bytes(),
+        );
+
+        let mut description = vec![0; 0x100];
+        description[..8].copy_from_slice(b"MK7 RACE");
+        system.memory.write_bytes(description_pointer, &description);
+
+        buffer.set(&mut system.memory, 0, Header::new(0x001E, 11, 2).0);
+        for index in 0..11 {
+            buffer.set(&mut system.memory, index + 1, 0x1111_0000 + index as u32);
+        }
+        buffer.set(&mut system.memory, 12, description_descriptor);
+        buffer.set(&mut system.memory, 13, description_pointer);
+        let header = buffer.header(&mut system.memory);
+        assert!(handle(&mut system, &buffer, header));
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+
+        let output_descriptor = Descriptor::static_buffer(0x12C, 0);
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS,
+            &output_descriptor.to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 4,
+            &output_pointer.to_le_bytes(),
+        );
+        buffer.set(&mut system.memory, 0, Header::new(0x0008, 0, 0).0);
+        let header = buffer.header(&mut system.memory);
+        assert!(handle(&mut system, &buffer, header));
+
+        let mut result = vec![0; 0x12C];
+        system.memory.read_bytes(output_pointer, &mut result);
+        for index in 0..11 {
+            assert_eq!(
+                u32::from_le_bytes(result[index * 4..index * 4 + 4].try_into().unwrap()),
+                0x1111_0000 + index as u32
+            );
+        }
+        assert_eq!(&result[0x2C..0x34], b"MK7 RACE");
+        assert!(result[0x34..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn update_game_mode_description_is_readable_by_get_my_presence() {
+        use zakuro_common::memory_map::TLS_IPC_STATIC_BUFFERS;
+
+        let (mut system, buffer) = system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let input_pointer = tls + 0x500;
+        let output_pointer = tls + 0x800;
+        let input_descriptor = Descriptor::static_buffer(0x100, 2);
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 2 * 8,
+            &input_descriptor.to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 2 * 8 + 4,
+            &input_pointer.to_le_bytes(),
+        );
+        let mut description = vec![0; 0x100];
+        description[..7].copy_from_slice(b"ONLINE!");
+        system.memory.write_bytes(input_pointer, &description);
+
+        buffer.set(&mut system.memory, 0, Header::new(0x001D, 0, 2).0);
+        buffer.set(&mut system.memory, 1, input_descriptor);
+        buffer.set(&mut system.memory, 2, input_pointer);
+        let header = buffer.header(&mut system.memory);
+        assert!(handle(&mut system, &buffer, header));
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+
+        let output_descriptor = Descriptor::static_buffer(0x12C, 0);
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS,
+            &output_descriptor.to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 4,
+            &output_pointer.to_le_bytes(),
+        );
+        buffer.set(&mut system.memory, 0, Header::new(0x0008, 0, 0).0);
+        let header = buffer.header(&mut system.memory);
+        assert!(handle(&mut system, &buffer, header));
+
+        let mut result = vec![0; 0x12C];
+        system.memory.read_bytes(output_pointer, &mut result);
+        assert!(result[..0x2C].iter().all(|byte| *byte == 0));
+        assert_eq!(&result[0x2C..0x33], b"ONLINE!");
+    }
+
+    #[test]
+    fn get_event_notification_returns_zero_notifications_not_the_requested_capacity() {
+        let (mut system, buffer) = system_with_thread();
+        buffer.set(&mut system.memory, 0, Header::new(0x0022, 1, 0).0);
+        buffer.set(&mut system.memory, 1, 8);
+        let header = buffer.header(&mut system.memory);
+        assert!(handle(&mut system, &buffer, header));
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert_eq!(buffer.get(&mut system.memory, 3), 0);
+    }
+
     #[test]
     fn zero_nc_principal_id_is_rejected_only_when_pretendo_is_enabled() {
         let (mut system, _) = system_with_thread();
