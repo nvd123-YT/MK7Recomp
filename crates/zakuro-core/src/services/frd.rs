@@ -333,8 +333,6 @@ fn default_fpd_version() -> u16 { 0x0010 }
 struct NascJob {
     body: String,
     fpd_version: u16,
-    certificate: PathBuf,
-    private_key: PathBuf,
 }
 
 const MK7_NEX_SERVER_ID: u32 = 0x0001_DB00;
@@ -745,13 +743,6 @@ fn make_nasc_job(
     } else {
         None
     };
-    let data_dir = system.config.data_dir.as_ref().ok_or_else(|| "the application data directory is unavailable".to_owned())?;
-    let certificate = data_dir.join("sysdata/ctr-common-1-cert.pem");
-    let private_key = data_dir.join("sysdata/ctr-common-1-key.pem");
-    if !certificate.is_file() || !private_key.is_file() {
-        return Err("NASC requires your own ctr-common-1-cert.pem and ctr-common-1-key.pem in sysdata".to_owned());
-    }
-
     let normalize_mac = |value: &str| value.replace(':', "").replace('-', "").to_ascii_lowercase();
     let mac = normalize_mac(&device.mac_address);
     let bssid = normalize_mac(&device.bssid);
@@ -817,15 +808,17 @@ fn make_nasc_job(
     Ok(NascJob {
         body: nasc_form_body(&fields),
         fpd_version: device.fpd_version,
-        certificate,
-        private_key,
     })
 }
 
 fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), String> {
+    // NASC requires the shared 3DS ClCertA client credential. It is bundled
+    // with the emulator and written to owner-only temporary DER files just for
+    // curl; no PEM/key import or persistent private-key file is needed.
+    let credentials = crate::services::ctr_common::TemporaryClientCertificate::create()?;
+    let certificate = credentials.certificate_path().to_string_lossy().into_owned();
+    let private_key = credentials.private_key_path().to_string_lossy().into_owned();
     let user_agent = format!("CTR FPD/{:04X}", job.fpd_version);
-    let certificate = job.certificate.to_string_lossy().into_owned();
-    let private_key = job.private_key.to_string_lossy().into_owned();
     let mut child = Command::new("curl")
         .args([
             "--silent", "--show-error",
@@ -835,6 +828,8 @@ fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), St
             "--header", "X-GameId: 0001DB00",
             "--header", user_agent.as_str(),
             "--header", "Content-Type: application/x-www-form-urlencoded",
+            "--cert-type", "DER",
+            "--key-type", "DER",
             "--cert", certificate.as_str(),
             "--key", private_key.as_str(),
             "--data-binary", "@-",
