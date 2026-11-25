@@ -217,7 +217,7 @@ fn parse_prefix(image_name: &str, image_size: u64, prefix: &[u8]) -> Result<Nand
 /// copied, and no console data is uploaded. This does NOT decrypt CTRNAND or
 /// extract the Friends system-save archive.
 pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupReport, String> {
-    let mut report = inspect_nand_backup(path)?;
+    let report = inspect_nand_backup(path)?;
     let prefix = read_prefix_again(path, &report.image_name)?;
     let essential = &prefix[ESSENTIAL_OFFSET..ESSENTIAL_OFFSET + ESSENTIAL_SIZE];
 
@@ -289,7 +289,6 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
         }
     }
 
-    report.image_name = report.image_name.clone();
     Ok(report)
 }
 
@@ -443,18 +442,21 @@ mod tests {
 
     fn fake_nand_prefix() -> Vec<u8> {
         let mut prefix = vec![0u8; PREFIX_SIZE];
-        let ncsd = &mut prefix[..0x200];
-        ncsd[0x100..0x104].copy_from_slice(b"NCSD");
-        ncsd[0x104..0x108].copy_from_slice(&0x12u32.to_le_bytes());
-        ncsd[0x110] = 1;
-        ncsd[0x111] = 3;
-        ncsd[0x120..0x124].copy_from_slice(&1u32.to_le_bytes());
-        ncsd[0x124..0x128].copy_from_slice(&1u32.to_le_bytes());
-        ncsd[0x128..0x12C].copy_from_slice(&2u32.to_le_bytes());
-        ncsd[0x12C..0x130].copy_from_slice(&1u32.to_le_bytes());
+        {
+            let ncsd = &mut prefix[..0x200];
+            ncsd[0x100..0x104].copy_from_slice(b"NCSD");
+            ncsd[0x104..0x108].copy_from_slice(&0x12u32.to_le_bytes());
+            ncsd[0x110] = 1;
+            ncsd[0x111] = 3;
+            ncsd[0x120..0x124].copy_from_slice(&1u32.to_le_bytes());
+            ncsd[0x124..0x128].copy_from_slice(&1u32.to_le_bytes());
+            ncsd[0x128..0x12C].copy_from_slice(&2u32.to_le_bytes());
+            ncsd[0x12C..0x130].copy_from_slice(&1u32.to_le_bytes());
+        }
+        let ncsd_header = prefix[..0x200].to_vec();
 
         let essential = &mut prefix[ESSENTIAL_OFFSET..ESSENTIAL_OFFSET + ESSENTIAL_SIZE];
-        essential[EXEFS_HEADER_SIZE..EXEFS_HEADER_SIZE + 0x200].copy_from_slice(ncsd);
+        essential[EXEFS_HEADER_SIZE..EXEFS_HEADER_SIZE + 0x200].copy_from_slice(&ncsd_header);
         const RECORDS: [(&str, usize, usize); 8] = [
             ("nand_hdr", 0x0000, 0x0200),
             ("secinfo",  0x0200, 0x0111),
