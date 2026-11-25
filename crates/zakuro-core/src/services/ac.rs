@@ -1,13 +1,22 @@
 //! ac:u / ac:i, the 3DS infrastructure-connection manager.
 //!
-//! Pretendo mode represents the host's working internet connection to the
-//! guest. This is connection-state emulation only; it does not perform NASC
-//! authentication or guarantee that the selected endpoint is reachable.
+//! Pretendo mode exposes the host's Internet connection only after a TCP
+//! reachability probe to the NASC endpoint succeeds. This is not a substitute
+//! for the game's independent NASC authentication or NEX session setup.
+
+use std::io;
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 
 use crate::kernel::ipc::{CommandBuffer, Descriptor, Header};
 use crate::kernel::object::ObjectId;
 use crate::NetworkProvider;
 use crate::System;
+
+const NASC_REACHABILITY_ENDPOINT: &str = "nasc.pretendo.cc:443";
+const REACHABILITY_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct AcState {
@@ -19,6 +28,78 @@ pub struct AcState {
     disconnect_event: Option<ObjectId>,
     #[serde(skip)]
     close_event: Option<ObjectId>,
+    #[serde(skip)]
+    pending_connect: Option<Receiver<io::Result<()>>>,
+    #[serde(default)]
+    last_error: u32,
+}
+
+/// Checks a TCP endpoint without blocking the emulation thread. Keep this
+/// helper separate from the fixed Pretendo target so its socket behaviour can
+/// be regression-tested against a local listener in CI.
+fn check_tcp_endpoint(endpoint: &str) -> io::Result<()> {
+    let addresses = endpoint.to_socket_addrs()?;
+    let mut last_error = None;
+
+    for address in addresses.filter(SocketAddr::is_ipv4) {
+        match TcpStream::connect_timeout(&address, REACHABILITY_TIMEOUT) {
+            Ok(stream) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "the Pretendo NASC endpoint did not resolve to an IPv4 address",
+        )
+    }))
+}
+
+fn start_connectivity_probe() -> Receiver<io::Result<()>> {
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = send.send(check_tcp_endpoint(NASC_REACHABILITY_ENDPOINT));
+    });
+    receive
+}
+
+/// Completes AC's asynchronous connect request and signals the guest event.
+/// A failed probe must never leave the guest believing it has Internet access.
+pub fn poll(system: &mut System) {
+    let ready = system.services.ac.pending_connect.as_ref().and_then(|pending| {
+        match pending.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "Pretendo reachability worker stopped",
+            ))),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    });
+
+    let Some(result) = ready else { return };
+    let (event, failure) = {
+        let state = &mut system.services.ac;
+        state.pending_connect = None;
+        state.connected = result.is_ok();
+        state.last_error = if state.connected {
+            0
+        } else {
+            zakuro_common::result::errors::NOT_CONNECTED.0
+        };
+        (state.connect_event, result.err())
+    };
+
+    if let Some(error) = failure {
+        log::warn!("ac:u could not reach Pretendo NASC at {NASC_REACHABILITY_ENDPOINT}: {error}");
+    }
+    if let Some(event) = event {
+        system.kernel.signal_event(event);
+    }
 }
 
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
@@ -42,14 +123,33 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let event = handles.first().and_then(|handle| system.kernel.handles.resolve(*handle));
             if !online_provider {
                 system.services.ac.connected = false;
-                buffer.reply_error(&mut system.memory, command, zakuro_common::result::errors::NOT_CONNECTED.0);
+                system.services.ac.last_error = zakuro_common::result::errors::NOT_CONNECTED.0;
+                buffer.reply_error(&mut system.memory, command, system.services.ac.last_error);
                 return true;
             }
-            system.services.ac.connect_event = event;
-            system.services.ac.connected = true;
-            if let Some(event) = event {
-                system.kernel.signal_event(event);
+            let Some(event) = event else {
+                system.services.ac.last_error = zakuro_common::result::errors::NOT_CONNECTED.0;
+                buffer.reply_error(&mut system.memory, command, system.services.ac.last_error);
+                return true;
+            };
+
+            if system.services.ac.pending_connect.is_some() {
+                buffer.reply_error(
+                    &mut system.memory,
+                    command,
+                    zakuro_common::result::errors::NOT_CONNECTED.0,
+                );
+                return true;
             }
+            system.services.ac.connect_event = Some(event);
+            if system.services.ac.connected {
+                system.kernel.signal_event(event);
+            } else {
+                system.services.ac.last_error = 0;
+                system.services.ac.pending_connect = Some(start_connectivity_probe());
+            }
+            // ConnectAsync returns once the request is queued. Completion is
+            // reported later through the supplied event handle.
             buffer.reply(&mut system.memory, command, &[]);
         }
         // GetConnectResult.
@@ -57,12 +157,24 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             if system.services.ac.connected && online_provider {
                 buffer.reply(&mut system.memory, command, &[]);
             } else {
-                buffer.reply_error(&mut system.memory, command, zakuro_common::result::errors::NOT_CONNECTED.0);
+                let error = if system.services.ac.last_error == 0 {
+                    zakuro_common::result::errors::NOT_CONNECTED.0
+                } else {
+                    system.services.ac.last_error
+                };
+                buffer.reply_error(&mut system.memory, command, error);
             }
         }
         // CancelConnectAsync.
         0x0007 => {
-            if system.services.ac.connected {
+            if system.services.ac.pending_connect.take().is_some() {
+                system.services.ac.connected = false;
+                system.services.ac.last_error = zakuro_common::result::errors::NOT_CONNECTED.0;
+                if let Some(event) = system.services.ac.connect_event {
+                    system.kernel.signal_event(event);
+                }
+                buffer.reply(&mut system.memory, command, &[]);
+            } else if system.services.ac.connected {
                 buffer.reply_error(&mut system.memory, command, zakuro_common::result::errors::NOT_CONNECTED.0);
             } else {
                 buffer.reply(&mut system.memory, command, &[]);
@@ -72,15 +184,22 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0008 => {
             let handles = translated_handles(system, buffer, header);
             let close_event = handles.first().and_then(|handle| system.kernel.handles.resolve(*handle));
-            let (was_connected, disconnect_event) = {
+            let (was_connected, was_connecting, disconnect_event, connect_event) = {
                 let state = &mut system.services.ac;
                 let was_connected = state.connected;
+                let was_connecting = state.pending_connect.take().is_some();
                 state.connected = false;
+                state.last_error = zakuro_common::result::errors::NOT_CONNECTED.0;
                 state.close_event = close_event;
-                (was_connected, state.disconnect_event)
+                (was_connected, was_connecting, state.disconnect_event, state.connect_event)
             };
             if was_connected {
                 if let Some(event) = disconnect_event {
+                    system.kernel.signal_event(event);
+                }
+            }
+            if was_connecting {
+                if let Some(event) = connect_event {
                     system.kernel.signal_event(event);
                 }
             }
@@ -91,18 +210,18 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // GetCloseResult.
         0x0009 => buffer.reply(&mut system.memory, command, &[]),
-        // GetLastErrorCode has no active error after a successful local setup.
-        0x000A => buffer.reply(&mut system.memory, command, &[0]),
+        // GetLastErrorCode.
+        0x000A => buffer.reply(&mut system.memory, command, &[system.services.ac.last_error]),
         // GetInfraPriority returns the default infrastructure priority.
         0x0027 => buffer.reply(&mut system.memory, command, &[0]),
-        // GetStatus: 3 means internet reachable/available to the guest.
+        // GetStatus: 3 means Internet reachable/available to the guest.
         0x000C => {
-            let status = if online_provider { 3 } else { 0 };
+            let status = if system.services.ac.connected && online_provider { 3 } else { 0 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
         // GetWifiStatus returns AC_AP_TYPE_* flags; slot 1 is BIT(1) = 0x02.
         0x000D => {
-            let status = if online_provider { 0x02 } else { 0 };
+            let status = if system.services.ac.connected && online_provider { 0x02 } else { 0 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
         // RegisterDisconnectEvent(process id, event).
@@ -114,7 +233,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // IsConnected.
         0x003E => {
-            buffer.reply(&mut system.memory, command, &[u32::from(system.services.ac.connected && online_provider)]);
+            buffer.reply(
+                &mut system.memory,
+                command,
+                &[u32::from(system.services.ac.connected && online_provider)],
+            );
         }
         // SetClientVersion.
         0x0040 => buffer.reply(&mut system.memory, command, &[]),
@@ -131,13 +254,34 @@ mod tests {
     use crate::services::tests::system_with_thread;
 
     #[test]
-    fn wifi_status_uses_the_libctru_slot_one_bit() {
+    fn wifi_status_requires_a_completed_internet_connection() {
         let (mut system, buffer) = system_with_thread();
         system.config.network_provider = NetworkProvider::Pretendo;
         buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
         let header = buffer.header(&mut system.memory);
         handle(&mut system, &buffer, header);
-        assert_eq!(buffer.get(&mut system.memory, 2), 0x02);
+        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+
+        system.services.ac.connected = true;
+        buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
+        let header = buffer.header(&mut system.memory);
+        handle(&mut system, &buffer, header);
+        assert_eq!(buffer.get(&mut system.memory, 1), 0x02);
+    }
+
+    #[test]
+    fn tcp_reachability_probe_works_against_a_local_listener() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        assert!(check_tcp_endpoint(&endpoint).is_ok());
+    }
+
+    #[test]
+    fn tcp_reachability_probe_reports_a_closed_endpoint() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        assert!(check_tcp_endpoint(&endpoint).is_err());
     }
 }
 
