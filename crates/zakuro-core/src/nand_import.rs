@@ -511,6 +511,7 @@ mod tests {
             }
             if index == 1 {
                 essential[data_start + 0x100] = 1; // USA
+                essential[data_start + 0x102..data_start + 0x111].fill(0);
                 essential[data_start + 0x102..data_start + 0x10C].copy_from_slice(b"CTR1234567");
             }
             if index == 3 {
