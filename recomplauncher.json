@@ -172,14 +172,14 @@
     },
     {
       "id": "open_online_data",
-      "label": "Open Pretendo device data",
-      "help": "Place your own LocalFriendCodeSeed_B and add nasc.json with your console's MAC address, Wi-Fi BSSID, AP slot details, device name and serial number. The shared 3DS HTTPS client certificate is built into MK7Recomp; you do not need to import a certificate or private key here. Cartridge dumps also need their exact 17-byte ROM ID as 34 hex digits in romid_hex. Private console identity data is never bundled.",
+      "label": "Legacy: Open extracted Pretendo device data",
+      "help": "Transitional manual setup for the current legacy Pretendo path only. The planned setup is one NAND backup import with automatic extraction; this folder should no longer need manual LocalFriendCodeSeed_B or nasc.json files once the importer is implemented. Do not put shared or other people's console identity data here.",
       "open": "online_data"
     },
     {
       "id": "open_friends_account",
-      "label": "Open Pretendo Friends account data",
-      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account and 2/mydata. The game reads the FRD Principal ID, NEX password, UID-HMAC and NC Principal ID from these files. They are private account data; never share them.",
+      "label": "Legacy: Open extracted Pretendo Friends data",
+      "help": "Transitional manual setup for the current legacy Pretendo path only. The planned one-NAND importer will extract the Friends account and mydata records automatically. Do not share these private account records.",
       "open": "friends_account"
     }
   ],
