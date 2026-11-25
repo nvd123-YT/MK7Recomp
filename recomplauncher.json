@@ -786,7 +786,7 @@
       "id": "network_provider",
       "label": "Legacy Pretendo routing",
       "group": "Online",
-      "help": "Legacy Pretendo routing. The intended setup is one NAND backup imported through the game's Import NAND action; the app extracts device data locally. The importer currently does not yet decrypt the Friends system-save archive, so this setting is still experimental and races are not ready.",
+      "help": "Legacy Pretendo routing. Import your own NAND.zip using the game's Import NAND action. Full Friends account extraction requires the matching same-console nand.fat16.xorpad in that ZIP; a plain NAND dump imports device identity only. Local extraction is implemented but not yet validated against a real dump or Pretendo login. This does not mean races are ready.",
       "choices": [
         {
           "label": "Off",
@@ -809,7 +809,7 @@
       "id": "auto_repair_uidhmac",
       "label": "Repair UID-HMAC automatically",
       "group": "Online",
-      "help": "Legacy Pretendo-only option. Opt-in: sends the PrincipalID and NEX password from your Friends account record to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. The one-NAND importer does not yet extract that account record, so this option is not usable from a NAND-only import yet. Off by default.",
+      "help": "Legacy Pretendo-only option. Use only when the imported Friends account's eight-character UID-HMAC is missing or rejected. Opt-in: sends its PrincipalID and NEX password to api.pretendo.cc over HTTPS to request a replacement HMAC. This modifies the local account record after preserving a backup. Off by default.",
       "choices": [
         {
           "label": "Off (use imported HMAC)",
