@@ -85,10 +85,12 @@ fn read_zip_image(file: File) -> Result<(String, u64, Vec<u8>), String> {
         if entry.is_dir() {
             continue;
         }
-        let basename = entry.name().rsplit('/').next().unwrap_or(entry.name());
+        let entry_name = entry.name()
+            .map_err(|error| format!("ZIP entry {index} has an invalid name: {error}"))?;
+        let basename = entry_name.rsplit('/').next().unwrap_or(entry_name.as_ref());
         let normalized = basename.to_ascii_lowercase();
         if matches!(normalized.as_str(), "nand.bin" | "sysnand.bin" | "emunand.bin" | "nandmin.bin") {
-            candidates.push((index, entry.name().to_owned(), entry.size()));
+            candidates.push((index, entry_name.into_owned(), entry.size()));
         }
     }
 
@@ -124,7 +126,9 @@ fn read_zip_image(file: File) -> Result<(String, u64, Vec<u8>), String> {
         if entry.is_dir() {
             continue;
         }
-        let basename = entry.name().rsplit('/').next().unwrap_or(entry.name());
+        let entry_name = entry.name()
+            .map_err(|error| format!("ZIP entry {entry_index} has an invalid name: {error}"))?;
+        let basename = entry_name.rsplit('/').next().unwrap_or(entry_name.as_ref());
         if basename.eq_ignore_ascii_case("essential.exefs") {
             essentials.push((entry_index, entry.size()));
         }
@@ -254,7 +258,8 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
     let sysdata = data_dir.join("sysdata");
     fs::create_dir_all(&sysdata)
         .map_err(|error| format!("could not create the application's private system-data folder: {error}"))?;
-    set_private_directory_permissions(&sysdata)?;
+    set_private_directory_permissions(&sysdata)
+        .map_err(|error| format!("could not secure the system-data folder: {error}"))?;
 
     let seed = essential_file(essential, 3);
     if seed.len() != 0x110 || seed[0x108..0x110].iter().all(|byte| *byte == 0) {
