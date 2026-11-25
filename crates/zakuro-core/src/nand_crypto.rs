@@ -75,6 +75,7 @@ pub fn decrypt_ctrnand<RN: Read, RX: Read, WO: Write>(
 
 #[derive(Debug, Clone, Copy)]
 struct FatEntry {
+    name: String,
     attributes: u8,
     first_cluster: u16,
     size: u32,
@@ -85,13 +86,10 @@ struct Fat16<R> {
     bytes_per_sector: u64,
     sectors_per_cluster: u64,
     reserved_sectors: u64,
-    fat_count: u64,
-    sectors_per_fat: u64,
     root_entries: u64,
     root_start: u64,
     root_bytes: u64,
     data_start: u64,
-    total_sectors: u64,
     cluster_bytes: u64,
     cluster_count: u64,
 }
@@ -152,13 +150,10 @@ impl<R: Read + Seek> Fat16<R> {
             bytes_per_sector,
             sectors_per_cluster,
             reserved_sectors,
-            fat_count,
-            sectors_per_fat: sectors_per_fat_16,
             root_entries,
             root_start: root_start_sector * bytes_per_sector,
             root_bytes: root_entries * 32,
             data_start: data_start_sector * bytes_per_sector,
-            total_sectors,
             cluster_bytes: sectors_per_cluster * bytes_per_sector,
             cluster_count,
         })
@@ -254,7 +249,7 @@ pub fn extract_friends_disa<R: Read + Seek>(image: R) -> Result<Vec<u8>, String>
     let mut fat = Fat16::new(image)?;
     let root = fat.root_entries()?;
     let data_dir = root.into_iter()
-        .find(|entry| entry.attributes & 0x10 != 0 && entry_name_matches_root(&entry, b"data"))
+        .find(|entry| entry.attributes & 0x10 != 0 && short_name_matches(&entry.name, "data"))
         .ok_or_else(|| "CTRNAND has no /data directory".to_owned())?;
 
     let mut sysdata_cluster = None;
@@ -263,7 +258,7 @@ pub fn extract_friends_disa<R: Read + Seek>(image: R) -> Result<Vec<u8>, String>
             continue;
         }
         for child in fat.directory_entries(id0.first_cluster)? {
-            if child.attributes & 0x10 != 0 && short_name_matches(&fat_name_for_entry(&child), "sysdata") {
+            if child.attributes & 0x10 != 0 && short_name_matches(&child.name, "sysdata") {
                 sysdata_cluster = Some(child.first_cluster);
                 break;
             }
@@ -277,11 +272,11 @@ pub fn extract_friends_disa<R: Read + Seek>(image: R) -> Result<Vec<u8>, String>
 
     let save_dir = fat.directory_entries(sysdata_cluster)?
         .into_iter()
-        .find(|entry| entry.attributes & 0x10 != 0 && short_name_matches(&fat_name_for_entry(entry), "00010032"))
+        .find(|entry| entry.attributes & 0x10 != 0 && short_name_matches(&entry.name, "00010032"))
         .ok_or_else(|| "the Friends system save (00010032) is missing from CTRNAND".to_owned())?;
     let save_file = fat.directory_entries(save_dir.first_cluster)?
         .into_iter()
-        .find(|entry| entry.attributes & 0x10 == 0 && short_name_matches(&fat_name_for_entry(entry), "00000000"))
+        .find(|entry| entry.attributes & 0x10 == 0 && short_name_matches(&entry.name, "00000000"))
         .ok_or_else(|| "the Friends system-save image (00000000) is missing".to_owned())?;
 
     let bytes = fat.read_file(save_file)?;
@@ -303,23 +298,17 @@ fn parse_directory(bytes: &[u8]) -> Vec<FatEntry> {
         }
         let first_cluster = u16::from_le_bytes([raw[26], raw[27]]);
         let size = u32::from_le_bytes(raw[28..32].try_into().unwrap());
+        let base = String::from_utf8_lossy(&raw[..8]).trim_end().to_owned();
+        let extension = String::from_utf8_lossy(&raw[8..11]).trim_end().to_owned();
+        let name = if extension.is_empty() { base } else { format!("{base}.{extension}") };
         entries.push(FatEntry {
+            name,
             attributes: raw[11],
             first_cluster,
             size,
         });
     }
     entries
-}
-
-fn fat_name_for_entry(_entry: &FatEntry) -> String {
-    // The directory parser stores only the fields needed for traversal; use
-    // the raw-name-aware parser in parse_named_directory for all names.
-    String::new()
-}
-
-fn entry_name_matches_root(_entry: &FatEntry, _name: &[u8]) -> bool {
-    false
 }
 
 fn short_name_matches(name: &str, expected: &str) -> bool {
