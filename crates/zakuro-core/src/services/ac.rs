@@ -380,6 +380,33 @@ mod tests {
     }
 
     #[test]
+    fn ac_static_wifi_and_proxy_buffers_are_cleared() {
+        use zakuro_common::memory_map::TLS_IPC_STATIC_BUFFERS;
+
+        let (mut system, buffer) = system_with_thread();
+        let tls = system.kernel.current().unwrap().tls;
+        let output = tls + 0x100;
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS,
+            &Descriptor::static_buffer(0x100, 0).to_le_bytes(),
+        );
+        system.memory.write_bytes(
+            tls + TLS_IPC_STATIC_BUFFERS + 4,
+            &output.to_le_bytes(),
+        );
+
+        for (command, size) in [(0x0034u16, 0x20usize), (0x0039, 0x100), (0x003A, 0x20), (0x003B, 0x20), (0x040F, 0x20)] {
+            system.memory.write_bytes(output, &vec![0xA5; size]);
+            buffer.set(&mut system.memory, 0, Header::new(command, 0, 0).0);
+            let header = buffer.header(&mut system.memory);
+            assert!(handle(&mut system, &buffer, header));
+            let mut bytes = vec![0xA5; size];
+            system.memory.read_bytes(output, &mut bytes);
+            assert!(bytes.iter().all(|byte| *byte == 0), "command 0x{command:04X}");
+        }
+    }
+
+    #[test]
     fn ac_wifi_and_proxy_queries_report_no_physical_wifi_or_proxy() {
         let (mut system, buffer) = system_with_thread();
         for (command, expected) in [(0x0033, 0), (0x0035, 0), (0x0036, 0), (0x0038, 0)] {
