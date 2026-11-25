@@ -277,13 +277,35 @@ mod tests {
         buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
         let header = buffer.header(&mut system.memory);
         handle(&mut system, &buffer, header);
-        assert_eq!(buffer.get(&mut system.memory, 1), 0);
+        assert_eq!(buffer.get(&mut system.memory, 2), 0);
 
         system.services.ac.connected = true;
         buffer.set(&mut system.memory, 0, Header::new(0x000D, 0, 0).0);
         let header = buffer.header(&mut system.memory);
         handle(&mut system, &buffer, header);
-        assert_eq!(buffer.get(&mut system.memory, 1), 0x02);
+        assert_eq!(buffer.get(&mut system.memory, 2), 0x02);
+    }
+
+    #[test]
+    fn connect_async_translation_extracts_the_guest_completion_event() {
+        let (mut system, buffer) = system_with_thread();
+        let (object, handle) = system
+            .kernel
+            .create_event(crate::kernel::sync::ResetType::OneShot, "AC completion");
+        // libctru ACU_ConnectAsync sends PID descriptor, one copied event
+        // handle, then the config static buffer (0x40006 translate words).
+        buffer.set(&mut system.memory, 0, Header::new(0x0004, 0, 6).0);
+        buffer.set(&mut system.memory, 1, 0x20);
+        buffer.set(&mut system.memory, 2, 0x1234);
+        buffer.set(&mut system.memory, 3, Descriptor::handles(1));
+        buffer.set(&mut system.memory, 4, handle);
+        buffer.set(&mut system.memory, 5, Descriptor::static_buffer(0x200, 1));
+        buffer.set(&mut system.memory, 6, 0x0800_1000);
+        let header = buffer.header(&mut system.memory);
+
+        let translated = translated_handles(&mut system, &buffer, header);
+        assert_eq!(translated.len(), 1);
+        assert_eq!(system.kernel.handles.resolve(translated[0]), Some(object));
     }
 
     #[test]
