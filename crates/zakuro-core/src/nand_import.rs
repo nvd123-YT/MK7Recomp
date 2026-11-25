@@ -323,7 +323,7 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
     let mut pending_outputs = Vec::new();
     for (target, bytes) in outputs {
         match fs::read(&target) {
-            Ok(existing) if target.file_name().is_some_and(|name| name == "nasc.json") => {}
+            Ok(_existing) if target.file_name().is_some_and(|name| name == "nasc.json") => {}
             Ok(existing) if existing == bytes => {}
             Ok(_) => {
                 return Err(format!(
@@ -519,7 +519,7 @@ fn read_prefix_again(path: &Path, image_name: &str) -> Result<Vec<u8>, String> {
             let name = entry.name()
                 .map_err(|error| format!("ZIP entry {index} has an invalid name: {error}"))?
                 .to_owned();
-            let basename = name.rsplit('/').next().unwrap_or(name.as_str());
+            let basename = name.rsplit('/').next().unwrap_or(name.as_ref());
             if name == image_name {
                 if selected.replace((index, entry.size())).is_some() {
                     return Err("NAND.zip contains duplicate entries for the selected image".to_owned());
