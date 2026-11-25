@@ -55,13 +55,16 @@ impl NetworkIdentity {
         set_private_directory_permissions(&directory)?;
 
         let path = directory.join("identity.json");
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let identity = Self::generate()?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
             Ok(mut file) => {
-                let identity = Self::generate()?;
                 let stored = StoredIdentity {
                     schema: IDENTITY_SCHEMA,
                     account_id: encode_hex(&identity.account_id),
