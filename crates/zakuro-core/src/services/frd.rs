@@ -513,24 +513,29 @@ fn parse_stun_response(response: &[u8], transaction_id: &[u8; 12]) -> Option<Soc
     None
 }
 
-fn stun_binding(
-    socket: &UdpSocket,
-    server: SocketAddr,
-    change_ip_and_port: bool,
-) -> Option<(SocketAddr, SocketAddr)> {
-    let mut transaction_id = [0u8; 12];
-    getrandom::fill(&mut transaction_id).ok()?;
-    let attribute_length = if change_ip_and_port { 8 } else { 0 };
+fn build_stun_binding_request(transaction_id: [u8; 12], change_request: u32) -> Vec<u8> {
+    let attribute_length = if change_request == 0 { 0 } else { 8 };
     let mut request = vec![0u8; 20 + attribute_length];
     request[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
     request[2..4].copy_from_slice(&(attribute_length as u16).to_be_bytes());
     request[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
     request[8..20].copy_from_slice(&transaction_id);
-    if change_ip_and_port {
+    if change_request != 0 {
         request[20..22].copy_from_slice(&STUN_CHANGE_REQUEST.to_be_bytes());
         request[22..24].copy_from_slice(&4u16.to_be_bytes());
-        request[24..28].copy_from_slice(&6u32.to_be_bytes());
+        request[24..28].copy_from_slice(&change_request.to_be_bytes());
     }
+    request
+}
+
+fn stun_binding(
+    socket: &UdpSocket,
+    server: SocketAddr,
+    change_request: u32,
+) -> Option<(SocketAddr, SocketAddr)> {
+    let mut transaction_id = [0u8; 12];
+    getrandom::fill(&mut transaction_id).ok()?;
+    let request = build_stun_binding_request(transaction_id, change_request);
     socket.send_to(&request, server).ok()?;
     let deadline = std::time::Instant::now() + STUN_TIMEOUT;
     let mut response = [0u8; 1500];
@@ -548,6 +553,26 @@ fn stun_binding(
             Err(_) => return None,
         }
     }
+}
+
+/// A successful Test II response may arrive from an alternate IP and port.
+/// If that fails, Test III asks the same IP to reply from another port. Only
+/// report the documented port-independent value when either test is accepted;
+/// absent/unsupported CHANGE-REQUEST behavior stays unknown (0).
+fn detect_nat_filtering(socket: &UdpSocket, server: SocketAddr) -> u32 {
+    if stun_binding(socket, server, 0x06)
+        .is_some_and(|(_, source)| source != server)
+    {
+        return 1;
+    }
+
+    if stun_binding(socket, server, 0x02)
+        .is_some_and(|(_, source)| source.ip() == server.ip() && source.port() != server.port())
+    {
+        return 1;
+    }
+
+    0
 }
 
 /// Infer mapping from two different STUN endpoints. Filtering is reported as
@@ -644,18 +669,16 @@ fn detect_nat_properties(servers: Vec<String>) -> (u32, u32, u32) {
         }
     };
 
-    let first = stun_binding(&socket, endpoints[0], false);
+    let first = stun_binding(&socket, endpoints[0], 0);
     let second_endpoint = endpoints.iter().copied().find(|endpoint| *endpoint != endpoints[0]);
-    let second = second_endpoint.and_then(|endpoint| stun_binding(&socket, endpoint, false));
+    let second = second_endpoint.and_then(|endpoint| stun_binding(&socket, endpoint, 0));
     let mapping = match (first, second) {
         (Some((a, _)), Some((b, _))) if a == b => 1,
         (Some(_), Some(_)) => 2,
         _ => 0,
     };
 
-    let filtering = stun_binding(&socket, endpoints[0], true)
-        .filter(|(_, source)| *source != endpoints[0])
-        .map_or(0, |_| 1);
+    let filtering = detect_nat_filtering(&socket, endpoints[0]);
     let port_increment = detect_nat_port_increment(endpoints[0]);
     (mapping, filtering, port_increment)
 }
@@ -1648,6 +1671,24 @@ mod tests {
             (50_002, SocketAddr::from((ip, 60_005))),
         ];
         assert_eq!(infer_nat_port_increment(&inconsistent), 0);
+    }
+
+    #[test]
+    fn stun_change_request_builds_rfc3489_test_ii_and_iii_attributes() {
+        let transaction = [0x11u8; 12];
+        let test_ii = build_stun_binding_request(transaction, 0x06);
+        assert_eq!(test_ii.len(), 28);
+        assert_eq!(&test_ii[20..22], &STUN_CHANGE_REQUEST.to_be_bytes());
+        assert_eq!(&test_ii[22..24], &4u16.to_be_bytes());
+        assert_eq!(&test_ii[24..28], &6u32.to_be_bytes());
+
+        let test_iii = build_stun_binding_request(transaction, 0x02);
+        assert_eq!(test_iii.len(), 28);
+        assert_eq!(&test_iii[24..28], &2u32.to_be_bytes());
+
+        let ordinary = build_stun_binding_request(transaction, 0);
+        assert_eq!(ordinary.len(), 20);
+        assert_eq!(u16::from_be_bytes([ordinary[2], ordinary[3]]), 0);
     }
 
     #[test]
