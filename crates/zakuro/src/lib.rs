@@ -1473,6 +1473,30 @@ impl App {
                     self.library.scan(&folder);
                 }
             }
+            Action::ImportNand => {
+                let selected = rfd::FileDialog::new()
+                    .set_title("Select your own GodMode9 NAND.zip or NAND.bin backup")
+                    .add_filter("3DS NAND backup", &["zip", "bin"])
+                    .pick_file();
+                if let Some(path) = selected {
+                    match &self.data_dir {
+                        Some(data_dir) => match zakuro_core::nand_import::import_nand_backup(&path, data_dir) {
+                            Ok(report) => {
+                                self.menus.message = Some(format!(
+                                    "NAND image validated: {} · {} · {}. The signed device seed, SecureInfo, movable data and local virtual network configuration were extracted. The Friends system-save archive is still encrypted; automatic CTRNAND/DISA extraction is not finished, so Pretendo races are not ready from this import alone. Restart MK7Recomp after the next importer update.",
+                                    report.console_model, report.region, report.image_name
+                                ));
+                            }
+                            Err(error) => {
+                                self.menus.message = Some(format!("NAND import failed: {error}"));
+                            }
+                        },
+                        None => {
+                            self.menus.message = Some("The application data directory is unavailable; the NAND backup was not imported.".to_owned());
+                        }
+                    }
+                }
+            }
             Action::OpenDataFolder => {
                 match &self.data_dir {
                     Some(folder) => match std::fs::create_dir_all(folder) {
