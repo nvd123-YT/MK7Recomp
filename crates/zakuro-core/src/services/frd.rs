@@ -1582,6 +1582,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::tests::system_with_thread;
 
     fn account_bytes() -> Vec<u8> {
         let mut bytes = vec![0; 0x58];
