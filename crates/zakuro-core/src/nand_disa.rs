@@ -322,20 +322,25 @@ fn extract_save_files(save_image: &[u8], data_image: Option<&[u8]>) -> Result<(V
 
     let (dir_table, file_table) = if data_image.is_some() {
         let dir_offset = u64_at(fs, 0x48)?;
-        let dir_max = u32_at(fs, 0x50)? as usize;
         let file_offset = u64_at(fs, 0x58)?;
-        let file_max = u32_at(fs, 0x60)? as usize;
+        let dir_header = range(save_image, dir_offset, 4, "SAVE directory-table header")?;
+        let file_header = range(save_image, file_offset, 4, "SAVE file-table header")?;
+        let dir_count = u32::from_le_bytes(dir_header.try_into().unwrap()) as u64;
+        let file_count = u32::from_le_bytes(file_header.try_into().unwrap()) as u64;
+        if dir_count < 2 || dir_count > MAX_TABLE_ENTRIES as u64
+            || file_count < 1 || file_count > MAX_TABLE_ENTRIES as u64
+        {
+            return Err("the Friends SAVE directory or file table has invalid counts".to_owned());
+        }
         (
-            range(save_image, dir_offset, ((dir_max + 2) * 0x28) as u64, "SAVE directory table")?,
-            range(save_image, file_offset, ((file_max + 1) * 0x30) as u64, "SAVE file table")?,
+            range(save_image, dir_offset, dir_count * 0x28, "SAVE directory table")?,
+            range(save_image, file_offset, file_count * 0x30, "SAVE file table")?,
         )
     } else {
         let dir_block = u32_at(fs, 0x48)? as usize;
         let dir_blocks = u32_at(fs, 0x4C)? as usize;
-        let dir_max = u32_at(fs, 0x50)? as usize;
         let file_block = u32_at(fs, 0x58)? as usize;
         let file_blocks = u32_at(fs, 0x5C)? as usize;
-        let file_max = u32_at(fs, 0x60)? as usize;
         let dir_offset = dir_block.checked_mul(block_size)
             .ok_or_else(|| "SAVE directory-table offset overflows".to_owned())?;
         let dir_size = dir_blocks.checked_mul(block_size)
@@ -344,7 +349,6 @@ fn extract_save_files(save_image: &[u8], data_image: Option<&[u8]>) -> Result<(V
             .ok_or_else(|| "SAVE file-table offset overflows".to_owned())?;
         let file_size = file_blocks.checked_mul(block_size)
             .ok_or_else(|| "SAVE file-table size overflows".to_owned())?;
-        let _ = (dir_max, file_max);
         (
             range(data_region, dir_offset as u64, dir_size as u64, "SAVE directory table")?,
             range(data_region, file_offset as u64, file_size as u64, "SAVE file table")?,
@@ -461,7 +465,7 @@ fn validate_account(bytes: &[u8]) -> Result<(), String> {
     }
     let principal_id = u32_at(bytes, 0x14)?;
     let has_password = bytes[0x20..0x42].chunks_exact(2)
-        .take_while(|unit| **unit != [0, 0])
+        .take_while(|unit| unit[0] != 0 || unit[1] != 0)
         .any(|unit| unit[0] != 0 || unit[1] != 0);
     if principal_id == 0 || !has_password {
         return Err("the extracted Friends account has no NEX principal ID or password".to_owned());
