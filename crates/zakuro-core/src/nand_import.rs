@@ -242,7 +242,7 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
         "bssid": mac_text,
         "apinfo": "01:0000000000",
         "device_name": "Mario Kart 7",
-        "serial_number": report.serial_number,
+        "serial_number": report.serial_number.clone(),
         "fpd_version": 16
     });
     let nasc_bytes = serde_json::to_vec_pretty(&nasc_config)
