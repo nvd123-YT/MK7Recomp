@@ -1482,10 +1482,17 @@ impl App {
                     match &self.data_dir {
                         Some(data_dir) => match zakuro_core::nand_import::import_nand_backup(&path, data_dir) {
                             Ok(report) => {
-                                self.menus.message = Some(format!(
-                                    "NAND image validated: {} · {} · {}. The signed device seed, SecureInfo, movable data and local virtual network configuration were extracted. The Friends system-save archive is still encrypted; automatic CTRNAND/DISA extraction is not finished, so Pretendo races are not ready from this import alone. Restart MK7Recomp after the next importer update.",
-                                    report.console_model, report.region, report.image_name
-                                ));
+                                self.menus.message = Some(if report.friends_save_imported {
+                                    format!(
+                                        "NAND import completed: {} · {} · {}. Device identity and the Friends account/mydata records were extracted locally. This completes the local import only; Pretendo must still accept the signed device identity and a real NEX session must establish before a race is considered ready.",
+                                        report.console_model, report.region, report.image_name
+                                    )
+                                } else {
+                                    format!(
+                                        "NAND identity imported: {} · {} · {}. To extract the Friends account automatically, put the matching console's nand.fat16.xorpad (generated on that 3DS) alongside the NAND image inside the same ZIP and import that ZIP. No separate file picker is needed. This import alone is not online-ready.",
+                                        report.console_model, report.region, report.image_name
+                                    )
+                                });
                             }
                             Err(error) => {
                                 self.menus.message = Some(format!("NAND import failed: {error}"));
