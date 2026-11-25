@@ -167,3 +167,113 @@ pub const CTR_COMMON_1_KEY_DER: &[u8] = &[
     0x45, 0xeb, 0x7f, 0xfb, 0xcb, 0x40, 0xdd, 0x41, 0xea, 0x28, 0xa1, 0xad, 0x81, 0x24, 0x4b, 0xf6,
     0x48, 0x93, 0x31, 0x56, 0x32, 0xeb, 0x8a, 0x41, 0x1b, 0xd0,
 ];
+
+
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// Ephemeral files for curl's DER client-certificate interface. The shared
+/// key is not console-specific, but still gets owner-only permissions and is
+/// deleted as soon as the HTTP request has completed.
+pub struct TemporaryClientCertificate {
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+impl TemporaryClientCertificate {
+    pub fn create() -> Result<Self, String> {
+        let certificate = write_private_temp_der("cert", CTR_COMMON_1_CERT_DER)?;
+        let private_key = match write_private_temp_der("key", CTR_COMMON_1_KEY_DER) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_file(&certificate);
+                return Err(error);
+            }
+        };
+        Ok(Self { certificate, private_key })
+    }
+
+    pub fn certificate_path(&self) -> &Path {
+        &self.certificate
+    }
+
+    pub fn private_key_path(&self) -> &Path {
+        &self.private_key
+    }
+}
+
+impl Drop for TemporaryClientCertificate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.certificate);
+        let _ = fs::remove_file(&self.private_key);
+    }
+}
+
+fn write_private_temp_der(label: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    for _ in 0..8 {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| format!("could not generate a temporary certificate name: {error}"))?;
+        let suffix = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let path = std::env::temp_dir().join(format!(
+            "mk7recomp-ctr-common-1-{}-{label}-{suffix}.der",
+            std::process::id()
+        ));
+
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("could not write the temporary NASC credential: {error}"));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("could not create a temporary NASC credential: {error}"));
+            }
+        }
+    }
+    Err("could not allocate a unique temporary NASC credential path".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_common_credentials_are_valid_der_sequences() {
+        assert!(CTR_COMMON_1_CERT_DER.len() > 1000);
+        assert!(CTR_COMMON_1_KEY_DER.len() > 1000);
+        assert_eq!(&CTR_COMMON_1_CERT_DER[..4], &[0x30, 0x82, 0x04, 0xC3]);
+        assert_eq!(&CTR_COMMON_1_KEY_DER[..4], &[0x30, 0x82, 0x04, 0xA6]);
+    }
+
+    #[test]
+    fn temporary_credentials_are_owner_only_on_unix_and_removed_on_drop() {
+        let (certificate, private_key) = {
+            let files = TemporaryClientCertificate::create().unwrap();
+            let cert_path = files.certificate_path().to_owned();
+            let key_path = files.private_key_path().to_owned();
+            assert_eq!(fs::read(&cert_path).unwrap(), CTR_COMMON_1_CERT_DER);
+            assert_eq!(fs::read(&key_path).unwrap(), CTR_COMMON_1_KEY_DER);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&key_path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+            (cert_path, key_path)
+        };
+        assert!(!certificate.exists());
+        assert!(!private_key.exists());
+    }
+}
