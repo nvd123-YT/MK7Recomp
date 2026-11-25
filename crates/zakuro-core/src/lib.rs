@@ -18,6 +18,7 @@ pub mod plugin_3gx;
 pub mod plugin_3gx_loader;
 pub mod replay;
 pub mod network_identity;
+pub mod nand_import;
 pub mod room;
 pub mod recompiled;
 pub mod services;
