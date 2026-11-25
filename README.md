@@ -21,7 +21,7 @@ The application expects a legally obtained, decrypted dump of the game. It does 
 
 ## Unreleased improvements
 
-- Adds an experimental Pretendo network-provider setting, guest IPv4 TCP/UDP and DNS, an asynchronous HTTP client for NASC-style requests, guest AC connection events, and local FRD login events. This is networking groundwork only: HTTPS uses the host's `curl` and trust store, and NASC/NEX authentication plus actual matchmaking/racing have not yet been validated.
+- Adds an experimental Pretendo network-provider setting, guest IPv4 TCP/UDP and DNS, an asynchronous HTTP client for NASC-style requests, local FRD login events, and an AC connection probe that signals the guest only after the Pretendo NASC endpoint is reachable. HTTPS uses the host's `curl` and trust store. The game still performs its own PRUDP/NEX authentication, matchmaking, peer traversal and race traffic; those flows require end-to-end validation with a real game dump and the user's own account/device data.
 
 - To use Pretendo routing, select **Pretendo (experimental routing)** in Settings or RecompLauncher. With the network provider set to **Off**, FRD will not send NASC requests, account credentials, or STUN probes to Pretendo or external NAT servers. Import your own decrypted Friends system-save folder so the runtime can read `user/nand/system-save/0000000000010032/2/account`. RecompLauncher exposes an **Open Friends account data** action for the parent folder. The account record contains the FRD PrincipalID, local friend code, NEX password and UID-HMAC; the runtime does not invent an identity.
 
