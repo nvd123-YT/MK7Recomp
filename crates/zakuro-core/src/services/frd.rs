@@ -131,6 +131,18 @@ fn load_nc_principal_id(system: &System) -> u32 {
     }
 }
 
+/// A zero NC Principal ID is tolerated offline, but is never a valid Pretendo
+/// identity. Fail the guest query instead of letting an online title continue
+/// with a fabricated all-zero user identity.
+fn nc_principal_id_result(system: &System) -> Result<u32, u32> {
+    let principal_id = load_nc_principal_id(system);
+    if principal_id == 0 && system.config.network_provider == NetworkProvider::Pretendo {
+        Err(errors::NOT_CONNECTED.0)
+    } else {
+        Ok(principal_id)
+    }
+}
+
 fn form_encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {
@@ -1267,10 +1279,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
         // GetMyNcPrincipalId
         // GetMyNcPrincipalId is stored in the separate FPMD mydata record.
-        0x000E => {
-            let principal_id = load_nc_principal_id(system);
-            buffer.reply(&mut system.memory, command, &[principal_id]);
-        }
+        0x000E => match nc_principal_id_result(system) {
+            Ok(principal_id) => buffer.reply(&mut system.memory, command, &[principal_id]),
+            Err(error) => buffer.reply_error(&mut system.memory, command, error),
+        },
         // GetMyComment
         0x000F => buffer.reply(&mut system.memory, command, &[0; 9]),
         // GetMyPassword(size, static output buffer). The Friends account file
@@ -1856,6 +1868,17 @@ mod tests {
         assert!(parse_friend_account(&account_bytes()[..0x57]).is_none());
     }
     
+    #[test]
+    fn zero_nc_principal_id_is_rejected_only_when_pretendo_is_enabled() {
+        let (mut system, _) = system_with_thread();
+        assert_eq!(nc_principal_id_result(&system), Ok(0));
+        system.config.network_provider = NetworkProvider::Pretendo;
+        assert_eq!(
+            nc_principal_id_result(&system),
+            Err(errors::NOT_CONNECTED.0)
+        );
+    }
+
     #[test]
     fn friend_mydata_parser_reads_nc_principal_id_at_the_documented_offset() {
         let mut bytes = vec![0; 0x18];
