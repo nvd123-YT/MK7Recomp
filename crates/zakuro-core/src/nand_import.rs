@@ -112,6 +112,36 @@ fn read_zip_image(file: File) -> Result<(String, u64, Vec<u8>), String> {
     let mut prefix = vec![0u8; PREFIX_SIZE];
     entry.read_exact(&mut prefix)
         .map_err(|error| format!("could not read the NAND header and embedded essential backup from {image_name}: {error}"))?;
+    drop(entry);
+
+    // GodMode9 can also export essential.exefs as a separate file. Accept it
+    // inside the same ZIP and place it into the canonical sector-1 position
+    // for validation. The backup remains a single user-selected archive.
+    let mut essentials = Vec::new();
+    for entry_index in 0..archive.len() {
+        let entry = archive.by_index(entry_index)
+            .map_err(|error| format!("could not inspect ZIP entry {entry_index}: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let basename = entry.name().rsplit('/').next().unwrap_or(entry.name());
+        if basename.eq_ignore_ascii_case("essential.exefs") {
+            essentials.push((entry_index, entry.size()));
+        }
+    }
+    if essentials.len() > 1 {
+        return Err("NAND.zip contains more than one essential.exefs file".to_owned());
+    }
+    if let Some((essential_index, essential_size)) = essentials.first().copied() {
+        if essential_size != ESSENTIAL_SIZE as u64 {
+            return Err(format!("essential.exefs must be exactly 0x{ESSENTIAL_SIZE:X} bytes"));
+        }
+        let mut essential_entry = archive.by_index(essential_index)
+            .map_err(|error| format!("could not open essential.exefs: {error}"))?;
+        essential_entry.read_exact(&mut prefix[ESSENTIAL_OFFSET..PREFIX_SIZE])
+            .map_err(|error| format!("could not read essential.exefs: {error}"))?;
+    }
+
     Ok((image_name, image_size, prefix))
 }
 
@@ -531,6 +561,31 @@ mod tests {
 
         let report = inspect_nand_backup(&zip_path).unwrap();
         assert_eq!(report.image_name, "NAND.bin");
+        assert_eq!(report.serial_number, "CTR1234567");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn accepts_a_separate_essential_exefs_inside_the_same_zip() {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let directory = temp_dir();
+        let zip_path = directory.join("NAND.zip");
+        let mut nand = fake_nand_prefix();
+        let essential = nand[ESSENTIAL_OFFSET..PREFIX_SIZE].to_vec();
+        nand[ESSENTIAL_OFFSET..PREFIX_SIZE].fill(0);
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("NAND.bin", options).unwrap();
+        writer.write_all(&nand).unwrap();
+        writer.start_file("gm9/out/essential.exefs", options).unwrap();
+        writer.write_all(&essential).unwrap();
+        fs::write(&zip_path, writer.finish().unwrap().into_inner()).unwrap();
+
+        let report = inspect_nand_backup(&zip_path).unwrap();
         assert_eq!(report.serial_number, "CTR1234567");
 
         fs::remove_dir_all(directory).unwrap();
