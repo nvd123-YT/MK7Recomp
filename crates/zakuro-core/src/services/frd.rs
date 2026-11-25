@@ -631,7 +631,7 @@ fn detect_nat_port_increment(server: SocketAddr) -> u32 {
 
         let mut probes = Vec::with_capacity(3);
         for (socket, local_port) in sockets.iter().zip(local_ports) {
-            let Some((mapped, source)) = stun_binding(socket, server, false) else {
+            let Some((mapped, source)) = stun_binding(socket, server, 0) else {
                 return 0;
             };
             if source != server { return 0; }
