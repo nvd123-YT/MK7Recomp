@@ -31,31 +31,38 @@ References:
 - https://github.com/PretendoNetwork/account/blob/main/src/middleware/nasc.ts (NASC validation)
 - https://github.com/PretendoNetwork/mario-kart-7 (public MK7 authentication and secure server)
 
-### Single-file NAND import
+### One-archive NAND import
 
-The desktop build now has an **Import NAND…** action. It accepts either a raw NAND image or a ZIP containing exactly one recognized image named NAND.bin, SysNAND.bin, EmuNAND.bin, or NANDmin.bin. The first-stage importer:
+The desktop build has an **Import NAND…** action. Choose one \`NAND.zip\` containing exactly one recognized NAND image (\`NAND.bin\`, \`SysNAND.bin\`, \`EmuNAND.bin\`, or \`NANDmin.bin\`) and the matching \`nand.fat16.xorpad\`. The GodMode9 \`essential.exefs\` may be embedded in the NAND image or included as a separate ZIP entry.
 
-- Validates the NCSD header, partition table, declared image size, and presence of FIRM.
-- Requires the GodMode9 embedded essential.exefs block at sector 1 and validates the expected record layout and SHA-256 digests.
-- Extracts LocalFriendCodeSeed_B, SecureInfo, movable.sed, and OTP into the application's private sysdata directory.
-- Generates and persists a virtual Nintendo-OUI network-adapter MAC for this installation and creates nasc.json automatically.
-- Reads only the first 0x2400 bytes needed to inspect the image and essential backup; it does not copy or upload the multi-gigabyte NAND.
+The XORpad is a console-specific decryption stream and is not part of an ordinary raw NAND dump. Decrypt9WIP documents **CTRNAND Padgen** as the on-console operation for generating it from the same 3DS whose NAND was dumped. The importer supports the fixed-offset pad sizes and the legacy unfixed pad sizes. It deliberately does not manufacture a replacement pad or accept a pad from a different console.
 
-**Not finished yet:** this first stage does not decrypt the CTRNAND FAT partition, extract the Friends system-save DISA archive, or parse its account and mydata records. As a result, this is not yet a complete Pretendo login setup and a successful import does not mean the game can join a race. The UI reports this limitation instead of claiming online readiness.
+The importer now performs these local steps:
 
-The NAND importer currently performs structural and SHA-256 integrity checks on the embedded backup. It does not independently verify Nintendo's RSA signature on LocalFriendCodeSeed_B; Pretendo still performs that server-side validation during NASC login.
+- Validates the NAND NCSD header, partition table, declared image size, presence of FIRM, embedded essential backup layout, and its SHA-256 digests.
+- Extracts \`LocalFriendCodeSeed_B\`, \`SecureInfo_A\`, \`movable.sed\`, NAND CID, and OTP into the private application data folder.
+- Applies the supplied CTRNAND XORpad to produce a temporary FAT16 image, discovers \`/data/<ID0>/sysdata/00010032/00000000\`, and extracts the Friends system-save DISA archive.
+- Validates the DISA partition table, DPFS/IVFC hash hierarchy, SAVE filesystem, and the \`FPAC\` account / \`FPMD\` mydata records before installing them into the same local paths read by FRD.
+- Creates \`nasc.json\` and a persistent per-install virtual network-adapter address. Retrying an import with the missing XORpad can add Friends records without overwriting a different console's existing signed identity or rotating the generated adapter address.
 
-The full one-file target remains:
+The selected archive is read in place. The multi-gigabyte NAND is not copied to application storage or uploaded. The extracted XORpad and decrypted FAT16 image are held in owner-private temporary files and removed after the import attempt. A raw NAND image or ZIP without the matching XORpad can still import the embedded device identity, but it cannot complete Friends account extraction; the UI reports that as a partial import.
 
-1. Validate and identify the NAND image.
-2. Decrypt/mount CTRNAND using the console-specific material in the essential backup and the required common crypto material supported by the runtime.
-3. Parse the FAT filesystem and locate the Friends system-save archive at the correct ID0/system-save path.
-4. Parse the DISA/DIFF structures and extract the FPAC account and FPMD mydata records locally.
-5. Configure the remaining network fields automatically, preserving the imported signed seed and matching serial.
-6. Complete FRD NASC login, NEX authentication, SVCLOC, and the game's real matchmaking/session path.
+**Local NAND extraction is implemented, but this is not a claim that online races now work.** The importer checks structure and SHA-256 integrity, but does not independently validate Nintendo's RSA signature on \`LocalFriendCodeSeed_B\`; Pretendo performs its signed-certificate checks during NASC login. A virtual MAC accepted by the protocol, imported account credentials, and a valid \`UID-HMAC\` still need to pass the real server's checks. Cartridge images may also require their exact 17-byte ROM ID for NASC.
 
-The importer must never upload the raw NAND or system saves to a server. Extraction stays local. Only the NASC/NEX fields required for a connection are sent to Pretendo over HTTPS, exactly as the original service protocol requires.
+The remaining end-to-end online work is after the local import:
 
+1. Confirm the NASC request and response handling against Pretendo with an imported real console record.
+2. Complete FRD login and NEX authentication, including the title's actual \`SVCLOC\` service discovery behavior.
+3. Complete secure-server connection, PRUDP sessions, matchmaking, VS/battle room creation and joining, peer connectivity/NAT traversal, and real gameplay packet flow.
+4. Verify two independent clients can enter the same race, finish it, and leave cleanly. A successful HTTP probe or authenticated account alone is not a race test.
+
+The importer must never upload the raw NAND or system saves to a server. Extraction stays local. Only the protocol fields needed for a connection are sent to Pretendo over HTTPS, as the original service protocol requires.
+
+References for the NAND preparation flow:
+- [GodMode9 NAND handling and embedded essential backups](https://github.com/d0k3/GodMode9)
+- [Decrypt9WIP CTRNAND Padgen](https://github.com/d0k3/Decrypt9WIP)
+- [3DSFAT16tool NAND/XORpad format and offsets](https://github.com/d0k3/3DSFAT16tool)
+- [3DS DISA/DIFF and save filesystem format](https://github.com/wwylele/3ds-save-tool)
 ## MK7Recomp Network
 
 This is a separate, explicitly branded service with its own account, identity, and game-server backend. It must use its own hostnames and must never present its credentials as Pretendo or Nintendo credentials.
