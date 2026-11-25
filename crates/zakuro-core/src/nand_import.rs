@@ -402,7 +402,6 @@ fn extract_friends_records_from_zip(
     let is_new_3ds = report.serial_number.starts_with('Y')
         || report.serial_number.starts_with('Q')
         || report.serial_number.starts_with('N');
-    let layout = crate::nand_crypto::ctrnand_layout(is_new_3ds);
     let mut archive = zip::ZipArchive::new(File::open(path)
         .map_err(|error| format!("could not reopen NAND.zip: {error}"))?)
         .map_err(|error| format!("NAND.zip is not a readable ZIP archive: {error}"))?;
@@ -427,14 +426,8 @@ fn extract_friends_records_from_zip(
     let Some((xorpad_index, xorpad_size)) = xorpad_index else {
         return Ok(None);
     };
-    if xorpad_size != layout.size {
-        return Err(format!(
-            "the CTRNAND XORpad is {} bytes, but this {} backup requires exactly {} bytes. Generate the matching fixed-offset CTRNAND Padgen output on the same 3DS and place nand.fat16.xorpad inside NAND.zip",
-            xorpad_size,
-            report.console_model,
-            layout.size
-        ));
-    }
+    let layout = crate::nand_crypto::ctrnand_layout(is_new_3ds, xorpad_size)
+        .map_err(|error| format!("{error}. Generate CTRNAND Padgen on the same 3DS and place nand.fat16.xorpad inside NAND.zip"))?;
 
     let (pad_guard, mut pad_output) = create_private_temporary_file("ctrnand-xorpad")?;
     {
@@ -442,7 +435,7 @@ fn extract_friends_records_from_zip(
             .map_err(|error| format!("could not open CTRNAND XORpad: {error}"))?;
         let copied = std::io::copy(&mut entry, &mut pad_output)
             .map_err(|error| format!("could not extract CTRNAND XORpad: {error}"))?;
-        if copied != layout.size {
+        if copied != xorpad_size {
             return Err("the CTRNAND XORpad entry was truncated while extracting".to_owned());
         }
         pad_output.sync_all()
