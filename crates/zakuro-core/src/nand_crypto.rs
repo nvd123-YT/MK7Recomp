@@ -73,7 +73,7 @@ pub fn decrypt_ctrnand<RN: Read, RX: Read, WO: Write>(
         .map_err(|error| format!("could not flush the decrypted CTRNAND image: {error}"))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct FatEntry {
     name: String,
     attributes: u8,
@@ -86,7 +86,6 @@ struct Fat16<R> {
     bytes_per_sector: u64,
     sectors_per_cluster: u64,
     reserved_sectors: u64,
-    root_entries: u64,
     root_start: u64,
     root_bytes: u64,
     data_start: u64,
@@ -150,7 +149,6 @@ impl<R: Read + Seek> Fat16<R> {
             bytes_per_sector,
             sectors_per_cluster,
             reserved_sectors,
-            root_entries,
             root_start: root_start_sector * bytes_per_sector,
             root_bytes: root_entries * 32,
             data_start: data_start_sector * bytes_per_sector,
