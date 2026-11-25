@@ -784,9 +784,9 @@
     },
     {
       "id": "network_provider",
-      "label": "Pretendo online services",
+      "label": "Legacy Pretendo routing",
       "group": "Online",
-      "help": "Choose Pretendo to enable host-routed internet access, AC connection events, the game's FRD/NASC login, and NAT detection. Before launching, import your own Friends account files and the private certificate/device data using the actions below. To log in, launch Mario Kart 7 and choose Online in the game's menu; the game initiates NASC/NEX login itself. PRUDP/NEX matchmaking and a full race are still experimental and need a real online test.",
+      "help": "For players who already have their own real 3DS device data. Pretendo requires a genuine signed LocalFriendCodeSeed_B and matching device information even when used through an emulator. This does not provide account-only recomp online play. The separate MK7Recomp Network service is not available yet.",
       "choices": [
         {
           "label": "Off",
@@ -795,7 +795,7 @@
           }
         },
         {
-          "label": "Pretendo (experimental routing)",
+          "label": "Pretendo (legacy; requires own 3DS data)",
           "set": {
             "network_provider": "\"pretendo\""
           }
@@ -809,7 +809,7 @@
       "id": "auto_repair_uidhmac",
       "label": "Repair UID-HMAC automatically",
       "group": "Online",
-      "help": "Opt-in: sends the PrincipalID and NEX password from your imported Friends account to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. The original account file is backed up before its HMAC is changed. Off by default.",
+      "help": "Legacy Pretendo-only option. Opt-in: sends the PrincipalID and NEX password from your imported Friends account to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. Not used by the planned account-only MK7Recomp Network service. Off by default.",
       "choices": [
         {
           "label": "Off (use imported HMAC)",
