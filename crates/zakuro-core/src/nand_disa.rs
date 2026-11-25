@@ -512,6 +512,7 @@ fn u64_at(bytes: &[u8], offset: usize) -> Result<u64, String> {
     Ok(u64::from_le_bytes(raw.try_into().unwrap()))
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,12 +529,6 @@ mod tests {
         bytes[0x104..0x108].copy_from_slice(&0x0004_0000u32.to_le_bytes());
         assert!(extract_friend_records(&bytes).is_err());
     }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     fn put32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
