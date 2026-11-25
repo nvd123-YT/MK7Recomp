@@ -1663,9 +1663,11 @@ mod tests {
         let fields = parse_nasc_form(body).unwrap();
         let result = parse_game_auth(&fields, 200);
         assert_eq!(result.nasc_result, 1);
-        assert_eq!(&result.server_address[..], b"35.163.2.89");
+        assert_eq!(&result.server_address[..11], b"35.163.2.89");
+        assert!(result.server_address[11..].iter().all(|byte| *byte == 0));
         assert_eq!(result.server_port, 40460);
-        assert_eq!(&result.token[..], b"abc");
+        assert_eq!(&result.token[..3], b"abc");
+        assert!(result.token[3..].iter().all(|byte| *byte == 0));
         assert_ne!(result.server_time, 0);
     }
 
@@ -1675,8 +1677,10 @@ mod tests {
         let fields = parse_nasc_form(body).unwrap();
         let result = parse_service_locator(&fields, 200);
         assert_eq!(result.nasc_result, 7);
-        assert_eq!(&result.service_host[..], b"n/a");
-        assert_eq!(&result.service_token[..], b"abc");
+        assert_eq!(&result.service_host[..3], b"n/a");
+        assert!(result.service_host[3..].iter().all(|byte| *byte == 0));
+        assert_eq!(&result.service_token[..3], b"abc");
+        assert!(result.service_token[3..].iter().all(|byte| *byte == 0));
         assert_eq!(result.status_data, b'Y');
         assert_ne!(result.server_time, 0);
     }
