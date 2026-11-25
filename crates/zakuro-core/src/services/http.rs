@@ -179,7 +179,6 @@ impl HttpState {
 
 fn start_request(system: &mut System, handle: u32) -> Result<(), u32> {
     let provider = system.config.network_provider;
-    let data_dir = system.config.data_dir.clone();
     let rewritten_url = system.services.http.contexts.get(&handle)
         .map(|context| system.services.http.url(&context.request.url, provider));
     let (url, request) = match (rewritten_url, system.services.http.contexts.get(&handle)) {
@@ -196,7 +195,6 @@ fn start_request(system: &mut System, handle: u32) -> Result<(), u32> {
                 use_client_certificate: context.request.use_client_certificate
                     || (provider == NetworkProvider::Pretendo
                         && context.request.url.to_ascii_lowercase().contains("nasc.")),
-                data_dir,
             };
             (request.url.clone(), request)
         }
@@ -749,7 +747,6 @@ struct RequestToRun {
     raw_body: Option<Vec<u8>>,
     multipart: bool,
     use_client_certificate: bool,
-    data_dir: Option<PathBuf>,
 }
 
 fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
@@ -782,11 +779,14 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
     };
     if body.len() > MAX_BODY { return Err("HTTP request body exceeds 16 MiB".to_owned()); }
 
-    let cert = request.data_dir.as_ref().map(|dir| dir.join("sysdata/ctr-common-1-cert.pem"));
-    let key = request.data_dir.as_ref().map(|dir| dir.join("sysdata/ctr-common-1-key.pem"));
-    if request.use_client_certificate && (!cert.as_ref().is_some_and(|path| path.is_file()) || !key.as_ref().is_some_and(|path| path.is_file())) {
-        return Err("Pretendo NASC requires your own decrypted ctr-common-1 certificate and private key at sysdata/ctr-common-1-cert.pem and sysdata/ctr-common-1-key.pem".to_owned());
-    }
+    // The shared 3DS ClCertA identity is embedded and materialized only
+    // while this HTTPS request runs. It is not a per-user key and needs no
+    // manual import from the player.
+    let client_certificate = if request.use_client_certificate {
+        Some(crate::services::ctr_common::TemporaryClientCertificate::create()?)
+    } else {
+        None
+    };
 
     let directory = std::env::temp_dir().join(format!("mk7recomp-http-{}-{id}", std::process::id()));
     std::fs::create_dir_all(&directory).map_err(|error| format!("could not create HTTP temp directory: {error}"))?;
@@ -812,9 +812,10 @@ fn perform_request(request: RequestToRun) -> Result<HttpResponse, String> {
                 command.arg("--header").arg(format!("Content-Type: {content_type}"));
             }
         }
-        if request.use_client_certificate {
-            command.arg("--cert").arg(cert.as_ref().unwrap());
-            command.arg("--key").arg(key.as_ref().unwrap());
+        if let Some(credentials) = client_certificate.as_ref() {
+            command.args(["--cert-type", "DER", "--key-type", "DER"]);
+            command.arg("--cert").arg(credentials.certificate_path());
+            command.arg("--key").arg(credentials.private_key_path());
         }
         if method == "POST" || method == "PUT" {
             command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
