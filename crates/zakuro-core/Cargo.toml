@@ -23,7 +23,7 @@ lz4_flex = "0.14.0"
 # the hash a local wireless beacon carries of its network
 sha1 = "0.11.0"
 sha2 = "0.10.9"
-zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.8.2", default-features = false, features = ["deflate", "deflate-flate2"] }
 thiserror.workspace = true
 bitflags.workspace = true
 recomp-abi.workspace = true
