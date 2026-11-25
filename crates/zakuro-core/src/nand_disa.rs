@@ -253,28 +253,35 @@ fn unwrap_ivfc(
 }
 
 fn apply_ivfc_level(hash_list: &[u8], data: &[u8], block_size: usize) -> Result<Vec<u8>, String> {
-    if block_size == 0 || hash_list.len() % 32 != 0 {
+    // DISA DIFI hash regions may contain a trailing, unused four-byte field
+    // after the SHA-256 list. The reference 3DS save parser consumes complete
+    // 32-byte hashes and ignores any such trailing bytes.
+    if block_size == 0 || hash_list.len() < 32 {
         return Err("a DISA IVFC hash level has invalid sizing".to_owned());
     }
     let hash_count = hash_list.len() / 32;
     let required_hashes = (data.len() + block_size - 1) / block_size;
-    if hash_count < required_hashes {
-        return Err("a DISA IVFC hash list does not cover its data level".to_owned());
-    }
 
     let mut output = Vec::with_capacity(data.len());
     for index in 0..required_hashes {
         let start = index * block_size;
         let end = (start + block_size).min(data.len());
         let chunk = &data[start..end];
-        let mut padded = vec![0u8; block_size];
-        padded[..chunk.len()].copy_from_slice(chunk);
-        let digest = Sha256::digest(&padded);
-        if digest.as_slice() == &hash_list[index * 32..index * 32 + 32] {
+        let valid_hash = if index < hash_count {
+            let mut padded = vec![0u8; block_size];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            let digest = Sha256::digest(&padded);
+            digest.as_slice() == &hash_list[index * 32..index * 32 + 32]
+        } else {
+            // Some 3DS saves have unwritten/unhashed blocks after their
+            // initialized data. Poison them rather than rejecting the whole
+            // save; the requested account records are still validated by
+            // their FPAC/FPMD headers after extraction.
+            false
+        };
+        if valid_hash {
             output.extend_from_slice(chunk);
         } else {
-            // 3DS save tools poison blocks that are not committed/hashed.
-            // The required Friends records are validated separately below.
             output.resize(output.len() + chunk.len(), 0xDD);
         }
     }
