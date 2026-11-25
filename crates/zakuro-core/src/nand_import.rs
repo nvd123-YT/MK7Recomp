@@ -327,7 +327,7 @@ fn read_prefix_again(path: &Path, image_name: &str) -> Result<Vec<u8>, String> {
     let mut signature = [0u8; 4];
     file.read_exact(&mut signature).map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
-    if signature == *b"PK\\x03\\x04" || signature == *b"PK\\x05\\x06" || signature == *b"PK\\x07\\x08" {
+    if signature == *b"PK\x03\x04" || signature == *b"PK\x05\x06" || signature == *b"PK\x07\x08" {
         let (selected_name, _, prefix) = read_zip_image(file)?;
         if selected_name != image_name {
             return Err("the NAND ZIP selection changed between validation and extraction".to_owned());
