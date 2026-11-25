@@ -639,7 +639,7 @@ mod tests {
 
     fn synthetic_disa() -> (Vec<u8>, Vec<u8>) {
         const PARTITION_OFFSET: usize = 0x400;
-        const PARTITION_SIZE: usize = 0x4010;
+        const PARTITION_SIZE: usize = 0x4020;
         const DESCRIPTOR_SIZE: usize = 0x130;
         const L3_SIZE: usize = 0x2000;
         let (save, account) = synthetic_friends_save();
@@ -665,8 +665,8 @@ mod tests {
         // Three-level DPFS tree. The active selector bits are all zero, so
         // the first copy at each level is the active one.
         let mut partition = vec![0u8; PARTITION_SIZE];
-        partition[16..20].fill(0); // Level 1 selector
-        partition[24..28].fill(0); // Level 2 selects first Level 3 pair
+        partition[0..4].fill(0); // Level 1 selector chooses first Level 2 pair.
+        partition[8..12].fill(0); // Level 2 selector chooses first Level 3 pair.
         partition[32..32 + L3_SIZE].copy_from_slice(&active_level3);
 
         // DIFI partition descriptor followed by IVFC, DPFS and master hash.
