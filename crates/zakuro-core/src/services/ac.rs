@@ -70,6 +70,22 @@ fn start_connectivity_probe() -> Receiver<io::Result<()>> {
 /// Completes AC's asynchronous connect request and signals the guest event.
 /// A failed probe must never leave the guest believing it has Internet access.
 pub fn poll(system: &mut System) {
+    if system.config.network_provider != NetworkProvider::Pretendo {
+        let (was_connecting, event) = {
+            let state = &mut system.services.ac;
+            let was_connecting = state.pending_connect.take().is_some();
+            state.connected = false;
+            state.last_error = zakuro_common::result::errors::NOT_CONNECTED.0;
+            (was_connecting, state.connect_event)
+        };
+        if was_connecting {
+            if let Some(event) = event {
+                system.kernel.signal_event(event);
+            }
+        }
+        return;
+    }
+
     let ready = system.services.ac.pending_connect.as_ref().and_then(|pending| {
         match pending.try_recv() {
             Ok(result) => Some(result),
@@ -268,6 +284,15 @@ mod tests {
         let header = buffer.header(&mut system.memory);
         handle(&mut system, &buffer, header);
         assert_eq!(buffer.get(&mut system.memory, 1), 0x02);
+    }
+
+    #[test]
+    fn switching_the_provider_off_clears_a_connected_ac_state() {
+        let (mut system, _) = system_with_thread();
+        system.services.ac.connected = true;
+        system.config.network_provider = NetworkProvider::Off;
+        poll(&mut system);
+        assert!(!system.services.ac.connected);
     }
 
     #[test]
