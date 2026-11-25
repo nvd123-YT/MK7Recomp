@@ -323,23 +323,18 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
 }
 
 fn read_prefix_again(path: &Path, image_name: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|error| format!("could not reopen NAND backup: {error}"))?;
+    let mut file = File::open(path).map_err(|error| format!("could not reopen NAND backup: {error}"))?;
     let mut signature = [0u8; 4];
-    let mut file = file;
     file.read_exact(&mut signature).map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
-    let mut prefix = vec![0u8; PREFIX_SIZE];
-    if signature == *b"PK\x03\x04" || signature == *b"PK\x05\x06" || signature == *b"PK\x07\x08" {
-        let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("could not reopen ZIP: {error}"))?;
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-            if entry.name() == image_name {
-                entry.read_exact(&mut prefix).map_err(|error| format!("could not reread NAND prefix: {error}"))?;
-                return Ok(prefix);
-            }
+    if signature == *b"PK\\x03\\x04" || signature == *b"PK\\x05\\x06" || signature == *b"PK\\x07\\x08" {
+        let (selected_name, _, prefix) = read_zip_image(file)?;
+        if selected_name != image_name {
+            return Err("the NAND ZIP selection changed between validation and extraction".to_owned());
         }
-        Err("the NAND image disappeared from the ZIP archive".to_owned())
+        Ok(prefix)
     } else {
+        let mut prefix = vec![0u8; PREFIX_SIZE];
         file.read_exact(&mut prefix).map_err(|error| format!("could not reread NAND prefix: {error}"))?;
         Ok(prefix)
     }
@@ -585,8 +580,14 @@ mod tests {
         writer.write_all(&essential).unwrap();
         fs::write(&zip_path, writer.finish().unwrap().into_inner()).unwrap();
 
-        let report = inspect_nand_backup(&zip_path).unwrap();
+        let data_dir = directory.join("appdata");
+        fs::create_dir_all(&data_dir).unwrap();
+        let report = import_nand_backup(&zip_path, &data_dir).unwrap();
         assert_eq!(report.serial_number, "CTR1234567");
+        assert_eq!(
+            fs::metadata(data_dir.join("sysdata/LocalFriendCodeSeed_B")).unwrap().len(),
+            0x110
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }
