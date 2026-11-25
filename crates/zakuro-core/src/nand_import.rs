@@ -497,8 +497,8 @@ mod tests {
             descriptor[..name.len()].copy_from_slice(name.as_bytes());
             descriptor[8..12].copy_from_slice(&(*offset as u32).to_le_bytes());
             descriptor[12..16].copy_from_slice(&(*size as u32).to_le_bytes());
-            let data_start = EXEFS_HEADER_SIZE + offset;
-            let data_end = data_start + size;
+            let data_start = EXEFS_HEADER_SIZE + *offset;
+            let data_end = data_start + *size;
             if index == 0 {
                 essential[data_start..data_end].copy_from_slice(&ncsd_header);
             } else {
@@ -576,7 +576,7 @@ mod tests {
         let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
         writer.start_file("NAND.bin", options).unwrap();
         writer.write_all(&nand).unwrap();
-        writer.start_file("gm9/out/essential.exefs", options).unwrap();
+        writer.start_file("gm9/out/essential.exefs", options.clone()).unwrap();
         writer.write_all(&essential).unwrap();
         fs::write(&zip_path, writer.finish().unwrap().into_inner()).unwrap();
 
