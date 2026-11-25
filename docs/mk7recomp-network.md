@@ -6,22 +6,24 @@ Status: architecture and local identity groundwork only. There is no MK7Recomp-h
 
 A player who has supplied a legitimate Mario Kart 7 game dump should be able to:
 
-1. Turn on **MK7Recomp Network** in RecompLauncher.
-2. Join immediately using an automatically created anonymous installation identity.
-3. Optionally link an account for recovery, cross-device use, friends, and moderation appeals.
+1. Optionally import **one NAND backup** from their own 3DS in the RecompLauncher setup flow.
+2. Have MK7Recomp automatically extract the signed device seed, serial/model data, and Friends system-save records it needs. No separate file selection or hand-written JSON.
+3. Optionally link a Pretendo Network ID where a game feature actually needs one. Most 3DS game servers do not require a PNID.
 4. Launch the game and use its normal online menus.
 
-The player must not need to import a NAND, Friends system-save folder, LocalFriendCodeSeed, Nintendo device certificate, serial number, MAC address, BSSID, or other console-specific files.
+The approved user-facing requirement is one NAND backup, not an entire manually reconstructed 3DS installation. The application must not ask the player to separately locate LocalFriendCodeSeed_B, SecureInfo_A, Friends account/mydata files, serial number, MAC address, BSSID, AP slot, or nasc.json.
 
-An account is optional for first play. An identity is not optional: the service needs a stable, independent identity for matchmaking, rate limits, moderation, and save/account recovery. It is generated locally once and is not rotated as a way to get around sanctions.
+The NAND import is optional for offline play and only used when the player enables legacy Pretendo connectivity. The device identity must be the user's own signed seed and matching serial from the same backup. A per-install virtual network-adapter address may be generated and persisted where needed; it must never replace or modify the signed seed or serial. It must not be rotated to evade a ban.
+
+A PNID is not a prerequisite for most 3DS game servers; the game-facing NEX account is separate. The importer should preserve an existing Friends/NEX account from the NAND. Where the Friends system has no NEX account yet, account creation should be handled by the supported NASC initial-registration flow rather than asking the player to create or edit account files by hand.
 
 ## Two separate network ecosystems
 
 ### Pretendo
 
-Pretendo remains a distinct provider. Its published policy says that emulator users still need the relevant data from a real 3DS. Pretendo's developers have explained that they previously experimented with allowing emulator users without real console data, but withdrew it after abuse. The current NASC implementation validates the device's signed LocalFriendCodeSeed and related device fields.
+Pretendo remains a distinct provider. Its published policy says that emulator users still need relevant data from their own real 3DS. The current NASC implementation validates the signed LocalFriendCodeSeed and checks the supplied serial and MAC format/OUI. Pretendo binds the device record to the seed hash and serial; a PNID is not required for most 3DS game servers.
 
-MK7Recomp must not fabricate a Nintendo-signed LocalFriendCodeSeed, impersonate a physical console, or send its own installation identity to Pretendo as though it were a Nintendo identity. The legacy Pretendo routing path can remain available for people who independently meet Pretendo's requirements, but it is not the intended account-only recomp experience.
+MK7Recomp must extract the real signed seed and matching serial from the player's one NAND backup. It must not fabricate or rewrite the Nintendo-signed seed or substitute a random serial. The Wi-Fi MAC is a separate hardware value read from the 3DS Wi-Fi card's EEPROM rather than an ordinary CTRNAND file; the importer must provide a stable, per-install virtual adapter address only if Pretendo's protocol validation accepts that approach. The user must not be asked to type it manually.
 
 References:
 - https://pretendo.network/ (FAQ: emulator and real-console requirements)
@@ -29,7 +31,20 @@ References:
 - https://github.com/PretendoNetwork/account/blob/main/src/middleware/nasc.ts (NASC validation)
 - https://github.com/PretendoNetwork/mario-kart-7 (public MK7 authentication and secure server)
 
-### MK7Recomp Network
+### Single-file NAND import
+
+The NAND importer is planned to accept one GodMode9 NAND backup with its essential.exefs backup embedded, as a single file. A normal encrypted raw NAND image cannot simply be searched as a folder: the import pipeline must correctly decrypt/mount the CTRNAND partition using the embedded console-unique material and the required common boot ROM key material. The app should also accept an already-decrypted CTRNAND filesystem tree for developer testing, but that is not the end-user setup.
+
+Expected records to extract automatically:
+
+- rw/sys/LocalFriendCodeSeed_B — the signed 0x110-byte friend-code seed.
+- rw/sys/SecureInfo_A (or the valid system variant) — serial/model and region data.
+- data/<ID0>/sysdata/00010032/00000000 — Friends module system-save archive, including the account and mydata records after DISA extraction.
+- data/<ID0>/sysdata/00010017/00000000 — system configuration save, where useful for language/region/network configuration.
+
+The import must never upload the raw NAND or system saves to a server. Extraction stays local. Only the NASC/NEX fields required for a connection are sent to Pretendo over HTTPS, exactly as the original service protocol requires.
+
+## MK7Recomp Network
 
 This is a separate, explicitly branded service with its own account, identity, and game-server backend. It must use its own hostnames and must never present its credentials as Pretendo or Nintendo credentials.
 
@@ -80,10 +95,14 @@ Pretendo's public Mario Kart 7 server is a useful protocol reference and is AGPL
 
 - [x] Add secure, persistent per-install identity storage in the runtime.
 - [x] Cover stable reload, independent installs, corrupt-file handling, redacted diagnostics, and Unix file permissions with unit tests.
+- [ ] Add a one-file NAND import flow for legacy Pretendo use; detect the supported backup format and validate the embedded essential backup.
+- [ ] Implement the NAND/CTRNAND decrypt-and-mount pipeline and extract LocalFriendCodeSeed_B, SecureInfo, and the Friends system-save automatically.
+- [ ] Generate and persist the non-console network-adapter fields that can safely be virtualized; never ask the user to write nasc.json.
+- [ ] Preserve or initialize the local Friends/NEX account state so users do not need to import the Friends system save separately.
 - [ ] Add an opt-in MK7Recomp Network provider and launcher setup flow.
 - [ ] Implement the identity challenge/response and account bootstrap service.
 - [ ] Implement or integrate an independently hosted MK7 NEX authentication and secure server.
-- [ ] Connect the game's FRD/NEX login path to the new provider without requiring a Friends-save import.
+- [ ] Connect the game's FRD/NEX login path to the new provider without manual Friends-save import.
 - [ ] Complete race-path diagnostics for authentication, room creation, matchmaking, NAT, and peer connectivity.
 - [ ] Run two independent recomp clients through a complete VS race, then test battle rooms, disconnect/reconnect, and persistence.
 - [ ] Deploy and operate a stable public service, with monitoring, moderation, and a published privacy policy.
