@@ -36,7 +36,6 @@ struct PartitionDescriptor {
 struct DirectoryRecord {
     parent: usize,
     name: String,
-    first_directory: usize,
 }
 
 #[derive(Debug)]
@@ -369,7 +368,6 @@ fn extract_save_files(save_image: &[u8], data_image: Option<&[u8]>) -> Result<(V
         DirectoryRecord {
             parent: u32::from_le_bytes(entry[0..4].try_into().unwrap()) as usize,
             name: fixed_name(&entry[4..20]),
-            first_directory: u32::from_le_bytes(entry[0x18..0x1C].try_into().unwrap()) as usize,
         }
     }).collect::<Vec<_>>();
     let files = (0..file_count).map(|index| {
