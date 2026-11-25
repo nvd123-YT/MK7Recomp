@@ -140,7 +140,8 @@ impl<R: Read + Seek> Fat16<R> {
             return Err("the FAT16 root directory extends beyond the volume".to_owned());
         }
         let cluster_count = (total_sectors - data_start_sector) / sectors_per_cluster;
-        if cluster_count < 4 || cluster_count >= 65_525 {
+        let fat_entries = sectors_per_fat_16 * bytes_per_sector / 2;
+        if cluster_count < 4 || cluster_count >= 65_525 || fat_entries < cluster_count + 2 {
             return Err("the decrypted CTRNAND volume does not have a valid FAT16 cluster count".to_owned());
         }
 
@@ -315,4 +316,72 @@ fn short_name_matches(name: &str, expected: &str) -> bool {
 
 fn io_error(context: &'static str) -> impl FnOnce(io::Error) -> String {
     move |error| format!("{context}: {error}")
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn ctrnand_xor_uses_console_pad_and_fixed_partition_offset() {
+        let layout = CtrNandLayout { offset: 4, size: 4 };
+        let mut nand = Cursor::new(vec![0, 0, 0, 0, 1, 2, 3, 4]);
+        let mut pad = Cursor::new(vec![5, 6, 7, 8]);
+        let mut output = Vec::new();
+        decrypt_ctrnand(&mut nand, &mut pad, &mut output, layout).unwrap();
+        assert_eq!(output, [4, 4, 4, 12]);
+    }
+
+    fn directory_entry(name: &str, extension: &str, attributes: u8, cluster: u16, size: u32) -> [u8; 32] {
+        let mut entry = [b' '; 32];
+        entry[..name.len()].copy_from_slice(name.as_bytes());
+        entry[8..8 + extension.len()].copy_from_slice(extension.as_bytes());
+        entry[11] = attributes;
+        entry[26..28].copy_from_slice(&cluster.to_le_bytes());
+        entry[28..32].copy_from_slice(&size.to_le_bytes());
+        entry
+    }
+
+    #[test]
+    fn finds_friends_disa_without_hard_coding_console_id0() {
+        const SECTOR: usize = 512;
+        const SECTORS: usize = 8192;
+        const ROOT_START: usize = 65 * SECTOR;
+        const DATA_START: usize = 97 * SECTOR;
+        let mut image = vec![0u8; SECTORS * SECTOR];
+        image[11..13].copy_from_slice(&(512u16).to_le_bytes());
+        image[13] = 1;
+        image[14..16].copy_from_slice(&(1u16).to_le_bytes());
+        image[16] = 2;
+        image[17..19].copy_from_slice(&(512u16).to_le_bytes());
+        image[19..21].copy_from_slice(&(SECTORS as u16).to_le_bytes());
+        image[22..24].copy_from_slice(&(32u16).to_le_bytes());
+        image[510..512].copy_from_slice(&[0x55, 0xAA]);
+
+        // Mark all directory and file clusters end-of-chain in both FATs.
+        for fat_start in [SECTOR, 33 * SECTOR] {
+            for cluster in 2u16..=6 {
+                let offset = fat_start + cluster as usize * 2;
+                image[offset..offset + 2].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            }
+        }
+
+        image[ROOT_START..ROOT_START + 32]
+            .copy_from_slice(&directory_entry("DATA", "", 0x10, 2, 0));
+        image[DATA_START..DATA_START + 32]
+            .copy_from_slice(&directory_entry("A1B2C3D4", "", 0x10, 3, 0));
+        image[DATA_START + SECTOR..DATA_START + SECTOR + 32]
+            .copy_from_slice(&directory_entry("SYSDATA", "", 0x10, 4, 0));
+        image[DATA_START + 2 * SECTOR..DATA_START + 2 * SECTOR + 32]
+            .copy_from_slice(&directory_entry("00010032", "", 0x10, 5, 0));
+        image[DATA_START + 3 * SECTOR..DATA_START + 3 * SECTOR + 32]
+            .copy_from_slice(&directory_entry("00000000", "", 0x20, 6, 0x200));
+        image[DATA_START + 4 * SECTOR + 0x100..DATA_START + 4 * SECTOR + 0x104]
+            .copy_from_slice(b"DISA");
+
+        let disa = extract_friends_disa(Cursor::new(image)).unwrap();
+        assert_eq!(&disa[0x100..0x104], b"DISA");
+    }
 }
