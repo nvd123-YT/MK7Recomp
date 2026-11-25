@@ -899,7 +899,7 @@ impl Menus {
                         ui.selectable_value(&mut settings.network_provider, zakuro_core::NetworkProvider::Pretendo, "Pretendo (experimental routing)");
                     });
                 ui.label(
-                    RichText::new("Pretendo mode enables guest DNS/HTTP routing and local AC/FRD connection events. A real online race is still unverified.")
+                    RichText::new("Pretendo mode enables guest DNS/HTTP and peer UDP routing. AC performs a live NASC reachability probe; the game then performs NEX authentication, matchmaking and peer-to-peer setup. A live race still needs end-to-end validation.")
                         .weak()
                         .small(),
                 );
