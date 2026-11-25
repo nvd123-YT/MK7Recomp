@@ -228,6 +228,10 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         0x0009 => buffer.reply(&mut system.memory, command, &[]),
         // GetLastErrorCode and GetLastDetailErrorCode.
         0x000A | 0x000B => buffer.reply(&mut system.memory, command, &[system.services.ac.last_error]),
+        // AC configuration setters mutate only the supplied 0x200-byte
+        // Wi-Fi profile. Host-routed Pretendo networking does not use that
+        // profile, but these documented commands must still succeed.
+        0x0022 | 0x0025 | 0x002D => buffer.reply(&mut system.memory, command, &[]),
         // GetInfraPriority returns the default infrastructure priority.
         0x0027 => buffer.reply(&mut system.memory, command, &[0]),
         // GetStatus: 3 means Internet reachable/available to the guest.
@@ -240,6 +244,13 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let status = if system.services.ac.connected && online_provider { 0x02 } else { 0 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
+        // The host network provider has no guest-visible Wi-Fi SSID,
+        // access-point security or proxy configuration.
+        0x0033 => buffer.reply(&mut system.memory, command, &[0]),
+        0x0034 => write_static_output(system, buffer, command, &[0; 0x20]),
+        0x0035 | 0x0036 | 0x0038 => buffer.reply(&mut system.memory, command, &[0]),
+        0x0039 => write_static_output(system, buffer, command, &[0; 0x100]),
+        0x003A | 0x003B => write_static_output(system, buffer, command, &[0; 0x20]),
         // RegisterDisconnectEvent(process id, event).
         0x0030 => {
             let handles = translated_handles(system, buffer, header);
@@ -255,10 +266,13 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
                 &[u32::from(system.services.ac.connected && online_provider)],
             );
         }
-        // SetClientVersion.
+        // Legacy SetClientVersion.
         0x0040 => buffer.reply(&mut system.memory, command, &[]),
-        // Proxy and other AC discovery commands are not needed by the direct
-        // HTTP/NASC flow; unsupported commands remain explicit NOT_CONNECTED.
+        // ACI_LoadNetworkSetting(slot) succeeds because Pretendo routes through
+        // the host network instead of opening a physical 3DS Wi-Fi profile.
+        0x0401 => buffer.reply(&mut system.memory, command, &[]),
+        // ACI_GetNetworkWirelessEssidSecuritySsid.
+        0x040F => write_static_output(system, buffer, command, &[0; 0x20]),
         _ => return false,
     }
     true
@@ -355,6 +369,28 @@ mod tests {
     }
 
     #[test]
+    fn ac_wifi_configuration_setters_succeed_for_the_host_network_provider() {
+        let (mut system, buffer) = system_with_thread();
+        for command in [0x0022, 0x0025, 0x002D, 0x0401] {
+            buffer.set(&mut system.memory, 0, Header::new(command, 0, 0).0);
+            let header = buffer.header(&mut system.memory);
+            assert!(handle(&mut system, &buffer, header));
+            assert_eq!(buffer.get(&mut system.memory, 1), 0, "command 0x{command:04X}");
+        }
+    }
+
+    #[test]
+    fn ac_wifi_and_proxy_queries_report_no_physical_wifi_or_proxy() {
+        let (mut system, buffer) = system_with_thread();
+        for (command, expected) in [(0x0033, 0), (0x0035, 0), (0x0036, 0), (0x0038, 0)] {
+            buffer.set(&mut system.memory, 0, Header::new(command, 0, 0).0);
+            let header = buffer.header(&mut system.memory);
+            assert!(handle(&mut system, &buffer, header));
+            assert_eq!(buffer.get(&mut system.memory, 2), expected, "command 0x{command:04X}");
+        }
+    }
+
+    #[test]
     fn switching_the_provider_off_clears_a_connected_ac_state() {
         let (mut system, _) = system_with_thread();
         system.services.ac.connected = true;
@@ -377,6 +413,23 @@ mod tests {
         drop(listener);
         assert!(check_tcp_endpoint(&endpoint).is_err());
     }
+}
+
+
+/// Writes an AC query's fixed-size output into TLS static-buffer slot 0.
+fn write_static_output(system: &mut System, buffer: &CommandBuffer, command: u16, bytes: &[u8]) {
+    let tls = system.kernel.current().map_or(0, |thread| thread.tls);
+    let (pointer, capacity) = buffer.static_buffer(&mut system.memory, tls, 0);
+    if capacity < bytes.len() as u32 {
+        buffer.reply_error(
+            &mut system.memory,
+            command,
+            zakuro_common::result::errors::NOT_CONNECTED.0,
+        );
+        return;
+    }
+    system.memory.write_bytes(pointer, bytes);
+    buffer.reply(&mut system.memory, command, &[]);
 }
 
 /// walks the IPC translate descriptors, returning all copied/moved handles.
