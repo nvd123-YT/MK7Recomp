@@ -173,13 +173,13 @@
     {
       "id": "open_online_data",
       "label": "Legacy: Open extracted Pretendo device data",
-      "help": "Transitional manual setup for the current legacy Pretendo path only. The planned setup is one NAND backup import with automatic extraction; this folder should no longer need manual LocalFriendCodeSeed_B or nasc.json files once the importer is implemented. Do not put shared or other people's console identity data here.",
+      "help": "Fallback for the previous manual workflow only. The new Import NAND action in the game UI extracts the signed seed and serial from a raw NAND.bin or NAND.zip with embedded GodMode9 essential.exefs and generates nasc.json locally. The importer does not yet decrypt Friends account saves.",
       "open": "online_data"
     },
     {
       "id": "open_friends_account",
       "label": "Legacy: Open extracted Pretendo Friends data",
-      "help": "Transitional manual setup for the current legacy Pretendo path only. The planned one-NAND importer will extract the Friends account and mydata records automatically. Do not share these private account records.",
+      "help": "Fallback for the previous manual workflow only. The NAND-only importer still needs CTRNAND/DISA extraction to populate the Friends account and mydata records automatically.",
       "open": "friends_account"
     }
   ],
@@ -786,7 +786,7 @@
       "id": "network_provider",
       "label": "Legacy Pretendo routing",
       "group": "Online",
-      "help": "For players who already have their own real 3DS device data. Pretendo requires a genuine signed LocalFriendCodeSeed_B and matching device information even when used through an emulator. This does not provide account-only recomp online play. The separate MK7Recomp Network service is not available yet.",
+      "help": "Legacy Pretendo routing. The intended setup is one NAND backup imported through the game's Import NAND action; the app extracts device data locally. The importer currently does not yet decrypt the Friends system-save archive, so this setting is still experimental and races are not ready.",
       "choices": [
         {
           "label": "Off",
@@ -809,7 +809,7 @@
       "id": "auto_repair_uidhmac",
       "label": "Repair UID-HMAC automatically",
       "group": "Online",
-      "help": "Legacy Pretendo-only option. Opt-in: sends the PrincipalID and NEX password from your imported Friends account to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. Not used by the planned account-only MK7Recomp Network service. Off by default.",
+      "help": "Legacy Pretendo-only option. Opt-in: sends the PrincipalID and NEX password from your Friends account record to api.pretendo.cc over HTTPS to obtain a current UID-HMAC. The one-NAND importer does not yet extract that account record, so this option is not usable from a NAND-only import yet. Off by default.",
       "choices": [
         {
           "label": "Off (use imported HMAC)",
