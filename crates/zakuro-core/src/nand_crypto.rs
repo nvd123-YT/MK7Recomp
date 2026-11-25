@@ -107,7 +107,6 @@ struct FatEntry {
 struct Fat16<R> {
     image: R,
     bytes_per_sector: u64,
-    sectors_per_cluster: u64,
     reserved_sectors: u64,
     root_start: u64,
     root_bytes: u64,
@@ -171,7 +170,6 @@ impl<R: Read + Seek> Fat16<R> {
         Ok(Self {
             image,
             bytes_per_sector,
-            sectors_per_cluster,
             reserved_sectors,
             root_start: root_start_sector * bytes_per_sector,
             root_bytes: root_entries * 32,
