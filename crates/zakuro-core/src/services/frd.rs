@@ -806,7 +806,6 @@ fn perform_nasc_http(job: NascJob) -> Result<(u32, BTreeMap<String, String>), St
             "--header", "X-GameId: 0001DB00",
             "--header", user_agent.as_str(),
             "--header", "Content-Type: application/x-www-form-urlencoded",
-            "--header", "Content-Type: application/x-www-form-urlencoded",
             "--cert", certificate.as_str(),
             "--key", private_key.as_str(),
             "--data-binary", "@-",
