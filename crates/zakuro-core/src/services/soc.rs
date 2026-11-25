@@ -1471,7 +1471,7 @@ mod tests {
         info[276..304].copy_from_slice(&address);
         assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), AF_INET);
         assert_eq!(u32::from_le_bytes(info[16..20].try_into().unwrap()), 8);
-        assert_eq!(&info[276..284], &[8, 2, 0x9E, 0x2C, 192, 0, 2, 10]);
+        assert_eq!(&info[276..284], &[8, 2, 0x9E, 0x0C, 192, 0, 2, 10]);
     }
 
     #[test]
