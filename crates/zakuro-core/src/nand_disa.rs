@@ -529,3 +529,229 @@ mod tests {
         assert!(extract_friend_records(&bytes).is_err());
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_name(bytes: &mut [u8], offset: usize, value: &str) {
+        bytes[offset..offset + value.len()].copy_from_slice(value.as_bytes());
+    }
+
+    fn padded_hash(data: &[u8], block_size: usize) -> [u8; 32] {
+        let mut padded = vec![0u8; block_size];
+        padded[..data.len()].copy_from_slice(data);
+        Sha256::digest(&padded).into()
+    }
+
+    fn synthetic_friends_save() -> (Vec<u8>, Vec<u8>) {
+        const BLOCK: usize = 0x200;
+        const DATA_REGION_OFFSET: usize = 0x400;
+        const SAVE_SIZE: usize = DATA_REGION_OFFSET + 4 * BLOCK;
+        let mut save = vec![0u8; SAVE_SIZE];
+
+        save[..4].copy_from_slice(b"SAVE");
+        put32(&mut save, 4, 0x0004_0000);
+        put64(&mut save, 8, 0x20);
+
+        // The filesystem header is at 0x20. This fixture uses an embedded
+        // data region, with the directory table, file table and two files
+        // occupying consecutive 0x200-byte blocks.
+        put32(&mut save, 0x24, BLOCK as u32);
+        put64(&mut save, 0x48, 0x200); // FAT offset
+        put32(&mut save, 0x50, 4); // FAT entries excluding leading entry
+        put64(&mut save, 0x58, DATA_REGION_OFFSET as u64);
+        put32(&mut save, 0x60, 4); // data region blocks
+        put32(&mut save, 0x68, 0); // directory table first block
+        put32(&mut save, 0x6C, 1); // directory table blocks
+        put32(&mut save, 0x70, 4); // maximum directories
+        put32(&mut save, 0x78, 1); // file table first block
+        put32(&mut save, 0x7C, 1); // file table blocks
+        put32(&mut save, 0x80, 4); // maximum files
+
+        let account = {
+            let mut bytes = vec![0u8; 0x58];
+            bytes[..4].copy_from_slice(b"FPAC");
+            put32(&mut bytes, 4, 0x2010_1021);
+            put32(&mut bytes, 0x10, 7);
+            put32(&mut bytes, 0x14, 0x1234_5678);
+            bytes[0x18..0x20].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+            for (index, unit) in "0123456789abcdef".encode_utf16().enumerate() {
+                let offset = 0x20 + index * 2;
+                bytes[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            for (index, unit) in "87654321".encode_utf16().enumerate() {
+                let offset = 0x42 + index * 2;
+                bytes[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            bytes
+        };
+        let mydata = {
+            let mut bytes = vec![0u8; 0x14];
+            bytes[..4].copy_from_slice(b"FPMD");
+            put32(&mut bytes, 4, 0x2010_1021);
+            put32(&mut bytes, 0x10, 0x8765_4321);
+            bytes
+        };
+
+        let data_region = &mut save[DATA_REGION_OFFSET..];
+        // Directory table: entry zero is its header/dummy record, entry one
+        // is root, and entry two is /2.
+        put32(data_region, 0, 3);
+        put32(data_region, 4, 6);
+        put32(data_region, 0x28, 0); // root parent
+        put_name(data_region, 0x28 + 4, "");
+        put32(data_region, 0x50, 1); // /2 parent
+        put_name(data_region, 0x50 + 4, "2");
+
+        // File table starts in block one. Entries one and two belong to /2.
+        let file_table = &mut data_region[BLOCK..];
+        put32(file_table, 0, 3);
+        put32(file_table, 4, 5);
+        put32(file_table, 0x30, 2);
+        put_name(file_table, 0x30 + 4, "account");
+        put32(file_table, 0x30 + 0x1C, 2);
+        put64(file_table, 0x30 + 0x20, account.len() as u64);
+        put32(file_table, 0x60, 2);
+        put_name(file_table, 0x60 + 4, "mydata");
+        put32(file_table, 0x60 + 0x1C, 3);
+        put64(file_table, 0x60 + 0x20, mydata.len() as u64);
+
+        data_region[2 * BLOCK..2 * BLOCK + account.len()].copy_from_slice(&account);
+        data_region[3 * BLOCK..3 * BLOCK + mydata.len()].copy_from_slice(&mydata);
+
+        // The SAVE FAT includes its leading unused entry. Each record uses
+        // one block and terminates with V = 0.
+        put32(&mut save, 0x200 + 3 * 8 + 4, 0);
+        put32(&mut save, 0x200 + 4 * 8 + 4, 0);
+
+        (save, account)
+    }
+
+    fn synthetic_disa() -> (Vec<u8>, Vec<u8>) {
+        const PARTITION_OFFSET: usize = 0x400;
+        const PARTITION_SIZE: usize = 0x4010;
+        const DESCRIPTOR_SIZE: usize = 0x130;
+        const L3_SIZE: usize = 0x2000;
+        let (save, account) = synthetic_friends_save();
+
+        // Construct the four IVFC levels from the innermost SAVE image out.
+        let level3_hashes = save.chunks(0x400)
+            .map(|chunk| padded_hash(chunk, 0x400))
+            .collect::<Vec<_>>();
+        let mut level3 = Vec::new();
+        for hash in &level3_hashes {
+            level3.extend_from_slice(hash);
+        }
+        let level2_hash = padded_hash(&level3, 0x200);
+        let level1_hash = padded_hash(&level2_hash, 0x200);
+        let master_hash = padded_hash(&level1_hash, 0x200);
+
+        let mut active_level3 = vec![0u8; L3_SIZE];
+        active_level3[..32].copy_from_slice(&level1_hash);
+        active_level3[0x20..0x40].copy_from_slice(&level2_hash);
+        active_level3[0x40..0x40 + level3.len()].copy_from_slice(&level3);
+        active_level3[0x200..0x200 + save.len()].copy_from_slice(&save);
+
+        // Three-level DPFS tree. The active selector bits are all zero, so
+        // the first copy at each level is the active one.
+        let mut partition = vec![0u8; PARTITION_SIZE];
+        partition[16..20].fill(0); // Level 1 selector
+        partition[24..28].fill(0); // Level 2 selects first Level 3 pair
+        partition[32..32 + L3_SIZE].copy_from_slice(&active_level3);
+
+        // DIFI partition descriptor followed by IVFC, DPFS and master hash.
+        let mut descriptor = vec![0u8; DESCRIPTOR_SIZE];
+        descriptor[..4].copy_from_slice(b"DIFI");
+        put32(&mut descriptor, 4, 0x0001_0000);
+        put64(&mut descriptor, 8, 0x44);
+        put64(&mut descriptor, 0x10, 0x78);
+        put64(&mut descriptor, 0x18, 0xBC);
+        put64(&mut descriptor, 0x20, 0x50);
+        put64(&mut descriptor, 0x28, 0x10C);
+        put64(&mut descriptor, 0x30, 0x24);
+        descriptor[0x38] = 0; // Level 4 is inside DPFS for SAVE.
+        descriptor[0x39] = 0; // Active Level 1 pair.
+
+        let ivfc = &mut descriptor[0x44..0xBC];
+        ivfc[..4].copy_from_slice(b"IVFC");
+        put32(ivfc, 4, 0x0002_0000);
+        put64(ivfc, 8, 0x24);
+        put64(ivfc, 0x10, 0);
+        put64(ivfc, 0x18, 0x20);
+        put32(ivfc, 0x20, 9);
+        put64(ivfc, 0x28, 0x20);
+        put64(ivfc, 0x30, 0x20);
+        put32(ivfc, 0x38, 9);
+        put64(ivfc, 0x40, 0x40);
+        put64(ivfc, 0x48, level3.len() as u64);
+        put32(ivfc, 0x50, 9);
+        put64(ivfc, 0x58, 0x200);
+        put64(ivfc, 0x60, save.len() as u64);
+        put32(ivfc, 0x68, 10);
+        put64(ivfc, 0x70, 0x78);
+
+        let dpfs = &mut descriptor[0xBC..0x10C];
+        dpfs[..4].copy_from_slice(b"DPFS");
+        put32(dpfs, 4, 0x0001_0000);
+        put64(dpfs, 8, 0);
+        put64(dpfs, 0x10, 4);
+        put32(dpfs, 0x18, 2);
+        put64(dpfs, 0x20, 8);
+        put64(dpfs, 0x28, 4);
+        put32(dpfs, 0x30, 2);
+        put64(dpfs, 0x38, 32);
+        put64(dpfs, 0x40, L3_SIZE as u64);
+        put32(dpfs, 0x48, 13);
+        descriptor[0x10C..0x12C].copy_from_slice(&master_hash);
+        descriptor[0x12C..0x130].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let mut table = vec![0u8; DESCRIPTOR_SIZE];
+        table.copy_from_slice(&descriptor);
+
+        let mut disa = vec![0u8; PARTITION_OFFSET + PARTITION_SIZE];
+        let header = &mut disa[0x100..0x200];
+        header[..4].copy_from_slice(b"DISA");
+        put32(header, 4, 0x0004_0000);
+        put32(header, 8, 1);
+        put64(header, 0x10, 0x200); // secondary table
+        put64(header, 0x18, 0x200); // primary table
+        put64(header, 0x20, table.len() as u64);
+        put64(header, 0x28, 0); // SAVE descriptor in table
+        put64(header, 0x30, DESCRIPTOR_SIZE as u64);
+        put64(header, 0x38, 0);
+        put64(header, 0x40, 0);
+        put64(header, 0x48, PARTITION_OFFSET as u64);
+        put64(header, 0x50, PARTITION_SIZE as u64);
+        put64(header, 0x58, 0);
+        put64(header, 0x60, 0);
+        header[0x68] = 0;
+        header[0x6C..0x8C].copy_from_slice(&Sha256::digest(&table));
+
+        disa[0x200..0x200 + table.len()].copy_from_slice(&table);
+        disa[PARTITION_OFFSET..].copy_from_slice(&partition);
+        (disa, account)
+    }
+
+    #[test]
+    fn extracts_fpac_and_fpmd_from_synthetic_disa_save() {
+        let (disa, expected_account) = synthetic_disa();
+        let records = extract_friend_records(&disa).unwrap();
+        assert_eq!(records.account, expected_account);
+        assert_eq!(&records.account[..4], b"FPAC");
+        assert_eq!(&records.mydata[..4], b"FPMD");
+        assert_eq!(
+            u32::from_le_bytes(records.mydata[0x10..0x14].try_into().unwrap()),
+            0x8765_4321
+        );
+    }
+}
