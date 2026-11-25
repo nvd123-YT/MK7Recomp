@@ -629,7 +629,7 @@ pub struct GameSettings {
 pub struct Settings {
     /// the folder the library lists games from.
     pub games: Option<PathBuf>,
-    /// online network provider; Pretendo enables guest sockets, HTTP, FRD/NASC and NAT probes while NEX racing remains experimental.
+    /// online network provider; Pretendo enables guest IPv4 sockets, HTTP, FRD/NASC, NAT probes and AC reachability while NEX racing awaits live validation.
     #[serde(default)]
     pub network_provider: zakuro_core::NetworkProvider,
     /// opt-in account repair; sends the imported FRD ID and password to Pretendo over HTTPS.
