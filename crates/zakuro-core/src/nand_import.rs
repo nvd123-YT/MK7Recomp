@@ -274,6 +274,7 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
     }
     let secure = essential_file(essential, 1);
     let movable = essential_file(essential, 2);
+    let nand_cid = essential_file(essential, 4);
     let otp = essential_file(essential, 5);
 
     let mut mac = [0u8; 6];
@@ -294,6 +295,7 @@ pub fn import_nand_backup(path: &Path, data_dir: &Path) -> Result<NandBackupRepo
         (sysdata.join("LocalFriendCodeSeed_B"), seed),
         (sysdata.join("SecureInfo_A"), secure),
         (sysdata.join("movable.sed"), movable),
+        (sysdata.join("nand_cid.bin"), nand_cid),
         (sysdata.join("otp.bin"), otp),
         (sysdata.join("nasc.json"), nasc_bytes.as_slice()),
     ];
@@ -634,6 +636,7 @@ mod tests {
         let sysdata = data_dir.join("sysdata");
         assert_eq!(fs::metadata(sysdata.join("LocalFriendCodeSeed_B")).unwrap().len(), 0x110);
         assert_eq!(fs::metadata(sysdata.join("SecureInfo_A")).unwrap().len(), 0x111);
+        assert_eq!(fs::metadata(sysdata.join("nand_cid.bin")).unwrap().len(), 0x10);
         let config: serde_json::Value = serde_json::from_slice(&fs::read(sysdata.join("nasc.json")).unwrap()).unwrap();
         assert_eq!(config["serial_number"], "CTR1234567");
         assert_eq!(config["mac_address"].as_str().unwrap().len(), 17);
