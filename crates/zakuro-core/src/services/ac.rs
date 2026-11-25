@@ -232,11 +232,12 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // Wi-Fi profile. Host-routed Pretendo networking does not use that
         // profile, but these documented commands must still succeed.
         0x0022 | 0x0025 | 0x002D => buffer.reply(&mut system.memory, command, &[]),
-        // GetInfraPriority returns the default infrastructure priority.
-        0x0027 => buffer.reply(&mut system.memory, command, &[0]),
-        // GetStatus: 3 means Internet reachable/available to the guest.
+        // GetConnectingInfraPriority returns the default priority when
+        // the host network provider owns connectivity rather than a 3DS AP.
+        0x000F | 0x0027 => buffer.reply(&mut system.memory, command, &[0]),
+        // ACU_GetStatus returns 1 when disconnected and 3 when connected.
         0x000C => {
-            let status = if system.services.ac.connected && online_provider { 3 } else { 0 };
+            let status = if system.services.ac.connected && online_provider { 3 } else { 1 };
             buffer.reply(&mut system.memory, command, &[status]);
         }
         // GetWifiStatus returns AC_AP_TYPE_* flags; slot 1 is BIT(1) = 0x02.
@@ -283,6 +284,22 @@ mod tests {
     use super::*;
     use crate::services::tests::system_with_thread;
     use std::net::TcpListener;
+
+    #[test]
+    fn ac_status_uses_libctru_disconnected_and_connected_values() {
+        let (mut system, buffer) = system_with_thread();
+        system.config.network_provider = NetworkProvider::Pretendo;
+        buffer.set(&mut system.memory, 0, Header::new(0x000C, 0, 0).0);
+        let header = buffer.header(&mut system.memory);
+        handle(&mut system, &buffer, header);
+        assert_eq!(buffer.get(&mut system.memory, 2), 1);
+
+        system.services.ac.connected = true;
+        buffer.set(&mut system.memory, 0, Header::new(0x000C, 0, 0).0);
+        let header = buffer.header(&mut system.memory);
+        handle(&mut system, &buffer, header);
+        assert_eq!(buffer.get(&mut system.memory, 2), 3);
+    }
 
     #[test]
     fn wifi_status_requires_a_completed_internet_connection() {
