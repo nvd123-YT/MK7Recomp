@@ -98,6 +98,39 @@ fn load_friend_account(system: &System) -> Option<FriendAccount> {
     }
 }
 
+/// The Friends save keeps the NC Principal ID in a separate FPMD "mydata"
+/// record, not in the FPAC account record. The title can query this through
+/// FRD_GetMyNcPrincipalId before creating or advertising an online presence.
+fn parse_friend_mydata(bytes: &[u8]) -> Option<u32> {
+    const MIN_SIZE: usize = 0x14;
+    if bytes.len() < MIN_SIZE
+        || &bytes[..4] != b"FPMD"
+        || u32::from_le_bytes(bytes[4..8].try_into().ok()?) != 0x2010_1021
+    {
+        return None;
+    }
+    Some(u32::from_le_bytes(bytes[0x10..0x14].try_into().ok()?))
+}
+
+fn load_nc_principal_id(system: &System) -> u32 {
+    let path = friend_account_path(system).with_file_name("mydata");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(error) => {
+            log::warn!("frd:u could not read the imported Friends mydata file {}: {error}", path.display());
+            return 0;
+        }
+    };
+    match parse_friend_mydata(&bytes) {
+        Some(principal_id) => principal_id,
+        None => {
+            log::warn!("frd:u Friends mydata file is invalid or truncated: {}", path.display());
+            0
+        }
+    }
+}
+
 fn form_encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {
@@ -1233,7 +1266,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         0x000D => buffer.reply(&mut system.memory, command, &[0; 4]),
         // GetMyNcPrincipalId
-        0x000E => buffer.reply(&mut system.memory, command, &[0]),
+        // GetMyNcPrincipalId is stored in the separate FPMD mydata record.
+        0x000E => {
+            let principal_id = load_nc_principal_id(system);
+            buffer.reply(&mut system.memory, command, &[principal_id]);
+        }
         // GetMyComment
         0x000F => buffer.reply(&mut system.memory, command, &[0; 9]),
         // GetMyPassword(size, static output buffer). The Friends account file
@@ -1813,5 +1850,24 @@ mod tests {
         invalid[0] = 0;
         assert!(parse_friend_account(&invalid).is_none());
         assert!(parse_friend_account(&account_bytes()[..0x57]).is_none());
+    }
+    
+    #[test]
+    fn friend_mydata_parser_reads_nc_principal_id_at_the_documented_offset() {
+        let mut bytes = vec![0; 0x18];
+        bytes[..4].copy_from_slice(b"FPMD");
+        bytes[4..8].copy_from_slice(&0x2010_1021u32.to_le_bytes());
+        bytes[0x10..0x14].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        assert_eq!(parse_friend_mydata(&bytes), Some(0x1234_5678));
+    }
+
+    #[test]
+    fn friend_mydata_parser_rejects_bad_magic_and_truncated_data() {
+        let mut invalid = vec![0; 0x18];
+        invalid[..4].copy_from_slice(b"FPMD");
+        invalid[4..8].copy_from_slice(&0x2010_1021u32.to_le_bytes());
+        assert!(parse_friend_mydata(&invalid[..0x13]).is_none());
+        invalid[0] = 0;
+        assert!(parse_friend_mydata(&invalid).is_none());
     }
 }
