@@ -180,7 +180,7 @@
     {
       "id": "open_friends_account",
       "label": "Open Friends account data",
-      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account. This private file contains your FRD PrincipalID and NEX password; do not share it.",
+      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account; include 2/mydata too so FRD can read your NC Principal ID. These private files contain account identifiers and the NEX password; do not share them.",
       "open": "friends_account"
     }
   ],
