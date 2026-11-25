@@ -208,22 +208,29 @@ fn parse_prefix(image_name: &str, image_size: u64, prefix: &[u8]) -> Result<Nand
     validate_essential(essential)?;
 
     let secure = essential_file(essential, 1);
+    // SecureInfo stores a fixed 0x0F-byte serial field at 0x102; it is not
+    // NUL-terminated. Unused trailing bytes can be padding, so accept only
+    // the leading ASCII alphanumeric serial text.
     let serial_bytes = &secure[0x102..0x111];
-    let serial_end = serial_bytes.iter().position(|byte| *byte == 0).unwrap_or(serial_bytes.len());
-    let serial_number = std::str::from_utf8(&serial_bytes[..serial_end])
+    let serial_len = serial_bytes.iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric())
+        .count();
+    if serial_len == 0 {
+        return Err("SecureInfo does not contain an ASCII serial number".to_owned());
+    }
+    let serial_number = std::str::from_utf8(&serial_bytes[..serial_len])
         .map_err(|_| "SecureInfo contains a non-ASCII serial number".to_owned())?
-        .trim()
         .to_owned();
     if serial_number.is_empty() {
         return Err("SecureInfo does not contain a serial number".to_owned());
     }
     let model = match serial_number.as_bytes()[0] {
-        b'C' => "Old 3DS",
-        b'S' => "Old 3DS XL",
-        b'A' => "Old 2DS",
-        b'Y' => "New 3DS",
-        b'Q' => "New 3DS XL",
-        b'N' => "New 2DS XL",
+        b'C' => "Old 3DS (CTR)",
+        b'S' => "Old 3DS XL (SPR)",
+        b'A' => "Old 2DS (FTR)",
+        b'Y' => "New 3DS (KTR)",
+        b'Q' => "New 3DS XL (RED)",
+        b'N' => "New 2DS XL (JAN)",
         _ => return Err("SecureInfo contains an unrecognized 3DS model serial prefix".to_owned()),
     };
     let region = match secure[0x100] {
