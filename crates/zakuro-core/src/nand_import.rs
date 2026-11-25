@@ -185,11 +185,11 @@ fn parse_prefix(image_name: &str, image_size: u64, prefix: &[u8]) -> Result<Nand
     }
     let model = match serial_number.as_bytes()[0] {
         b'C' => "Old 3DS",
-        b'S' => "New 3DS",
-        b'A' => "2DS",
-        b'Y' => "New 2DS XL",
+        b'S' => "Old 3DS XL",
+        b'A' => "Old 2DS",
+        b'Y' => "New 3DS",
         b'Q' => "New 3DS XL",
-        b'N' => "Nintendo 3DS development unit",
+        b'N' => "New 2DS XL",
         _ => return Err("SecureInfo contains an unrecognized 3DS model serial prefix".to_owned()),
     };
     let region = match secure[0x100] {
@@ -474,7 +474,11 @@ mod tests {
             descriptor[12..16].copy_from_slice(&(*size as u32).to_le_bytes());
             let data_start = EXEFS_HEADER_SIZE + offset;
             let data_end = data_start + size;
-            essential[data_start..data_end].fill((index as u8) + 1);
+            if index == 0 {
+                essential[data_start..data_end].copy_from_slice(&ncsd_header);
+            } else {
+                essential[data_start..data_end].fill((index as u8) + 1);
+            }
             if index == 1 {
                 essential[data_start + 0x100] = 1; // USA
                 essential[data_start + 0x102..data_start + 0x10C].copy_from_slice(b"CTR1234567");
@@ -507,6 +511,29 @@ mod tests {
         assert_eq!(report.console_model, "Old 3DS");
         assert_eq!(report.region, "USA");
         assert_eq!(report.serial_number, "CTR1234567");
+    }
+
+    #[test]
+    fn inspects_a_nand_image_inside_zip_without_expanding_the_whole_archive() {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let directory = temp_dir();
+        let zip_path = directory.join("NAND.zip");
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer.start_file(
+            "NAND.bin",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        ).unwrap();
+        writer.write_all(&fake_nand_prefix()).unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+        fs::write(&zip_path, archive).unwrap();
+
+        let report = inspect_nand_backup(&zip_path).unwrap();
+        assert_eq!(report.image_name, "NAND.bin");
+        assert_eq!(report.serial_number, "CTR1234567");
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
