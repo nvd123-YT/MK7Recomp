@@ -17,21 +17,36 @@ const MAX_SYSTEM_SAVE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CtrNandLayout {
-    pub offset: u64,
+    pub nand_offset: u64,
+    pub xorpad_offset: u64,
     pub size: u64,
 }
 
-pub fn ctrnand_layout(is_new_3ds: bool) -> CtrNandLayout {
-    if is_new_3ds {
-        CtrNandLayout {
-            offset: N3DS_FAT16_OFFSET,
-            size: N3DS_XORPAD_SIZE,
-        }
+/// Classify both fixed-offset and legacy "unfixed" Decrypt9 CTRNAND pads.
+/// The returned range always begins at the FAT16 partition, so callers get a
+/// mountable FAT volume rather than the padding before it.
+pub fn ctrnand_layout(is_new_3ds: bool, xorpad_size: u64) -> Result<CtrNandLayout, String> {
+    let (nand_offset, fixed_size, unfixed_size, pad_prefix) = if is_new_3ds {
+        (N3DS_FAT16_OFFSET, N3DS_XORPAD_SIZE, 0x41ED_0000, N3DS_FAT16_OFFSET - 0x0B93_0000)
     } else {
-        CtrNandLayout {
-            offset: O3DS_FAT16_OFFSET,
-            size: O3DS_XORPAD_SIZE,
-        }
+        (O3DS_FAT16_OFFSET, O3DS_XORPAD_SIZE, 0x2F5D_0000, O3DS_FAT16_OFFSET - 0x0B93_0000)
+    };
+    let pad_max = if is_new_3ds { 0x4240_0000 } else { 0x2F80_0000 };
+    let fixed_max = if is_new_3ds { 0x41E0_0000 } else { 0x2F40_0000 };
+    if (fixed_size..=fixed_max).contains(&xorpad_size) {
+        Ok(CtrNandLayout {
+            nand_offset,
+            xorpad_offset: 0,
+            size: fixed_size,
+        })
+    } else if (unfixed_size..=pad_max).contains(&xorpad_size) {
+        Ok(CtrNandLayout {
+            nand_offset,
+            xorpad_offset: pad_prefix,
+            size: fixed_size,
+        })
+    } else {
+        Err(format!("the CTRNAND XORpad has an unsupported size of {xorpad_size} bytes"))
     }
 }
 
@@ -44,13 +59,21 @@ pub fn decrypt_ctrnand<RN: Read, RX: Read, WO: Write>(
     output: &mut WO,
     layout: CtrNandLayout,
 ) -> Result<(), String> {
-    let mut skip = layout.offset;
+    let mut skip = layout.nand_offset;
     let mut discard = [0u8; 64 * 1024];
     while skip > 0 {
         let count = usize::try_from(skip.min(discard.len() as u64)).unwrap();
         nand.read_exact(&mut discard[..count])
             .map_err(|error| format!("NAND image ended before the CTRNAND partition: {error}"))?;
         skip -= count as u64;
+    }
+
+    let mut pad_skip = layout.xorpad_offset;
+    while pad_skip > 0 {
+        let count = usize::try_from(pad_skip.min(discard.len() as u64)).unwrap();
+        xorpad.read_exact(&mut discard[..count])
+            .map_err(|error| format!("CTRNAND XORpad ended before its FAT16 region: {error}"))?;
+        pad_skip -= count as u64;
     }
 
     let mut encrypted = vec![0u8; IO_CHUNK];
@@ -326,12 +349,13 @@ mod tests {
 
     #[test]
     fn ctrnand_xor_uses_console_pad_and_fixed_partition_offset() {
-        let layout = CtrNandLayout { offset: 4, size: 4 };
+        let layout = CtrNandLayout { nand_offset: 4, xorpad_offset: 0, size: 4 };
         let mut nand = Cursor::new(vec![0, 0, 0, 0, 1, 2, 3, 4]);
         let mut pad = Cursor::new(vec![5, 6, 7, 8]);
         let mut output = Vec::new();
         decrypt_ctrnand(&mut nand, &mut pad, &mut output, layout).unwrap();
         assert_eq!(output, [4, 4, 4, 12]);
+        assert_eq!(ctrnand_layout(false, O3DS_XORPAD_SIZE).unwrap().xorpad_offset, 0);
     }
 
     fn directory_entry(name: &str, extension: &str, attributes: u8, cluster: u16, size: u32) -> [u8; 32] {
