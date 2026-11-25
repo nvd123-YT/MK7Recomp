@@ -36,8 +36,7 @@
       "--game",
       "{game}"
     ],
-    "label": "Recompiling Mario Kart 7's code on your PC",
-    "timeout": 3600
+    "label": "Recompiling Mario Kart 7's code on your PC"
   },
   "config": [
     {
@@ -173,14 +172,14 @@
     },
     {
       "id": "open_online_data",
-      "label": "Open online data",
-      "help": "For NASC/FRD, place your own ctr-common-1 certificate/key, LocalFriendCodeSeed_B, and nasc.json here. Device name is UTF-16LE without a NUL terminator; unit code is 2 for both 3DS models; NASC sdkver is always 000000. Cartridge images require a 17-byte ROM ID as 34 hex digits in romid_hex. Private files are never bundled.",
+      "label": "Open Pretendo device and certificate data",
+      "help": "Place your own ctr-common-1 certificate and private key, LocalFriendCodeSeed_B, and nasc.json here. The file must contain your own MAC address, BSSID, AP slot details, device name and serial number. Use FPD version 16 only for system software 11.16 (or set the matching value for your imported system). Cartridge images also need their exact 17-byte ROM ID. Private identity files are never bundled.",
       "open": "online_data"
     },
     {
       "id": "open_friends_account",
-      "label": "Open Friends account data",
-      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account; include 2/mydata too so FRD can read your NC Principal ID. These private files contain account identifiers and the NEX password; do not share them.",
+      "label": "Open Pretendo Friends account data",
+      "help": "Import your own decrypted Friends system-save folder here. It must contain 2/account and 2/mydata. The game reads the FRD Principal ID, NEX password, UID-HMAC and NC Principal ID from these files. They are private account data; never share them.",
       "open": "friends_account"
     }
   ],
@@ -785,9 +784,9 @@
     },
     {
       "id": "network_provider",
-      "label": "Network provider",
+      "label": "Pretendo online services",
       "group": "Online",
-      "help": "Pretendo mode enables guest DNS/UDP/TCP routing, HTTP requests, FRD NASC LOGIN/SVCLOC and measured NAT data. Full NEX authentication, matchmaking, peer traversal and a live race remain experimental and have not been end-to-end tested.",
+      "help": "Choose Pretendo to enable host-routed internet access, AC connection events, the game's FRD/NASC login, and NAT detection. Before launching, import your own Friends account files and the private certificate/device data using the actions below. To log in, launch Mario Kart 7 and choose Online in the game's menu; the game initiates NASC/NEX login itself. PRUDP/NEX matchmaking and a full race are still experimental and need a real online test.",
       "choices": [
         {
           "label": "Off",
@@ -829,11 +828,5 @@
         "auto_repair_uidhmac": "false"
       }
     }
-  ],
-  "requires": [
-    "settings.toml",
-    "settings.choices",
-    "settings.slider",
-    "settings.args"
   ]
 }
