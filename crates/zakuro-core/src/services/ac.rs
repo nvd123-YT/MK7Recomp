@@ -226,8 +226,8 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // GetCloseResult.
         0x0009 => buffer.reply(&mut system.memory, command, &[]),
-        // GetLastErrorCode.
-        0x000A => buffer.reply(&mut system.memory, command, &[system.services.ac.last_error]),
+        // GetLastErrorCode and GetLastDetailErrorCode.
+        0x000A | 0x000B => buffer.reply(&mut system.memory, command, &[system.services.ac.last_error]),
         // GetInfraPriority returns the default infrastructure priority.
         0x0027 => buffer.reply(&mut system.memory, command, &[0]),
         // GetStatus: 3 means Internet reachable/available to the guest.
@@ -306,6 +306,52 @@ mod tests {
         let translated = translated_handles(&mut system, &buffer, header);
         assert_eq!(translated.len(), 1);
         assert_eq!(system.kernel.handles.resolve(translated[0]), Some(object));
+    }
+
+    #[test]
+    fn ac_poll_signals_the_guest_event_after_a_successful_probe() {
+        let (mut system, _) = system_with_thread();
+        system.config.network_provider = NetworkProvider::Pretendo;
+        let (object, _) = system
+            .kernel
+            .create_event(crate::kernel::sync::ResetType::OneShot, "AC completion");
+        let (send, receive) = mpsc::channel();
+        send.send(Ok(())).unwrap();
+        system.services.ac.connect_event = Some(object);
+        system.services.ac.pending_connect = Some(receive);
+
+        poll(&mut system);
+
+        assert!(system.services.ac.connected);
+        assert_eq!(system.services.ac.last_error, 0);
+        let signaled = match system.kernel.objects.get(object) {
+            Some(crate::kernel::object::KObject::Event(event)) => event.signaled,
+            _ => false,
+        };
+        assert!(signaled);
+    }
+
+    #[test]
+    fn ac_poll_preserves_disconnected_state_when_probe_fails() {
+        let (mut system, _) = system_with_thread();
+        system.config.network_provider = NetworkProvider::Pretendo;
+        let (object, _) = system
+            .kernel
+            .create_event(crate::kernel::sync::ResetType::OneShot, "AC completion");
+        let (send, receive) = mpsc::channel();
+        send.send(Err(io::Error::new(io::ErrorKind::ConnectionRefused, "test failure"))).unwrap();
+        system.services.ac.connect_event = Some(object);
+        system.services.ac.pending_connect = Some(receive);
+
+        poll(&mut system);
+
+        assert!(!system.services.ac.connected);
+        assert_eq!(system.services.ac.last_error, zakuro_common::result::errors::NOT_CONNECTED.0);
+        let signaled = match system.kernel.objects.get(object) {
+            Some(crate::kernel::object::KObject::Event(event)) => event.signaled,
+            _ => false,
+        };
+        assert!(signaled);
     }
 
     #[test]
