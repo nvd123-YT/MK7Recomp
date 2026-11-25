@@ -685,14 +685,20 @@ fn server_time(value: Option<&String>) -> u64 {
     }).unwrap_or(0)
 }
 
-/// libctru's FRD_GetServerTimeDifference reports nanoseconds, signed as a
-/// two's-complement value in the u64 output word pair.
+/// FRD_GetServerTimeDifference returns a signed nanosecond difference in
+/// two's-complement form inside a u64 IPC word pair. Keep negative offsets:
+/// saturating_sub would silently turn a server-behind-clock offset into zero.
+fn encode_server_time_difference_ns(server_time_ns: i64, device_time_ns: i64) -> u64 {
+    let difference = i128::from(server_time_ns) - i128::from(device_time_ns);
+    difference.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64 as u64
+}
+
 fn server_time_difference_ns(value: Option<&String>) -> u64 {
     let Some(server_time) = parse_nasc_datetime(value)
         .and_then(|date| date.and_utc().timestamp_nanos_opt())
     else { return 0 };
     let Some(device_time) = chrono::Utc::now().timestamp_nanos_opt() else { return 0 };
-    (server_time.saturating_sub(device_time)) as u64
+    encode_server_time_difference_ns(server_time, device_time)
 }
 
 fn make_nasc_job(
@@ -1871,6 +1877,19 @@ mod tests {
         let full_key = *b"123456789012";
         assert_eq!(full_key.len(), 12);
         assert_eq!(full_key[..9], *b"123456789");
+    }
+
+    #[test]
+    fn server_time_difference_preserves_positive_and_negative_offsets() {
+        assert_eq!(encode_server_time_difference_ns(2_000_000_000, 1_000_000_000), 1_000_000_000);
+        assert_eq!(
+            encode_server_time_difference_ns(1_000_000_000, 2_000_000_000),
+            (-1_000_000_000i64) as u64
+        );
+        assert_eq!(
+            encode_server_time_difference_ns(i64::MAX, i64::MIN),
+            i64::MAX as u64
+        );
     }
 
     #[test]
