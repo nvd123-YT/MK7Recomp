@@ -5,7 +5,7 @@
 //! for the game's independent NASC authentication or NEX session setup.
 
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -252,6 +252,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
 mod tests {
     use super::*;
     use crate::services::tests::system_with_thread;
+    use std::net::TcpListener;
 
     #[test]
     fn wifi_status_requires_a_completed_internet_connection() {
