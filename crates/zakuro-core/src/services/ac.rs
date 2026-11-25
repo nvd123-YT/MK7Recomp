@@ -402,7 +402,7 @@ mod tests {
 
         let (mut system, buffer) = system_with_thread();
         let tls = system.kernel.current().unwrap().tls;
-        let output = tls + 0x100;
+        let output = tls + 0x400;
         system.memory.write_bytes(
             tls + TLS_IPC_STATIC_BUFFERS,
             &Descriptor::static_buffer(0x100, 0).to_le_bytes(),
