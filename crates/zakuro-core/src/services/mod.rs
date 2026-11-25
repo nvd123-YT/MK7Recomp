@@ -6,6 +6,7 @@ pub mod boss;
 pub mod cam;
 pub mod csnd;
 pub mod cecd;
+mod ctr_common;
 pub mod err;
 pub mod cfg;
 pub mod dlp;
