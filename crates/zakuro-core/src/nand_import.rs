@@ -506,9 +506,51 @@ fn read_prefix_again(path: &Path, image_name: &str) -> Result<Vec<u8>, String> {
     file.read_exact(&mut signature).map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
     if signature == *b"PK\x03\x04" || signature == *b"PK\x05\x06" || signature == *b"PK\x07\x08" {
-        let (selected_name, _, prefix) = read_zip_image(file)?;
-        if selected_name != image_name {
-            return Err("the NAND ZIP selection changed between validation and extraction".to_owned());
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| format!("NAND.zip is not a readable ZIP archive: {error}"))?;
+        let mut selected = None;
+        let mut essential = None;
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index)
+                .map_err(|error| format!("could not inspect ZIP entry {index}: {error}"))?;
+            if entry.is_dir() {
+                continue;
+            }
+            let name = entry.name()
+                .map_err(|error| format!("ZIP entry {index} has an invalid name: {error}"))?
+                .to_owned();
+            let basename = name.rsplit('/').next().unwrap_or(name.as_str());
+            if name == image_name {
+                if selected.replace((index, entry.size())).is_some() {
+                    return Err("NAND.zip contains duplicate entries for the selected image".to_owned());
+                }
+            } else if basename.eq_ignore_ascii_case("essential.exefs") {
+                if essential.replace((index, entry.size())).is_some() {
+                    return Err("NAND.zip contains more than one essential.exefs file".to_owned());
+                }
+            }
+        }
+        let (image_index, image_size) = selected
+            .ok_or_else(|| "the selected NAND image could not be reopened from NAND.zip".to_owned())?;
+        if image_size < PREFIX_SIZE as u64 || image_size > MAX_IMAGE_SIZE {
+            return Err("the NAND image inside the ZIP has an invalid size".to_owned());
+        }
+        let mut prefix = vec![0u8; PREFIX_SIZE];
+        archive.by_index(image_index)
+            .map_err(|error| format!("could not open {image_name}: {error}"))?
+            .read_exact(&mut prefix)
+            .map_err(|error| format!("could not reread the NAND header: {error}"))?;
+
+        if let Some((essential_index, essential_size)) = essential {
+            if essential_size != ESSENTIAL_SIZE as u64 {
+                return Err(format!("essential.exefs must be exactly 0x{ESSENTIAL_SIZE:X} bytes"));
+            }
+            let mut bytes = vec![0u8; ESSENTIAL_SIZE];
+            archive.by_index(essential_index)
+                .map_err(|error| format!("could not reopen essential.exefs: {error}"))?
+                .read_exact(&mut bytes)
+                .map_err(|error| format!("could not reread essential.exefs: {error}"))?;
+            prefix[ESSENTIAL_OFFSET..PREFIX_SIZE].copy_from_slice(&bytes);
         }
         Ok(prefix)
     } else {
@@ -517,7 +559,6 @@ fn read_prefix_again(path: &Path, image_name: &str) -> Result<Vec<u8>, String> {
         Ok(prefix)
     }
 }
-
 fn validate_essential(essential: &[u8]) -> Result<(), String> {
     if essential.len() != ESSENTIAL_SIZE {
         return Err("the embedded essential backup has an invalid size".to_owned());
