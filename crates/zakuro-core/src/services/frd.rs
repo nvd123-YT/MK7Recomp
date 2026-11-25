@@ -1635,6 +1635,19 @@ mod tests {
     }
 
     #[test]
+    fn nasc_login_token_is_preserved_as_encoded_text() {
+        let token = nasc_base64_encode(&[0, 255, 128, 42, 19, 88, 207, 7]);
+        let body = format!(
+            "returncd={}&token={}",
+            form_url_encode(&nasc_base64_encode(b"001")),
+            form_url_encode(&token)
+        );
+        let parsed = parse_nasc_form(&body).unwrap();
+        assert_eq!(parsed.get("returncd").map(String::as_str), Some("001"));
+        assert_eq!(parsed.get("token").map(String::as_str), Some(token.as_str()));
+    }
+
+    #[test]
     fn friend_account_parser_reads_principal_password_and_hmac() {
         let account = parse_friend_account(&account_bytes()).unwrap();
         assert_eq!(account.local_account_id, 2);
