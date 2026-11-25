@@ -1,6 +1,6 @@
 # MK7Recomp Network: account-only online design
 
-Status: architecture and local identity groundwork only. There is no MK7Recomp-hosted NEX service yet, and this document does not claim that online races are currently available through an account-only flow.
+Status: local NAND extraction code and client-side Pretendo NASC plumbing are present, but CI, real-NAND import, real Pretendo authentication and race flow are not yet validated. There is no MK7Recomp-hosted NEX service, and online races are not currently confirmed playable.
 
 ## Product requirement
 
@@ -114,12 +114,17 @@ Pretendo's public Mario Kart 7 server is a useful protocol reference and is AGPL
 
 - [x] Add secure, persistent per-install identity storage in the runtime.
 - [x] Cover stable reload, independent installs, corrupt-file handling, redacted diagnostics, and Unix file permissions with unit tests.
-- [x] Add a one-file raw/ZIP NAND import flow, validate the NCSD and GodMode9 essential.exefs structure and hashes, extract the signed-seed record, SecureInfo, movable.sed and OTP, and generate a persistent virtual adapter address plus nasc.json.
-- [ ] Independently verify the LocalFriendCodeSeed_B signature against the Nintendo public key before presenting the extracted identity as valid.
-- [ ] Implement the NAND/CTRNAND decryption and FAT mount pipeline.
-- [ ] Parse the Friends system-save DISA/DIFF archive and extract FPAC account and FPMD mydata automatically.
-- [ ] Preserve or initialize local Friends/NEX account state so users do not need to import the Friends system save separately.
-- [ ] Add an opt-in MK7Recomp Network provider and launcher setup flow.
+- [x] Add a single-selection NAND ZIP import flow, validate NCSD and GodMode9 essential.exefs structure/hashes, and extract LocalFriendCodeSeed_B, SecureInfo, movable.sed, NAND CID and OTP.
+- [x] Implement CTRNAND FAT16 decryption using the matching console's Decrypt9 fixed-offset or unfixed `nand.fat16.xorpad` included in the same ZIP.
+- [x] Locate the Friends system-save DISA file under `/data/<ID0>/sysdata/00010032/00000000`, parse DPFS/IVFC and the SAVE filesystem, and install the validated FPAC `account` and FPMD `mydata` records into the paths consumed by FRD.
+- [x] Add synthetic tests for XOR decryption, FAT16 path discovery and end-to-end DISA/Friends record extraction. CI and real-console validation are still pending; a green build and a successful import from an actual NAND have not yet been observed.
+- [ ] Add an automatic Boot9-derived CTRNAND decrypt path so a bare NAND dump with embedded essentials can be imported without a separately generated XORpad. A user-supplied Boot9 dump may be auto-detected locally, but copyrighted firmware keys/Boot9 files must not be redistributed.
+- [ ] Independently verify the LocalFriendCodeSeed_B signature against the Nintendo public key before presenting the extracted identity as trusted.
+- [ ] Confirm that Pretendo accepts the generated stable virtual adapter MAC; the real 3DS Wi-Fi MAC is not present in the ordinary NAND image.
+- [ ] Validate NASC LOGIN and SVCLOC with a real imported device record, including UID-HMAC requirements and cartridge ROM ID handling.
+- [ ] Complete the end-to-end NEX secure-server session, matchmaking, room creation/join, NAT/peer path, and two-client race validation.
+- [ ] Preserve or initialize local Friends/NEX account state for clean NANDs without an existing account, using only the supported Pretendo registration protocol.
+- [ ] Add an opt-in MK7Recomp Network provider and launcher setup flow, then implement and deploy its independent account/NEX/game-server backend.
 - [ ] Implement the identity challenge/response and account bootstrap service.
 - [ ] Implement or integrate an independently hosted MK7 NEX authentication and secure server.
 - [ ] Connect the game's FRD/NEX login path to the new provider without manual Friends-save import.
