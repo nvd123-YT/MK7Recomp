@@ -33,16 +33,28 @@ References:
 
 ### Single-file NAND import
 
-The NAND importer is planned to accept one GodMode9 NAND backup with its essential.exefs backup embedded, as a single file. A normal encrypted raw NAND image cannot simply be searched as a folder: the import pipeline must correctly decrypt/mount the CTRNAND partition using the embedded console-unique material and the required common boot ROM key material. The app should also accept an already-decrypted CTRNAND filesystem tree for developer testing, but that is not the end-user setup.
+The desktop build now has an **Import NAND…** action. It accepts either a raw NAND image or a ZIP containing exactly one recognized image named NAND.bin, SysNAND.bin, EmuNAND.bin, or NANDmin.bin. The first-stage importer:
 
-Expected records to extract automatically:
+- Validates the NCSD header, partition table, declared image size, and presence of FIRM.
+- Requires the GodMode9 embedded essential.exefs block at sector 1 and validates the expected record layout and SHA-256 digests.
+- Extracts LocalFriendCodeSeed_B, SecureInfo, movable.sed, and OTP into the application's private sysdata directory.
+- Generates and persists a virtual Nintendo-OUI network-adapter MAC for this installation and creates nasc.json automatically.
+- Reads only the first 0x2400 bytes needed to inspect the image and essential backup; it does not copy or upload the multi-gigabyte NAND.
 
-- rw/sys/LocalFriendCodeSeed_B — the signed 0x110-byte friend-code seed.
-- rw/sys/SecureInfo_A (or the valid system variant) — serial/model and region data.
-- data/<ID0>/sysdata/00010032/00000000 — Friends module system-save archive, including the account and mydata records after DISA extraction.
-- data/<ID0>/sysdata/00010017/00000000 — system configuration save, where useful for language/region/network configuration.
+**Not finished yet:** this first stage does not decrypt the CTRNAND FAT partition, extract the Friends system-save DISA archive, or parse its account and mydata records. As a result, this is not yet a complete Pretendo login setup and a successful import does not mean the game can join a race. The UI reports this limitation instead of claiming online readiness.
 
-The import must never upload the raw NAND or system saves to a server. Extraction stays local. Only the NASC/NEX fields required for a connection are sent to Pretendo over HTTPS, exactly as the original service protocol requires.
+The NAND importer currently performs structural and SHA-256 integrity checks on the embedded backup. It does not independently verify Nintendo's RSA signature on LocalFriendCodeSeed_B; Pretendo still performs that server-side validation during NASC login.
+
+The full one-file target remains:
+
+1. Validate and identify the NAND image.
+2. Decrypt/mount CTRNAND using the console-specific material in the essential backup and the required common crypto material supported by the runtime.
+3. Parse the FAT filesystem and locate the Friends system-save archive at the correct ID0/system-save path.
+4. Parse the DISA/DIFF structures and extract the FPAC account and FPMD mydata records locally.
+5. Configure the remaining network fields automatically, preserving the imported signed seed and matching serial.
+6. Complete FRD NASC login, NEX authentication, SVCLOC, and the game's real matchmaking/session path.
+
+The importer must never upload the raw NAND or system saves to a server. Extraction stays local. Only the NASC/NEX fields required for a connection are sent to Pretendo over HTTPS, exactly as the original service protocol requires.
 
 ## MK7Recomp Network
 
@@ -95,10 +107,11 @@ Pretendo's public Mario Kart 7 server is a useful protocol reference and is AGPL
 
 - [x] Add secure, persistent per-install identity storage in the runtime.
 - [x] Cover stable reload, independent installs, corrupt-file handling, redacted diagnostics, and Unix file permissions with unit tests.
-- [ ] Add a one-file NAND import flow for legacy Pretendo use; detect the supported backup format and validate the embedded essential backup.
-- [ ] Implement the NAND/CTRNAND decrypt-and-mount pipeline and extract LocalFriendCodeSeed_B, SecureInfo, and the Friends system-save automatically.
-- [ ] Generate and persist the non-console network-adapter fields that can safely be virtualized; never ask the user to write nasc.json.
-- [ ] Preserve or initialize the local Friends/NEX account state so users do not need to import the Friends system save separately.
+- [x] Add a one-file raw/ZIP NAND import flow, validate the NCSD and GodMode9 essential.exefs structure and hashes, extract the signed-seed record, SecureInfo, movable.sed and OTP, and generate a persistent virtual adapter address plus nasc.json.
+- [ ] Independently verify the LocalFriendCodeSeed_B signature against the Nintendo public key before presenting the extracted identity as valid.
+- [ ] Implement the NAND/CTRNAND decryption and FAT mount pipeline.
+- [ ] Parse the Friends system-save DISA/DIFF archive and extract FPAC account and FPMD mydata automatically.
+- [ ] Preserve or initialize local Friends/NEX account state so users do not need to import the Friends system save separately.
 - [ ] Add an opt-in MK7Recomp Network provider and launcher setup flow.
 - [ ] Implement the identity challenge/response and account bootstrap service.
 - [ ] Implement or integrate an independently hosted MK7 NEX authentication and secure server.
