@@ -461,8 +461,15 @@ fn parse_nasc_form(body: &str) -> Option<BTreeMap<String, String>> {
         let (key, value) = pair.split_once('=')?;
         let key = String::from_utf8(percent_decode(key)?).ok()?;
         let encoded = String::from_utf8(percent_decode(value)?).ok()?;
-        let decoded = nasc_base64_decode(&encoded)?;
-        fields.insert(key, String::from_utf8_lossy(&decoded).into_owned());
+        // NASC LOGIN's token is already Nintendo's custom-base64 text. It is
+        // passed unchanged as AccountExtraInfo.NEXToken; decoding it here
+        // would turn the random 112-byte token into lossy UTF-8.
+        if key == "token" || key == "servicetoken" {
+            fields.insert(key, encoded);
+        } else {
+            let decoded = nasc_base64_decode(&encoded)?;
+            fields.insert(key, String::from_utf8_lossy(&decoded).into_owned());
+        }
     }
     Some(fields)
 }
