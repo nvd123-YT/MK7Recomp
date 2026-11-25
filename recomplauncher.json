@@ -172,8 +172,8 @@
     },
     {
       "id": "open_online_data",
-      "label": "Open Pretendo device and certificate data",
-      "help": "Place your own ctr-common-1 certificate and private key, LocalFriendCodeSeed_B, and nasc.json here. The file must contain your own MAC address, BSSID, AP slot details, device name and serial number. Use FPD version 16 only for system software 11.16 (or set the matching value for your imported system). Cartridge images also need their exact 17-byte ROM ID. Private identity files are never bundled.",
+      "label": "Open Pretendo device data",
+      "help": "Place your own LocalFriendCodeSeed_B and add nasc.json with your console's MAC address, Wi-Fi BSSID, AP slot details, device name and serial number. The shared 3DS HTTPS client certificate is built into MK7Recomp; you do not need to import a certificate or private key here. Cartridge dumps also need their exact 17-byte ROM ID as 34 hex digits in romid_hex. Private console identity data is never bundled.",
       "open": "online_data"
     },
     {
