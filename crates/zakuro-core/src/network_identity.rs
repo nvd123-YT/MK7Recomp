@@ -55,6 +55,21 @@ impl NetworkIdentity {
         set_private_directory_permissions(&directory)?;
 
         let path = directory.join("identity.json");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                return Self::read_existing(&path);
+            }
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "MK7Recomp network identity path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let identity = Self::generate()?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -64,7 +79,6 @@ impl NetworkIdentity {
         }
         match options.open(&path) {
             Ok(mut file) => {
-                let identity = Self::generate()?;
                 let stored = StoredIdentity {
                     schema: IDENTITY_SCHEMA,
                     account_id: encode_hex(&identity.account_id),
