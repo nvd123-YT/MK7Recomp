@@ -38,6 +38,11 @@ pub struct Station {
     pub stream_id: u8,
     pub stream_type: u8,
     pub principal_id: u32,
+    /// Rendez-Vous connection ID used by NATTraversal target routing.
+    pub rv_connection_id: u32,
+    /// Original StationURL, preserving NAT and server routing parameters.
+    pub raw_url: String,
+    /// Station connection ID (CID), distinct from RVCID.
     pub connection_id: u32,
 }
 
@@ -590,6 +595,42 @@ pub fn decode_station_url_list(data: &[u8]) -> Result<Vec<Station>, String> {
     Ok(stations)
 }
 
+
+/// Encode NATTraversal::RequestProbeInitiationExt:
+/// List<String> target StationURLs followed by this client's own StationURL.
+pub fn encode_nat_probe_initiation_ext_request(
+    target_urls: &[String],
+    station_to_probe: &str,
+) -> Result<Vec<u8>, String> {
+    if target_urls.is_empty() {
+        return Err("NAT probe request requires at least one target StationURL".to_owned());
+    }
+    if target_urls.len() > 32 {
+        return Err("NAT probe request contains too many target StationURLs".to_owned());
+    }
+    if station_to_probe.is_empty() {
+        return Err("NAT probe request is missing this client's StationURL".to_owned());
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(&(target_urls.len() as u32).to_le_bytes());
+    for target in target_urls {
+        if target.is_empty() {
+            return Err("NAT probe target StationURL is empty".to_owned());
+        }
+        let parsed = parse_station_url(target)?;
+        if parsed.rv_connection_id == 0 {
+            return Err(format!(
+                "NAT probe target StationURL for PID {} is missing RVCID",
+                parsed.principal_id
+            ));
+        }
+        encode_nex_string(target, &mut output);
+    }
+    parse_station_url(station_to_probe)?;
+    encode_nex_string(station_to_probe, &mut output);
+    Ok(output)
+}
+
 pub fn encode_nex_string(value: &str, output: &mut Vec<u8>) {
     let mut bytes = value.as_bytes().to_vec();
     bytes.push(0);
@@ -856,6 +897,9 @@ pub fn parse_station_url(value: &str) -> Result<Station, String> {
         stream_id,
         stream_type,
         principal_id: get("PID")?.parse().map_err(|_| "NEX station URL principal ID is invalid".to_owned())?,
+        rv_connection_id: fields.get("RVCID").copied().unwrap_or("0").parse()
+            .map_err(|_| "NEX station URL RVCID is invalid".to_owned())?,
+        raw_url: value.to_owned(),
         connection_id: get("CID")?.parse().map_err(|_| "NEX station URL connection ID is invalid".to_owned())?,
     })
 }
@@ -1186,6 +1230,21 @@ mod tests {
         assert!(data_holder.len() > holder_cursor);
     }
 
+
+    #[test]
+    fn nat_probe_request_preserves_station_urls_and_requires_target_rvcid() {
+        let target = "prudp:/address=203.0.113.2;port=5000;sid=1;stream=9;PID=42;CID=77;RVCID=88;type=1".to_owned();
+        let own = "prudp:/address=203.0.113.1;port=5001;sid=1;stream=9;PID=41;CID=76;RVCID=87;type=1";
+        let encoded = encode_nat_probe_initiation_ext_request(&[target.clone()], own).unwrap();
+        let mut cursor = 0usize;
+        assert_eq!(read_u32(&encoded, &mut cursor).unwrap(), 1);
+        assert_eq!(decode_nex_string(&encoded, &mut cursor).unwrap(), target);
+        assert_eq!(decode_nex_string(&encoded, &mut cursor).unwrap(), own);
+        assert_eq!(cursor, encoded.len());
+
+        let missing_rvcid = "prudp:/address=203.0.113.2;port=5000;sid=1;stream=9;PID=42;CID=77;type=1".to_owned();
+        assert!(encode_nat_probe_initiation_ext_request(&[missing_rvcid], own).is_err());
+    }
 
     #[test]
     fn mk7_matchmake_browse_request_encodes_the_3ds_243_fields() {

@@ -59,6 +59,8 @@ pub fn connect(
         stream_id: 1,
         stream_type: AUTHENTICATION_STREAM_TYPE,
         principal_id: 0,
+        rv_connection_id: 0,
+        raw_url: String::new(),
         connection_id: 0,
     };
 
@@ -210,16 +212,25 @@ impl NexOnlineSession {
         crate::nex_bootstrap::decode_matchmake_auto_response(&response.body)
     }
 
-    /// Join a known gathering and return the P2P session key.
+    /// Join a known MK7 3DS gathering.
+    ///
+    /// The game's NEX 2.4.3 MatchMaking schema acknowledges participation
+    /// without returning a per-gathering session key.
     pub fn join_matchmake_session(
         &mut self,
         gathering_id: u32,
         message: &str,
         timeout: Duration,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<(), String> {
         let body = crate::nex_bootstrap::encode_matchmake_join_request(gathering_id, message);
         let response = self.request(0x6D, 0x07, &body, timeout)?;
-        crate::nex_bootstrap::decode_nex_buffer_response(&response.body)
+        if !response.body.is_empty() {
+            return Err(format!(
+                "MK7 3DS JoinMatchmakeSession returned {} unexpected response bytes",
+                response.body.len()
+            ));
+        }
+        Ok(())
     }
 
     /// Retrieve the StationURLs for the P2P host/participants of a gathering.
@@ -230,6 +241,29 @@ impl NexOnlineSession {
     ) -> Result<Vec<Station>, String> {
         let response = self.request(0x15, 0x29, &gathering_id.to_le_bytes(), timeout)?;
         crate::nex_bootstrap::decode_station_url_list(&response.body)
+    }
+
+    /// Ask the NEX server to push InitiateProbe to the named peer connections.
+    ///
+    /// Target StationURLs must come from GetSessionURLs and contain RVCID.
+    /// station_to_probe must be this client's registered Game-stream URL.
+    /// This starts the PIA UDP hole-punch; it does not itself establish PRUDP.
+    pub fn request_probe_initiation_ext(
+        &mut self,
+        targets: &[crate::nex_bootstrap::Station],
+        station_to_probe: &crate::nex_bootstrap::Station,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let target_urls = targets
+            .iter()
+            .map(|station| station.raw_url.clone())
+            .collect::<Vec<_>>();
+        let body = crate::nex_bootstrap::encode_nat_probe_initiation_ext_request(
+            &target_urls,
+            &station_to_probe.raw_url,
+        )?;
+        let _ = self.request(0x03, 0x03, &body, timeout)?;
+        Ok(())
     }
 
     /// Join a gathering and establish its host's Game-stream PRUDP session.
@@ -246,10 +280,7 @@ impl NexOnlineSession {
         if result.host_pid == 0 {
             return Err("automatic matchmaking returned a zero host PID".to_owned());
         }
-        let session_key = self.join_matchmake_session(result.gathering_id, message, timeout)?;
-        if session_key.is_empty() {
-            return Err("JoinMatchmakeSession returned an empty P2P session key".to_owned());
-        }
+        self.join_matchmake_session(result.gathering_id, message, timeout)?;
         let stations = self.get_matchmake_session_urls(result.gathering_id, timeout)?;
         let host = stations
             .iter()
@@ -261,7 +292,7 @@ impl NexOnlineSession {
                 "GetSessionURLs did not return a Game-stream StationURL for host PID {}",
                 result.host_pid
             ))?;
-        crate::game_peer::connect_to_peer(host, &session_key, timeout)
+        crate::game_peer::connect_to_peer(host, timeout)
     }
 
     /// The principal ID authenticated by the NEX TicketGranting server.
