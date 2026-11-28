@@ -220,6 +220,7 @@ pub fn accept_peer(
         server_session_id: connect.session_id,
         server_connection_signature: server_signature,
         client_connection_signature: server_signature,
+        connect_response: Vec::new(),
         source_type: connect.destination_type,
         destination_type: connect.source_type,
         source_port: connect.destination_port,
