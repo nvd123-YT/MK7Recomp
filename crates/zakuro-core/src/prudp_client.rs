@@ -8,7 +8,7 @@ use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use crate::nex_bootstrap::{
-    STREAM_TYPE_RV_SECURE, decode_prudp_v0, decode_rmc_response, encode_prudp_v0, encode_rmc_request, PrudpPacket, Rc4, RmcResponse, MK7_PRUDP_ACCESS_KEY,
+    STREAM_TYPE_GAME, STREAM_TYPE_RV_SECURE, decode_prudp_v0, decode_rmc_response, encode_prudp_v0, encode_rmc_request, PrudpPacket, Rc4, RmcResponse, MK7_PRUDP_ACCESS_KEY,
 };
 
 const TYPE_SYN: u8 = 0;
@@ -545,7 +545,7 @@ fn send_and_receive(
                         match (expected_type, packet.packet_type) {
                             (TYPE_SYN, TYPE_SYN) => {
                                 let peer_address = match peer {
-                                    SocketAddr::V4(address) => *address,
+                                    SocketAddr::V4(address) => address,
                                     SocketAddr::V6(_) => return Err("Game peers must use IPv4".to_owned()),
                                 };
                                 let acknowledgement = PrudpPacket {
