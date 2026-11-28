@@ -1124,6 +1124,7 @@ mod tests {
             // simultaneous probe to the joiner's registered public StationURL.
             let local_station = crate::nex_bootstrap::parse_station_url(&nat_own).unwrap();
             let joiner_game_address = SocketAddrV4::new(local_station.address.parse().unwrap(), local_station.port);
+            let mut peer_bytes = [0u8; 65_535];
             let host_probe_time = 0x1122_3344_5566_7788u64;
             let host_probe = crate::game_peer::encode_pia_nat_probe_data(crate::game_peer::PiaNatProbeData {
                 service_variable_id: local_station.rv_connection_id,
@@ -1160,7 +1161,6 @@ mod tests {
             assert_eq!(nat_result_request[4], 1);
 
             // The Game stream uses the default CD&ML payload key; it has no gathering key.
-            let mut peer_bytes = [0u8; 65_535];
             let (peer_client, peer_session_id) =
                 test_accept_prudp(&game_peer_server, STREAM_TYPE_GAME, |_| Vec::new());
             let (length, peer_address) = game_peer_server.recv_from(&mut peer_bytes).unwrap();
