@@ -222,7 +222,7 @@ pub fn punch_through_nat(
                     match probe.probe_type {
                         PIA_NAT_PROBE_REQUEST => {
                             got_peer_request = true;
-                            let reply = encode_pia_nat_probe_data(PiaNatProbeData {
+                            let reply = encode_pia_nat_datagram(PiaNatProbeData {
                                 service_variable_id: local_station.rv_connection_id,
                                 probe_type: PIA_NAT_PROBE_REPLY,
                                 system_time: probe.system_time,

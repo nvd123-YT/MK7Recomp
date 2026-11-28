@@ -865,6 +865,12 @@ mod tests {
             SocketAddr::V4(address) => address,
             _ => panic!("Game peer mock did not bind IPv4"),
         };
+        let game_client_socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let game_client_address = match game_client_socket.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("Game client mock did not bind IPv4"),
+        };
+        let game_client_address_for_server = game_client_address;
 
         let mut outer_ticket = session_key.clone();
         outer_ticket.extend_from_slice(&target_principal_id.to_le_bytes());
@@ -934,7 +940,7 @@ mod tests {
             encode_nex_string(
                 &format!(
                     "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=42;CID=99;RVCID=99;natm=0;natf=0;type=3",
-                    game_peer_address.port()
+                    game_client_address_for_server.port()
                 ),
                 &mut register_response,
             );
@@ -1249,11 +1255,6 @@ mod tests {
 
         assert_eq!(online.principal_id(), principal_id);
         assert!(online.is_connected());
-        let game_client_socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let game_client_address = match game_client_socket.local_addr().unwrap() {
-            SocketAddr::V4(address) => address,
-            _ => panic!("Game client mock did not bind IPv4"),
-        };
         online.register_game_station_with_mapping(
             game_client_socket,
             game_client_address,
