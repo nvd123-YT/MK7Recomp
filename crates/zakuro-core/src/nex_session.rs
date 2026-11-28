@@ -572,6 +572,13 @@ mod tests {
             _ => panic!("secure mock did not bind IPv4"),
         };
 
+        let game_peer_server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        game_peer_server.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let game_peer_address = match game_peer_server.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("Game peer mock did not bind IPv4"),
+        };
+
         let mut outer_ticket = session_key.clone();
         outer_ticket.extend_from_slice(&target_principal_id.to_le_bytes());
         test_put_buffer(&internal_ticket, &mut outer_ticket);
@@ -639,6 +646,8 @@ mod tests {
             encode_nex_string("MatchmakeSession", &mut auto_response);
             let mut auto_object = Vec::new();
             auto_object.extend_from_slice(&1234u32.to_le_bytes());
+            auto_object.extend_from_slice(&42u32.to_le_bytes());
+            auto_object.extend_from_slice(&77u32.to_le_bytes());
             auto_response.extend_from_slice(&((auto_object.len() + 4) as u32).to_le_bytes());
             test_put_buffer(&auto_object, &mut auto_response);
 
@@ -714,7 +723,10 @@ mod tests {
             let mut urls_response = Vec::new();
             urls_response.extend_from_slice(&1u32.to_le_bytes());
             encode_nex_string(
-                "prudp:/address=127.0.0.1;port=3456;sid=1;stream=9;PID=2;CID=77;type=1",
+                &format!(
+                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;type=1",
+                    game_peer_address.port()
+                ),
                 &mut urls_response,
             );
             let urls_request = test_serve_rmc_call(
@@ -732,6 +744,77 @@ mod tests {
                 &urls_response,
             );
             assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
+
+            // The matchmake session key authenticates the Game-stream P2P link.
+            let (peer_client, peer_session_id) =
+                test_accept_prudp(&game_peer_server, STREAM_TYPE_GAME, |_| Vec::new());
+            let (length, peer_address) = game_peer_server.recv_from(&mut bytes).unwrap();
+            assert_eq!(peer_address, SocketAddr::V4(peer_client));
+            let peer_request = decode_prudp_v0(
+                &bytes[..length],
+                MK7_PRUDP_ACCESS_KEY,
+                b"p2p-session-key",
+            )
+            .unwrap();
+            assert_eq!(peer_request.packet_type, TEST_TYPE_DATA);
+            assert_eq!(peer_request.session_id, peer_session_id);
+            assert_eq!(peer_request.source_type, STREAM_TYPE_GAME);
+            assert_eq!(peer_request.destination_type, STREAM_TYPE_GAME);
+            let mut game_decrypt = Rc4::new(b"p2p-session-key").unwrap();
+            assert_eq!(game_decrypt.apply(&peer_request.payload), b"race frame from client");
+
+            let peer_ack = PrudpPacket {
+                packet_type: TEST_TYPE_DATA,
+                flags: TEST_FLAG_ACK,
+                source_type: peer_request.destination_type,
+                source_port: peer_request.destination_port,
+                destination_type: peer_request.source_type,
+                destination_port: peer_request.source_port,
+                session_id: peer_session_id,
+                packet_id: peer_request.packet_id,
+                fragment_id: peer_request.fragment_id,
+                signature: 0x12345678u32.to_le_bytes(),
+                connection_signature: [0; 4],
+                payload: Vec::new(),
+            };
+            game_peer_server
+                .send_to(
+                    &encode_prudp_v0(&peer_ack, MK7_PRUDP_ACCESS_KEY, b"p2p-session-key"),
+                    peer_client,
+                )
+                .unwrap();
+
+            let mut game_encrypt = Rc4::new(b"p2p-session-key").unwrap();
+            let peer_response = PrudpPacket {
+                packet_type: TEST_TYPE_DATA,
+                flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
+                source_type: peer_request.destination_type,
+                source_port: peer_request.destination_port,
+                destination_type: peer_request.source_type,
+                destination_port: peer_request.source_port,
+                session_id: peer_session_id,
+                packet_id: 1,
+                fragment_id: 0,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: game_encrypt.apply(b"race frame accepted"),
+            };
+            game_peer_server
+                .send_to(
+                    &encode_prudp_v0(&peer_response, MK7_PRUDP_ACCESS_KEY, b"p2p-session-key"),
+                    peer_client,
+                )
+                .unwrap();
+
+            let (length, _) = game_peer_server.recv_from(&mut bytes).unwrap();
+            let peer_response_ack = decode_prudp_v0(
+                &bytes[..length],
+                MK7_PRUDP_ACCESS_KEY,
+                b"p2p-session-key",
+            )
+            .unwrap();
+            assert_eq!(peer_response_ack.flags, TEST_FLAG_ACK);
+            assert_eq!(peer_response_ack.packet_id, 1);
 
         });
 
@@ -769,17 +852,24 @@ mod tests {
             .unwrap();
         assert!(sessions.is_empty());
 
-        let session_key_from_join = online
-            .join_matchmake_session(auto_result.gathering_id, "hello race", Duration::from_secs(2))
+        assert_eq!(auto_result.owner_pid, 42);
+        assert_eq!(auto_result.host_pid, 77);
+        let mut peer = online
+            .connect_to_matchmake_host(
+                &auto_result,
+                "hello race",
+                Duration::from_secs(2),
+            )
             .unwrap();
-        assert_eq!(session_key_from_join, b"p2p-session-key");
-
-        let urls = online
-            .get_matchmake_session_urls(auto_result.gathering_id, Duration::from_secs(2))
+        assert!(peer.is_connected());
+        assert_eq!(peer.peer_address().port(), game_peer_address.port());
+        let peer_response = peer
+            .exchange_reliable(
+                b"race frame from client",
+                Duration::from_secs(2),
+            )
             .unwrap();
-        assert_eq!(urls.len(), 1);
-        assert_eq!(urls[0].address, "127.0.0.1");
-        assert_eq!(urls[0].port, 3456);
+        assert_eq!(peer_response, b"race frame accepted");
 
         auth_thread.join().unwrap();
         secure_thread.join().unwrap();
