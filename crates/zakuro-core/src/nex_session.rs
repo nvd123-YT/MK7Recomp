@@ -274,6 +274,404 @@ fn resolve_station(station: &Station) -> Result<SocketAddrV4, String> {
 mod tests {
     use super::*;
 
+    use crate::nex_bootstrap::{
+        decode_nex_string, decode_prudp_v0, derive_kerberos_key, encode_nex_string,
+        encode_prudp_v0, kerberos_decrypt, kerberos_encrypt, MatchmakeSearchCriteria,
+        PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY,
+    };
+    use crate::prudp_client::connection_signature;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+    use std::thread;
+
+    const TEST_TYPE_SYN: u8 = 0;
+    const TEST_TYPE_CONNECT: u8 = 1;
+    const TEST_TYPE_DATA: u8 = 2;
+    const TEST_FLAG_ACK: u8 = 0x01;
+    const TEST_FLAG_RELIABLE: u8 = 0x02;
+    const TEST_FLAG_NEED_ACK: u8 = 0x04;
+    const TEST_FLAG_HAS_SIZE: u8 = 0x08;
+
+    fn test_read_u32(data: &[u8], cursor: &mut usize) -> u32 {
+        let end = *cursor + 4;
+        let value = u32::from_le_bytes(data[*cursor..end].try_into().unwrap());
+        *cursor = end;
+        value
+    }
+
+    fn test_take_buffer(data: &[u8], cursor: &mut usize) -> Vec<u8> {
+        let length = test_read_u32(data, cursor) as usize;
+        let end = *cursor + length;
+        let bytes = data[*cursor..end].to_vec();
+        *cursor = end;
+        bytes
+    }
+
+    fn test_put_buffer(bytes: &[u8], output: &mut Vec<u8>) {
+        output.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        output.extend_from_slice(bytes);
+    }
+
+    fn test_encode_rmc_response(protocol: u8, method: u32, call_id: u32, body: &[u8]) -> Vec<u8> {
+        let mut content = Vec::new();
+        content.push(protocol);
+        content.push(1);
+        content.extend_from_slice(&call_id.to_le_bytes());
+        content.extend_from_slice(&(method | 0x8000).to_le_bytes());
+        content.extend_from_slice(body);
+        let mut response = Vec::new();
+        response.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        response.extend_from_slice(&content);
+        response
+    }
+
+    fn test_accept_prudp(
+        socket: &UdpSocket,
+        connect_payload: impl FnOnce(&PrudpPacket) -> Vec<u8>,
+    ) -> (SocketAddrV4, u8) {
+        let mut bytes = [0u8; 65_535];
+        let (length, client_address) = socket.recv_from(&mut bytes).unwrap();
+        let syn = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+        assert_eq!(syn.packet_type, TEST_TYPE_SYN);
+        let client_address = match client_address {
+            SocketAddr::V4(address) => address,
+            _ => panic!("test NEX client did not use IPv4"),
+        };
+        let server_address = match socket.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("test NEX server did not bind IPv4"),
+        };
+
+        let syn_ack = PrudpPacket {
+            packet_type: TEST_TYPE_SYN,
+            flags: TEST_FLAG_ACK | TEST_FLAG_HAS_SIZE,
+            source_port: syn.destination_port,
+            destination_port: syn.source_port,
+            session_id: 0,
+            packet_id: 0,
+            fragment_id: 0,
+            signature: [0; 4],
+            connection_signature: connection_signature(client_address),
+            payload: Vec::new(),
+        };
+        socket
+            .send_to(
+                &encode_prudp_v0(&syn_ack, MK7_PRUDP_ACCESS_KEY, &[]),
+                client_address,
+            )
+            .unwrap();
+
+        let (length, peer) = socket.recv_from(&mut bytes).unwrap();
+        assert_eq!(peer, SocketAddr::V4(client_address));
+        let connect = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+        assert_eq!(connect.packet_type, TEST_TYPE_CONNECT);
+        assert_eq!(connect.signature, connection_signature(client_address));
+        assert_eq!(connect.connection_signature, connection_signature(server_address));
+
+        let response_payload = connect_payload(&connect);
+        let connect_ack = PrudpPacket {
+            packet_type: TEST_TYPE_CONNECT,
+            flags: TEST_FLAG_ACK | TEST_FLAG_HAS_SIZE,
+            source_port: connect.destination_port,
+            destination_port: connect.source_port,
+            session_id: connect.session_id,
+            packet_id: 1,
+            fragment_id: 0,
+            signature: connect.connection_signature,
+            connection_signature: [0; 4],
+            payload: response_payload,
+        };
+        socket
+            .send_to(
+                &encode_prudp_v0(&connect_ack, MK7_PRUDP_ACCESS_KEY, &[]),
+                client_address,
+            )
+            .unwrap();
+        (client_address, connect.session_id)
+    }
+
+    fn test_serve_rmc_call(
+        socket: &UdpSocket,
+        client: SocketAddrV4,
+        session_id: u8,
+        request_packet_id: u16,
+        response_packet_id: u16,
+        expected_protocol: u8,
+        expected_method: u32,
+        expected_call_id: u32,
+        session_key: &[u8],
+        incoming_cipher: &mut Rc4,
+        outgoing_cipher: &mut Rc4,
+        response_body: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = [0u8; 65_535];
+        let (length, peer) = socket.recv_from(&mut bytes).unwrap();
+        assert_eq!(peer, SocketAddr::V4(client));
+        let request = decode_prudp_v0(
+            &bytes[..length],
+            MK7_PRUDP_ACCESS_KEY,
+            session_key,
+        )
+        .unwrap();
+        assert_eq!(request.packet_type, TEST_TYPE_DATA);
+        assert_eq!(request.flags, TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE);
+        assert_eq!(request.session_id, session_id);
+        assert_eq!(request.packet_id, request_packet_id);
+
+        let clear_request = incoming_cipher.apply(&request.payload);
+        let declared_length = test_read_u32(&clear_request, &mut 0usize);
+        assert_eq!(declared_length as usize, clear_request.len() - 4);
+        assert_eq!(clear_request[4], expected_protocol | 0x80);
+        let mut cursor = 5usize;
+        let call_id = test_read_u32(&clear_request, &mut cursor);
+        let method = test_read_u32(&clear_request, &mut cursor);
+        assert_eq!(call_id, expected_call_id);
+        assert_eq!(method, expected_method);
+        let request_body = clear_request[cursor..].to_vec();
+
+        let ack = PrudpPacket {
+            packet_type: TEST_TYPE_DATA,
+            flags: TEST_FLAG_ACK,
+            source_port: request.destination_port,
+            destination_port: request.source_port,
+            session_id,
+            packet_id: request.packet_id,
+            fragment_id: request.fragment_id,
+            signature: [0; 4],
+            connection_signature: [0; 4],
+            payload: Vec::new(),
+        };
+        socket
+            .send_to(
+                &encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, session_key),
+                client,
+            )
+            .unwrap();
+
+        let clear_response = test_encode_rmc_response(
+            expected_protocol,
+            expected_method,
+            expected_call_id,
+            response_body,
+        );
+        let encrypted_response = outgoing_cipher.apply(&clear_response);
+        let response = PrudpPacket {
+            packet_type: TEST_TYPE_DATA,
+            flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
+            source_port: request.destination_port,
+            destination_port: request.source_port,
+            session_id,
+            packet_id: response_packet_id,
+            fragment_id: 0,
+            signature: [0; 4],
+            connection_signature: [0; 4],
+            payload: encrypted_response,
+        };
+        socket
+            .send_to(
+                &encode_prudp_v0(&response, MK7_PRUDP_ACCESS_KEY, session_key),
+                client,
+            )
+            .unwrap();
+
+        let (length, peer) = socket.recv_from(&mut bytes).unwrap();
+        assert_eq!(peer, SocketAddr::V4(client));
+        let response_ack = decode_prudp_v0(
+            &bytes[..length],
+            MK7_PRUDP_ACCESS_KEY,
+            session_key,
+        )
+        .unwrap();
+        assert_eq!(response_ack.packet_type, TEST_TYPE_DATA);
+        assert_eq!(response_ack.flags, TEST_FLAG_ACK);
+        assert_eq!(response_ack.packet_id, response_packet_id);
+        assert!(response_ack.payload.is_empty());
+        request_body
+    }
+
+    #[test]
+    fn login_secure_handshake_and_matchmaking_calls_work_end_to_end() {
+        let password = "mk7-test-password";
+        let principal_id = 42u32;
+        let target_principal_id = 2u32;
+        let session_key = vec![0x5A; 32];
+        let internal_ticket = b"pretend secure-server internal ticket".to_vec();
+
+        let auth_server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        auth_server.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let auth_address = match auth_server.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("authentication mock did not bind IPv4"),
+        };
+
+        let secure_server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        secure_server.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let secure_address = match secure_server.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("secure mock did not bind IPv4"),
+        };
+
+        let mut outer_ticket = session_key.clone();
+        outer_ticket.extend_from_slice(&target_principal_id.to_le_bytes());
+        test_put_buffer(&internal_ticket, &mut outer_ticket);
+        let user_key = derive_kerberos_key(principal_id, password.as_bytes());
+        let encrypted_ticket = kerberos_encrypt(&user_key, &outer_ticket).unwrap();
+
+        let station_url = format!(
+            "prudp:/address=127.0.0.1;port={};sid=1;PID={};CID=77;type=1",
+            secure_address.port(),
+            target_principal_id,
+        );
+        let mut login_body = Vec::new();
+        login_body.extend_from_slice(&0u32.to_le_bytes());
+        login_body.extend_from_slice(&principal_id.to_le_bytes());
+        test_put_buffer(&encrypted_ticket, &mut login_body);
+        encode_nex_string(&station_url, &mut login_body);
+        login_body.extend_from_slice(&0u32.to_le_bytes());
+        encode_nex_string("", &mut login_body);
+        encode_nex_string("MK7 mock secure service", &mut login_body);
+
+        let auth_thread = thread::spawn(move || {
+            let (client, session_id) = test_accept_prudp(&auth_server, |_| Vec::new());
+            let mut incoming_cipher = Rc4::new(b"CD&ML").unwrap();
+            let mut outgoing_cipher = Rc4::new(b"CD&ML").unwrap();
+            let response_body = login_body;
+            let received = test_serve_rmc_call(
+                &auth_server,
+                client,
+                session_id,
+                2,
+                1,
+                0x0A,
+                0x02,
+                1,
+                &[],
+                &mut incoming_cipher,
+                &mut outgoing_cipher,
+                &response_body,
+            );
+            assert!(String::from_utf8_lossy(&received).contains("nex-test-token"));
+        });
+
+        let secure_thread = thread::spawn(move || {
+            let server_session_key = session_key.clone();
+            let (client, session_id) = test_accept_prudp(&secure_server, |connect| {
+                let mut cursor = 0usize;
+                assert_eq!(test_take_buffer(&connect.payload, &mut cursor), internal_ticket);
+                let encrypted_request = test_take_buffer(&connect.payload, &mut cursor);
+                assert_eq!(cursor, connect.payload.len());
+                let request = kerberos_decrypt(&server_session_key, &encrypted_request).unwrap();
+                assert_eq!(&request[..4], &principal_id.to_le_bytes());
+                assert_eq!(&request[4..8], &77u32.to_le_bytes());
+                let check_value = u32::from_le_bytes(request[8..12].try_into().unwrap());
+                let mut response = Vec::new();
+                test_put_buffer(&check_value.wrapping_add(1).to_le_bytes(), &mut response);
+                response
+            });
+
+            let mut incoming_cipher = Rc4::new(&server_session_key).unwrap();
+            let mut outgoing_cipher = Rc4::new(&server_session_key).unwrap();
+
+            let mut browse_response = Vec::new();
+            browse_response.extend_from_slice(&0u32.to_le_bytes());
+            let browse_request = test_serve_rmc_call(
+                &secure_server,
+                client,
+                session_id,
+                2,
+                1,
+                0x6D,
+                0x2A,
+                1,
+                &server_session_key,
+                &mut incoming_cipher,
+                &mut outgoing_cipher,
+                &browse_response,
+            );
+            assert!(!browse_request.is_empty());
+
+            let mut join_response = Vec::new();
+            test_put_buffer(b"p2p-session-key", &mut join_response);
+            let join_request = test_serve_rmc_call(
+                &secure_server,
+                client,
+                session_id,
+                3,
+                2,
+                0x6D,
+                0x07,
+                2,
+                &server_session_key,
+                &mut incoming_cipher,
+                &mut outgoing_cipher,
+                &join_response,
+            );
+            assert_eq!(u32::from_le_bytes(join_request[..4].try_into().unwrap()), 1234);
+
+            let mut urls_response = Vec::new();
+            urls_response.extend_from_slice(&1u32.to_le_bytes());
+            encode_nex_string(
+                "prudp:/address=127.0.0.1;port=3456;sid=1;PID=2;CID=77;type=1",
+                &mut urls_response,
+            );
+            let urls_request = test_serve_rmc_call(
+                &secure_server,
+                client,
+                session_id,
+                4,
+                3,
+                0x15,
+                0x29,
+                3,
+                &server_session_key,
+                &mut incoming_cipher,
+                &mut outgoing_cipher,
+                &urls_response,
+            );
+            assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
+        });
+
+        let locator = format!("127.0.0.1:{}", auth_address.port());
+        let mut online = connect(
+            &locator,
+            "AB12CD34",
+            password,
+            principal_id,
+            0x1122_3344_5566_7788,
+            "nex-test-token",
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert_eq!(online.principal_id(), principal_id);
+        assert!(online.is_connected());
+        let sessions = online
+            .browse_matchmake_sessions(
+                &MatchmakeSearchCriteria::default(),
+                0,
+                10,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(sessions.is_empty());
+
+        let session_key_from_join = online
+            .join_matchmake_session(1234, "hello race", Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(session_key_from_join, b"p2p-session-key");
+
+        let urls = online
+            .get_matchmake_session_urls(1234, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].address, "127.0.0.1");
+        assert_eq!(urls[0].port, 3456);
+
+        auth_thread.join().unwrap();
+        secure_thread.join().unwrap();
+    }
+
+
+
 
     #[test]
     fn game_server_locator_parses_ipv4_and_rejects_invalid_ports() {
