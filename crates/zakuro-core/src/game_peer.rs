@@ -187,6 +187,70 @@ mod tests {
     }
 
     #[test]
+    fn two_game_peers_can_punch_simultaneously_and_exchange_data() {
+        let socket_a = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let socket_b = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket_a.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        socket_b.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let address_a = match socket_a.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("peer A did not bind IPv4"),
+        };
+        let address_b = match socket_b.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("peer B did not bind IPv4"),
+        };
+
+        let station_a = game_station(address_a);
+        let station_b = game_station(address_b);
+        let key = b"shared MK7 gathering key".to_vec();
+
+        // Both participants initiate before either can act as a passive server.
+        let key_a = key.clone();
+        let key_b = key.clone();
+        let station_a_for_b = station_a.clone();
+        let thread_a = thread::spawn(move || {
+            connect_to_peer_with_socket(
+                socket_a,
+                &station_b,
+                address_b,
+                &key_a,
+                Duration::from_secs(2),
+            )
+            .unwrap()
+        });
+        let thread_b = thread::spawn(move || {
+            connect_to_peer_with_socket(
+                socket_b,
+                &station_a_for_b,
+                address_a,
+                &key_b,
+                Duration::from_secs(2),
+            )
+            .unwrap()
+        });
+
+        let peer_a = thread_a.join().unwrap();
+        let peer_b = thread_b.join().unwrap();
+        assert!(peer_a.is_connected());
+        assert!(peer_b.is_connected());
+
+        // Both send a reliable frame at once; each side must ACK the peer's
+        // frame while waiting for its own ACK, avoiding a symmetric deadlock.
+        let thread_a = thread::spawn(move || {
+            let mut peer = peer_a;
+            peer.exchange_reliable(b"frame from A", Duration::from_secs(2)).unwrap()
+        });
+        let thread_b = thread::spawn(move || {
+            let mut peer = peer_b;
+            peer.exchange_reliable(b"frame from B", Duration::from_secs(2)).unwrap()
+        });
+
+        assert_eq!(thread_a.join().unwrap(), b"frame from B");
+        assert_eq!(thread_b.join().unwrap(), b"frame from A");
+    }
+
+    #[test]
     fn game_stream_handshake_and_keyed_reliable_exchange_work() {
         let server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         server
