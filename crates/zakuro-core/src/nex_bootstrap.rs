@@ -327,20 +327,192 @@ pub fn decode_rmc_response(data: &[u8], protocol: u8, method: u32, call_id: u32)
 }
 
 pub fn encode_account_extra_info(token: &str) -> Vec<u8> {
+    encode_account_extra_info_for_user(0, token)
+}
+
+/// Encode the AccountExtraInfo DataHolder used by TicketGranting::LoginEx.
+/// The MK7 server's default byte-stream settings do not enable structure
+/// headers, so the structure body is written directly inside the DataHolder.
+pub fn encode_account_extra_info_for_user(local_friend_code: u64, token: &str) -> Vec<u8> {
     let mut fields = Vec::new();
-    fields.extend_from_slice(&0u64.to_le_bytes()); // LocalFriendCode
+    fields.extend_from_slice(&local_friend_code.to_le_bytes()); // LocalFriendCode
     fields.extend_from_slice(&0u32.to_le_bytes()); // MoveCount
     encode_nex_string(token, &mut fields);
 
-    // NEX 1.1 structure header: version byte followed by a length-prefixed body.
-    let mut structure = vec![0u8];
-    encode_buffer(&fields, &mut structure);
-
     let mut holder = Vec::new();
     encode_nex_string("AccountExtraInfo", &mut holder);
-    holder.extend_from_slice(&((structure.len() + 4) as u32).to_le_bytes());
-    encode_buffer(&structure, &mut holder);
+    holder.extend_from_slice(&((fields.len() + 4) as u32).to_le_bytes());
+    encode_buffer(&fields, &mut holder);
     holder
+}
+
+/// Encode the TicketGranting::LoginEx parameters for a 3DS account.
+pub fn encode_ticket_granting_login_ex_body(
+    username: &str,
+    local_friend_code: u64,
+    nex_token: &str,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    encode_nex_string(username, &mut body);
+    body.extend_from_slice(&encode_account_extra_info_for_user(local_friend_code, nex_token));
+    body
+}
+
+/// The decrypted client-visible portion of a NEX Kerberos ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientKerberosTicket {
+    pub session_key: Vec<u8>,
+    pub target_principal_id: u32,
+    pub internal_data: Vec<u8>,
+}
+
+/// TicketGranting::LoginEx data needed to connect to the secure endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketGrantingLogin {
+    pub principal_id: u32,
+    pub ticket: Vec<u8>,
+    pub secure_station: Station,
+    pub server_name: String,
+}
+
+/// Derive the legacy 3DS Kerberos key used by NEX authentication endpoints.
+pub fn derive_kerberos_key(principal_id: u32, password: &[u8]) -> [u8; 16] {
+    let iterations = 65_000u32 + principal_id % 1024;
+    let mut key = password.to_vec();
+    for _ in 0..iterations {
+        key = md5_digest(&key).to_vec();
+    }
+    key.try_into().expect("MD5 always produces a 16-byte key")
+}
+
+/// Encrypt a NEX Kerberos payload using RC4 plus an HMAC-MD5 integrity tag.
+pub fn kerberos_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cipher = Rc4::new(key)?;
+    let encrypted = cipher.apply(plaintext);
+    let checksum = hmac_md5(key, &encrypted);
+    let mut output = encrypted;
+    output.extend_from_slice(&checksum);
+    Ok(output)
+}
+
+/// Verify and decrypt a NEX Kerberos payload.
+pub fn kerberos_decrypt(key: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
+    if payload.len() < 16 {
+        return Err("Kerberos payload is shorter than its HMAC-MD5 checksum".to_owned());
+    }
+    let split = payload.len() - 16;
+    let (encrypted, checksum) = payload.split_at(split);
+    let expected = hmac_md5(key, encrypted);
+    let mut difference = 0u8;
+    for (left, right) in expected.iter().zip(checksum) {
+        difference |= left ^ right;
+    }
+    if difference != 0 {
+        return Err("Kerberos payload HMAC-MD5 verification failed".to_owned());
+    }
+    Ok(Rc4::new(key)?.apply(encrypted))
+}
+
+/// Decrypt the LoginEx ticket for the authenticated source account.
+pub fn decode_client_kerberos_ticket(
+    encrypted_ticket: &[u8],
+    principal_id: u32,
+    password: &[u8],
+    session_key_length: usize,
+) -> Result<ClientKerberosTicket, String> {
+    let key = derive_kerberos_key(principal_id, password);
+    let plaintext = kerberos_decrypt(&key, encrypted_ticket)?;
+    let mut cursor = 0usize;
+    let session_key = take(&plaintext, &mut cursor, session_key_length)?.to_vec();
+    let target_principal_id = read_u32(&plaintext, &mut cursor)?;
+    let internal_length = read_u32(&plaintext, &mut cursor)? as usize;
+    let internal_data = take(&plaintext, &mut cursor, internal_length)?.to_vec();
+    if cursor != plaintext.len() {
+        return Err("Kerberos ticket contained unexpected trailing bytes".to_owned());
+    }
+    Ok(ClientKerberosTicket {
+        session_key,
+        target_principal_id,
+        internal_data,
+    })
+}
+
+/// Build the two-buffer CONNECT payload expected by a secure NEX endpoint.
+pub fn build_secure_connect_payload(
+    ticket: &ClientKerberosTicket,
+    source_principal_id: u32,
+    connection_id: u32,
+    check_value: u32,
+) -> Result<Vec<u8>, String> {
+    let mut request_data = Vec::with_capacity(12);
+    request_data.extend_from_slice(&source_principal_id.to_le_bytes());
+    request_data.extend_from_slice(&connection_id.to_le_bytes());
+    request_data.extend_from_slice(&check_value.to_le_bytes());
+    let encrypted_request = kerberos_encrypt(&ticket.session_key, &request_data)?;
+
+    let mut payload = Vec::new();
+    encode_buffer(&ticket.internal_data, &mut payload);
+    encode_buffer(&encrypted_request, &mut payload);
+    Ok(payload)
+}
+
+/// Verify the secure endpoint's CONNECT response to the Kerberos check value.
+pub fn verify_secure_connect_response(
+    response: &[u8],
+    check_value: u32,
+) -> Result<(), String> {
+    let mut cursor = 0usize;
+    let length = read_u32(response, &mut cursor)? as usize;
+    if length != 4 || response.len() != 8 {
+        return Err("secure PRUDP CONNECT response had an unexpected buffer size".to_owned());
+    }
+    let returned = read_u32(response, &mut cursor)?;
+    if returned != check_value.wrapping_add(1) {
+        return Err("secure PRUDP CONNECT response check value did not match".to_owned());
+    }
+    Ok(())
+}
+
+/// Parse the successful TicketGranting::LoginEx response body for MK7's
+/// default NEX 2.4.3 byte-stream layout.
+pub fn decode_ticket_granting_login_ex_response(
+    body: &[u8],
+    expected_principal_id: u32,
+) -> Result<TicketGrantingLogin, String> {
+    let mut cursor = 0usize;
+    let result = read_u32(body, &mut cursor)?;
+    if result & 0x8000_0000 != 0 {
+        return Err(format!("TicketGranting::LoginEx failed with result 0x{result:08X}"));
+    }
+    let principal_id = read_u32(body, &mut cursor)?;
+    if principal_id != expected_principal_id {
+        return Err(format!(
+            "TicketGranting::LoginEx returned principal ID {principal_id}, expected {expected_principal_id}"
+        ));
+    }
+    let ticket_length = read_u32(body, &mut cursor)? as usize;
+    let ticket = take(body, &mut cursor, ticket_length)?.to_vec();
+    if ticket.is_empty() {
+        return Err("TicketGranting::LoginEx returned an empty Kerberos ticket".to_owned());
+    }
+
+    // RVConnectionData: station URL, special-protocol list, alternate station
+    // URL. The MK7 server uses the default non-structure-header byte stream.
+    let station_url = decode_nex_string(body, &mut cursor)?;
+    let special_protocol_count = read_u32(body, &mut cursor)? as usize;
+    let _special_protocols = take(body, &mut cursor, special_protocol_count)?;
+    let _special_station_url = decode_nex_string(body, &mut cursor)?;
+    let server_name = decode_nex_string(body, &mut cursor)?;
+    if cursor != body.len() {
+        return Err("TicketGranting::LoginEx response contained unexpected trailing bytes".to_owned());
+    }
+    let secure_station = parse_station_url(&station_url)?;
+    Ok(TicketGrantingLogin {
+        principal_id,
+        ticket,
+        secure_station,
+        server_name,
+    })
 }
 
 pub fn parse_station_url(value: &str) -> Result<Station, String> {
@@ -419,17 +591,21 @@ mod tests {
 
     #[test]
     fn account_extra_info_is_a_typed_data_holder() {
-        let bytes = encode_account_extra_info("friends-nasc-token");
+        let bytes = encode_account_extra_info_for_user(0x1122_3344_5566_7788, "friends-nex-token");
         let mut cursor = 0usize;
         assert_eq!(decode_nex_string(&bytes, &mut cursor).unwrap(), "AccountExtraInfo");
         let total = read_u32(&bytes, &mut cursor).unwrap() as usize;
         let length = read_u32(&bytes, &mut cursor).unwrap() as usize;
         let structure = take(&bytes, &mut cursor, length).unwrap();
         assert_eq!(total, length + 4);
-        assert_eq!(structure[0], 0);
+
+        let mut fields = 0usize;
+        assert_eq!(read_u64(structure, &mut fields).unwrap(), 0x1122_3344_5566_7788);
+        assert_eq!(read_u32(structure, &mut fields).unwrap(), 0);
+        assert_eq!(decode_nex_string(structure, &mut fields).unwrap(), "friends-nex-token");
+        assert_eq!(fields, structure.len());
         assert_eq!(cursor, bytes.len());
     }
-
     #[test]
     fn prudp_v0_packet_round_trips() {
         let packet = PrudpPacket {
@@ -535,6 +711,88 @@ mod tests {
         let type_flags = u16::from(TYPE_DATA) | (u16::from(FLAG_HAS_SIZE) << 4);
         bytes[2..4].copy_from_slice(&type_flags.to_le_bytes());
         assert!(decode_prudp_v0(&bytes, ACCESS_KEY, b"test session").is_err());
+    }
+
+    #[test]
+    fn kerberos_key_derivation_matches_the_3ds_legacy_iterations() {
+        let derived = derive_kerberos_key(1234, b"test password");
+        let mut expected = b"test password".to_vec();
+        for _ in 0..(65_000 + 1234 % 1024) {
+            expected = md5_digest(&expected).to_vec();
+        }
+        assert_eq!(derived.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn kerberos_payload_encrypts_and_checks_its_hmac() {
+        let key = b"kerberos session key";
+        let encrypted = kerberos_encrypt(key, b"ticket check data").unwrap();
+        assert_eq!(kerberos_decrypt(key, &encrypted).unwrap(), b"ticket check data");
+        let mut tampered = encrypted;
+        tampered[0] ^= 1;
+        assert!(kerberos_decrypt(key, &tampered).is_err());
+    }
+
+    #[test]
+    fn secure_connect_payload_has_the_two_kerberos_buffers() {
+        let ticket = ClientKerberosTicket {
+            session_key: b"session key for secure connect".to_vec(),
+            target_principal_id: 2,
+            internal_data: b"encrypted server ticket".to_vec(),
+        };
+        let payload = build_secure_connect_payload(&ticket, 1234, 77, 0x12345678).unwrap();
+        let mut cursor = 0usize;
+        assert_eq!(take(&payload, &mut cursor, read_u32(&payload, &mut cursor).unwrap() as usize).unwrap(), b"encrypted server ticket");
+        let encrypted_length = read_u32(&payload, &mut cursor).unwrap() as usize;
+        let encrypted = take(&payload, &mut cursor, encrypted_length).unwrap();
+        let decrypted = kerberos_decrypt(&ticket.session_key, encrypted).unwrap();
+        assert_eq!(&decrypted[..4], &1234u32.to_le_bytes());
+        assert_eq!(&decrypted[4..8], &77u32.to_le_bytes());
+        assert_eq!(&decrypted[8..12], &0x12345678u32.to_le_bytes());
+        assert_eq!(cursor, payload.len());
+    }
+
+    #[test]
+    fn secure_connect_response_validates_the_incremented_check_value() {
+        let mut response = Vec::new();
+        encode_buffer(&0x12345679u32.to_le_bytes(), &mut response);
+        verify_secure_connect_response(&response, 0x12345678).unwrap();
+        assert!(verify_secure_connect_response(&response, 0x12345677).is_err());
+    }
+
+    #[test]
+    fn ticket_granting_login_ex_response_yields_secure_station_and_ticket() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // successful QResult
+        body.extend_from_slice(&42u32.to_le_bytes());
+        encode_buffer(b"client ticket", &mut body);
+        encode_nex_string(
+            "prudp:/address=127.0.0.1;port=1234;sid=1;PID=2;CID=77;stream=1;type=1",
+            &mut body,
+        );
+        body.extend_from_slice(&0u32.to_le_bytes()); // special protocol count
+        encode_nex_string("", &mut body);
+        encode_nex_string("MK7 server", &mut body);
+
+        let result = decode_ticket_granting_login_ex_response(&body, 42).unwrap();
+        assert_eq!(result.principal_id, 42);
+        assert_eq!(result.ticket, b"client ticket");
+        assert_eq!(result.server_name, "MK7 server");
+        assert_eq!(result.secure_station.address, "127.0.0.1");
+        assert_eq!(result.secure_station.port, 1234);
+        assert_eq!(result.secure_station.principal_id, 2);
+        assert_eq!(result.secure_station.connection_id, 77);
+    }
+
+    #[test]
+    fn ticket_granting_login_ex_body_encodes_account_extra_info() {
+        let body = encode_ticket_granting_login_ex_body("AB12CD34", 0x1122, "service-token");
+        let mut cursor = 0usize;
+        assert_eq!(decode_nex_string(&body, &mut cursor).unwrap(), "AB12CD34");
+        let data_holder = &body[cursor..];
+        let mut holder_cursor = 0usize;
+        assert_eq!(decode_nex_string(data_holder, &mut holder_cursor).unwrap(), "AccountExtraInfo");
+        assert!(data_holder.len() > holder_cursor);
     }
 
     #[test]
