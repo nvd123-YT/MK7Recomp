@@ -63,6 +63,9 @@ pub const PIA_NAT_PROTOCOL_TYPE: u16 = 0x0400;
 pub const PIA_PACKET_MAGIC: u32 = 0x6498_AB32;
 pub const PIA_STATION_INDEX_UNIDENTIFIED: u8 = 253;
 pub const PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID: u8 = 0x01;
+pub const PIA_MESSAGE_FLAG_NO_BUNDLE: u8 = 0x08;
+pub const PIA_MESSAGE_FLAGS_DIRECT_UNBUNDLED: u8 =
+    PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID | PIA_MESSAGE_FLAG_NO_BUNDLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PiaNatDatagram {
@@ -79,6 +82,120 @@ pub struct PiaNatDatagram {
 /// For a not-yet-connected station, the common packet uses connection ID 0,
 /// packet ID 0, the unencrypted state, and an unidentified source station index.
 /// The protocol message is addressed by the peer's Constant ID (NEX PID).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiaProtocolDatagram {
+    pub protocol_type: u16,
+    pub protocol_port: u16,
+    pub source_pid: u32,
+    pub destination_pid: u32,
+    pub source_timer: u16,
+    pub destination_timer: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Encode a legacy PIA (through 5.4) direct, PID-addressed message.
+///
+/// The message is deliberately unbundled because Station and NAT messages
+/// carry independent retransmission/acknowledgement state.
+pub fn encode_pia_protocol_datagram(message: &PiaProtocolDatagram) -> Result<Vec<u8>, String> {
+    if message.source_pid == 0 || message.destination_pid == 0 {
+        return Err("PIA direct datagrams require non-zero source and destination PIDs".to_owned());
+    }
+    if message.payload.len() > u16::MAX as usize {
+        return Err("PIA protocol message payload exceeds the 16-bit size field".to_owned());
+    }
+    let padded_size = (message.payload.len() + 3) & !3;
+    let mut packet = Vec::with_capacity(12 + 20 + padded_size);
+    packet.extend_from_slice(&PIA_PACKET_MAGIC.to_le_bytes());
+    packet.push(1); // unencrypted
+    packet.push(0); // no station connection ID yet
+    packet.extend_from_slice(&0u16.to_be_bytes()); // unconnected packet ID
+    packet.extend_from_slice(&message.source_timer.to_be_bytes());
+    packet.extend_from_slice(&message.destination_timer.to_be_bytes());
+
+    packet.push(PIA_MESSAGE_FLAGS_DIRECT_UNBUNDLED);
+    packet.push(PIA_STATION_INDEX_UNIDENTIFIED);
+    packet.extend_from_slice(&(message.payload.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&message.destination_pid.to_be_bytes());
+    packet.extend_from_slice(&message.source_pid.to_be_bytes());
+    packet.extend_from_slice(&message.protocol_type.to_be_bytes());
+    packet.extend_from_slice(&message.protocol_port.to_be_bytes());
+    packet.extend_from_slice(&0u32.to_be_bytes());
+    packet.extend_from_slice(&message.payload);
+    packet.resize(12 + 20 + padded_size, 0);
+    Ok(packet)
+}
+
+/// Decode one legacy PIA (through 5.4) direct, PID-addressed message.
+pub fn decode_pia_protocol_datagram(packet: &[u8]) -> Result<PiaProtocolDatagram, String> {
+    if packet.len() < 32 {
+        return Err("PIA datagram is shorter than its common and protocol headers".to_owned());
+    }
+    if packet[..4] != PIA_PACKET_MAGIC.to_le_bytes() || packet[4] != 1 {
+        return Err("PIA common packet magic or encryption flag is invalid".to_owned());
+    }
+    if packet[5] != 0 || u16::from_be_bytes(packet[6..8].try_into().unwrap()) != 0 {
+        return Err("unconnected PIA datagram must use connection ID and packet ID zero".to_owned());
+    }
+    if packet[12] != PIA_MESSAGE_FLAGS_DIRECT_UNBUNDLED
+        || packet[13] != PIA_STATION_INDEX_UNIDENTIFIED
+    {
+        return Err("PIA direct message must be unbundled and use an unidentified source station".to_owned());
+    }
+    let payload_size = u16::from_be_bytes(packet[14..16].try_into().unwrap()) as usize;
+    let destination_pid = u32::from_be_bytes(packet[16..20].try_into().unwrap());
+    let source_pid = u32::from_be_bytes(packet[20..24].try_into().unwrap());
+    let protocol_type = u16::from_be_bytes(packet[24..26].try_into().unwrap());
+    let protocol_port = u16::from_be_bytes(packet[26..28].try_into().unwrap());
+    if source_pid == 0 || destination_pid == 0 || packet[28..32] != [0; 4] {
+        return Err("PIA direct message has invalid PIDs or a nonzero reserved field".to_owned());
+    }
+    let padded_size = (payload_size + 3) & !3;
+    if packet.len() != 32 + padded_size {
+        return Err("PIA protocol payload size does not match datagram length".to_owned());
+    }
+    if packet[32 + payload_size..].iter().any(|byte| *byte != 0) {
+        return Err("PIA protocol padding must be zero".to_owned());
+    }
+    Ok(PiaProtocolDatagram {
+        protocol_type,
+        protocol_port,
+        source_pid,
+        destination_pid,
+        source_timer: u16::from_be_bytes(packet[8..10].try_into().unwrap()),
+        destination_timer: u16::from_be_bytes(packet[10..12].try_into().unwrap()),
+        payload: packet[32..32 + payload_size].to_vec(),
+    })
+}
+
+/// Wrap the 3.3–4.10 Station message payload in the legacy PIA datagram.
+pub fn encode_pia_station_datagram(
+    payload: &[u8],
+    source_pid: u32,
+    destination_pid: u32,
+    source_timer: u16,
+    destination_timer: u16,
+) -> Result<Vec<u8>, String> {
+    encode_pia_protocol_datagram(&PiaProtocolDatagram {
+        protocol_type: PIA_STATION_PROTOCOL_TYPE,
+        protocol_port: 0, // Station protocol's unreliable port.
+        source_pid,
+        destination_pid,
+        source_timer,
+        destination_timer,
+        payload: payload.to_vec(),
+    })
+}
+
+/// Decode and validate a legacy Station protocol datagram.
+pub fn decode_pia_station_datagram(packet: &[u8]) -> Result<PiaProtocolDatagram, String> {
+    let message = decode_pia_protocol_datagram(packet)?;
+    if message.protocol_type != PIA_STATION_PROTOCOL_TYPE || message.protocol_port != 0 {
+        return Err("PIA datagram is not an unreliable Station-protocol message".to_owned());
+    }
+    Ok(message)
+}
+
 pub fn encode_pia_nat_datagram(
     data: PiaNatProbeData,
     pia_511_plus: bool,
@@ -87,14 +204,11 @@ pub fn encode_pia_nat_datagram(
     source_timer: u16,
     destination_timer: u16,
 ) -> Result<Vec<u8>, String> {
-    if source_pid == 0 || destination_pid == 0 {
-        return Err("PIA NAT datagrams require non-zero source and destination PIDs".to_owned());
-    }
     if pia_511_plus != data.variable_id.is_some() {
         return Err("PIA NatProbeData variable-ID format does not match the selected PIA version".to_owned());
     }
     let port = if pia_511_plus {
-        0u16
+        0
     } else {
         match data.probe_type {
             PIA_NAT_PROBE_REQUEST => 1,
@@ -103,31 +217,15 @@ pub fn encode_pia_nat_datagram(
             _ => return Err("PIA NAT probe type is invalid".to_owned()),
         }
     };
-    let body = encode_pia_nat_probe_data(data)?;
-    let mut packet = Vec::with_capacity(12 + 20 + body.len());
-
-    // PIA common::Packet header. The magic is stored in its native wire order.
-    packet.extend_from_slice(&PIA_PACKET_MAGIC.to_le_bytes());
-    packet.push(1); // packet is not encrypted
-    packet.push(0); // no established PIA station connection yet
-    packet.extend_from_slice(&0u16.to_be_bytes()); // packet ID
-    packet.extend_from_slice(&source_timer.to_be_bytes());
-    packet.extend_from_slice(&destination_timer.to_be_bytes());
-
-    // transport::ProtocolMessage header. NAT probes are addressed to a PID.
-    packet.push(PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID);
-    packet.push(PIA_STATION_INDEX_UNIDENTIFIED);
-    packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
-    packet.extend_from_slice(&destination_pid.to_be_bytes());
-    packet.extend_from_slice(&source_pid.to_be_bytes());
-    packet.extend_from_slice(&PIA_NAT_PROTOCOL_TYPE.to_be_bytes());
-    packet.extend_from_slice(&port.to_be_bytes());
-    packet.extend_from_slice(&0u32.to_be_bytes()); // reserved
-    packet.extend_from_slice(&body);
-    while packet.len() % 4 != 0 {
-        packet.push(0);
-    }
-    Ok(packet)
+    encode_pia_protocol_datagram(&PiaProtocolDatagram {
+        protocol_type: PIA_NAT_PROTOCOL_TYPE,
+        protocol_port: port,
+        source_pid,
+        destination_pid,
+        source_timer,
+        destination_timer,
+        payload: encode_pia_nat_probe_data(data)?,
+    })
 }
 
 /// Decode and validate one complete PIA NAT-traversal datagram.
@@ -135,45 +233,13 @@ pub fn decode_pia_nat_datagram(
     packet: &[u8],
     pia_511_plus: bool,
 ) -> Result<PiaNatDatagram, String> {
-    if packet.len() < 48 {
-        return Err(format!("PIA packet is shorter than its headers and probe body: {}", packet.len()));
-    }
-    if packet[0..4] != PIA_PACKET_MAGIC.to_le_bytes() || packet[4] != 1 {
-        return Err("PIA common-packet magic or encryption state is invalid".to_owned());
-    }
-    if packet[5] != 0 || u16::from_be_bytes(packet[6..8].try_into().unwrap()) != 0 {
-        return Err("unconnected PIA NAT packet must use connection ID and packet ID zero".to_owned());
-    }
-    let source_timer = u16::from_be_bytes(packet[8..10].try_into().unwrap());
-    let destination_timer = u16::from_be_bytes(packet[10..12].try_into().unwrap());
-
-    if packet[12] != PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID
-        || packet[13] != PIA_STATION_INDEX_UNIDENTIFIED
-    {
-        return Err("PIA NAT message must be PID-addressed from an unidentified station".to_owned());
-    }
-    let payload_size = u16::from_be_bytes(packet[14..16].try_into().unwrap()) as usize;
-    let destination_pid = u32::from_be_bytes(packet[16..20].try_into().unwrap());
-    let source_pid = u32::from_be_bytes(packet[20..24].try_into().unwrap());
-    let protocol_type = u16::from_be_bytes(packet[24..26].try_into().unwrap());
-    let protocol_port = u16::from_be_bytes(packet[26..28].try_into().unwrap());
-    let reserved = u32::from_be_bytes(packet[28..32].try_into().unwrap());
-    if source_pid == 0 || destination_pid == 0 || reserved != 0 {
-        return Err("PIA NAT message has invalid PIDs or reserved field".to_owned());
-    }
-    if protocol_type != PIA_NAT_PROTOCOL_TYPE {
+    let message = decode_pia_protocol_datagram(packet)?;
+    if message.protocol_type != PIA_NAT_PROTOCOL_TYPE {
         return Err("PIA packet is not a NAT traversal message".to_owned());
     }
-    let padded_size = (payload_size + 3) & !3;
-    if packet.len() != 32 + padded_size {
-        return Err("PIA message payload size does not match datagram length".to_owned());
-    }
-    if packet[32 + payload_size..].iter().any(|byte| *byte != 0) {
-        return Err("PIA message padding must be zero".to_owned());
-    }
-    let probe = decode_pia_nat_probe_data(&packet[32..32 + payload_size])?;
+    let probe = decode_pia_nat_probe_data(&message.payload)?;
     if pia_511_plus {
-        if protocol_port != 0 || probe.variable_id.is_none() {
+        if message.protocol_port != 0 || probe.variable_id.is_none() {
             return Err("PIA 5.11+ NAT packet requires protocol port 0 and a variable ID".to_owned());
         }
     } else {
@@ -186,212 +252,20 @@ pub fn decode_pia_nat_datagram(
             0xFF => 3,
             _ => return Err("legacy PIA NAT probe type is invalid".to_owned()),
         };
-        if protocol_port != expected_port {
+        if message.protocol_port != expected_port {
             return Err("legacy PIA NAT probe type does not match protocol port".to_owned());
         }
     }
     Ok(PiaNatDatagram {
         probe,
-        protocol_port,
-        source_pid,
-        destination_pid,
-        source_timer,
-        destination_timer,
+        protocol_port: message.protocol_port,
+        source_pid: message.source_pid,
+        destination_pid: message.destination_pid,
+        source_timer: message.source_timer,
+        destination_timer: message.destination_timer,
     })
 }
 
-pub const PIA_STATION_PROTOCOL_TYPE: u16 = 0x0100;
-pub const PIA_STATION_MESSAGE_CONNECTION_REQUEST: u8 = 1;
-pub const PIA_STATION_MESSAGE_CONNECTION_RESPONSE: u8 = 2;
-pub const PIA_STATION_MESSAGE_ACK: u8 = 5;
-
-/// The station protocol version used by legacy PIA releases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PiaStationProtocolVersion {
-    V2,
-    V3,
-}
-
-impl PiaStationProtocolVersion {
-    pub fn from_pia_3x(major: u8, minor: u8) -> Result<Self, String> {
-        if major != 3 || !(3..=10).contains(&minor) {
-            return Err(format!("unsupported legacy PIA version {major}.{minor}"));
-        }
-        Ok(if minor <= 6 { Self::V2 } else { Self::V3 })
-    }
-
-    pub const fn wire_value(self) -> u8 {
-        match self {
-            Self::V2 => 2,
-            Self::V3 => 3,
-        }
-    }
-}
-
-/// One legacy PIA StationLocation (the 3.3–4.10 27-byte form).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PiaStationLocation {
-    pub address: SocketAddrV4,
-    pub extension_id: u16,
-    pub constant_id: u32,
-    pub variable_id: u32,
-    pub service_variable_id: u32,
-    pub url_type: u8,
-    pub nex_stream_id: u8,
-    pub nex_stream_type: u8,
-    pub nat_mapping: u8,
-    pub nat_filtering: u8,
-    pub nat_flags: u8,
-    pub probe_initiation: u8,
-}
-
-impl PiaStationLocation {
-    pub fn encode(&self, output: &mut Vec<u8>) -> Result<(), String> {
-        if self.address.port() == 0 || self.address.ip().is_unspecified() {
-            return Err("PIA StationLocation requires a concrete IPv4 address and port".to_owned());
-        }
-        if self.constant_id == 0 || self.variable_id == 0 || self.service_variable_id == 0 {
-            return Err("PIA StationLocation requires non-zero PID, CID, and RVCID".to_owned());
-        }
-        if self.url_type == 0 || self.nex_stream_id > 15 || self.nex_stream_type == 0 || self.nex_stream_type > 11 {
-            return Err("PIA StationLocation contains an invalid URL or NEX stream type".to_owned());
-        }
-        output.extend_from_slice(&self.address.ip().octets());
-        output.extend_from_slice(&self.address.port().to_be_bytes());
-        output.extend_from_slice(&self.extension_id.to_be_bytes());
-        output.extend_from_slice(&self.constant_id.to_be_bytes());
-        output.extend_from_slice(&self.variable_id.to_be_bytes());
-        output.extend_from_slice(&self.service_variable_id.to_be_bytes());
-        output.push(self.url_type);
-        output.push(self.nex_stream_id);
-        output.push(self.nex_stream_type);
-        output.push(self.nat_mapping);
-        output.push(self.nat_filtering);
-        output.push(self.nat_flags);
-        output.push(self.probe_initiation);
-        Ok(())
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != 27 {
-            return Err(format!("legacy PIA StationLocation must be 27 bytes, got {}", bytes.len()));
-        }
-        let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-        let location = Self {
-            address: SocketAddrV4::new(ip, u16::from_be_bytes(bytes[4..6].try_into().unwrap())),
-            extension_id: u16::from_be_bytes(bytes[6..8].try_into().unwrap()),
-            constant_id: u32::from_be_bytes(bytes[8..12].try_into().unwrap()),
-            variable_id: u32::from_be_bytes(bytes[12..16].try_into().unwrap()),
-            service_variable_id: u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
-            url_type: bytes[20],
-            nex_stream_id: bytes[21],
-            nex_stream_type: bytes[22],
-            nat_mapping: bytes[23],
-            nat_filtering: bytes[24],
-            nat_flags: bytes[25],
-            probe_initiation: bytes[26],
-        };
-        if location.address.port() == 0 || location.address.ip().is_unspecified()
-            || location.constant_id == 0 || location.variable_id == 0 || location.service_variable_id == 0
-            || location.url_type == 0 || location.nex_stream_id > 15
-            || location.nex_stream_type == 0 || location.nex_stream_type > 11
-        {
-            return Err("legacy PIA StationLocation contains an invalid field".to_owned());
-        }
-        Ok(location)
-    }
-}
-
-/// Connection information contains the public StationLocation followed by
-/// the private StationLocation for PIA versions through 4.10.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PiaStationConnectionInfo {
-    pub public_location: PiaStationLocation,
-    pub private_location: PiaStationLocation,
-}
-
-impl PiaStationConnectionInfo {
-    pub fn encode(&self) -> Result<Vec<u8>, String> {
-        let mut output = Vec::with_capacity(54);
-        self.public_location.encode(&mut output)?;
-        self.private_location.encode(&mut output)?;
-        Ok(output)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != 54 {
-            return Err(format!("legacy PIA StationConnectionInfo must be 54 bytes, got {}", bytes.len()));
-        }
-        Ok(Self {
-            public_location: PiaStationLocation::decode(&bytes[..27])?,
-            private_location: PiaStationLocation::decode(&bytes[27..])?,
-        })
-    }
-}
-
-/// Encode the legacy 3.3–4.10 Station connection request payload.
-pub fn encode_pia_station_connection_request(
-    connection_id: u8,
-    version: PiaStationProtocolVersion,
-    is_inverse: bool,
-    info: &PiaStationConnectionInfo,
-    ack_id: u32,
-) -> Result<Vec<u8>, String> {
-    if connection_id < 2 {
-        return Err("PIA Station connection ID must be between 2 and 255".to_owned());
-    }
-    let mut output = Vec::with_capacity(62);
-    output.push(PIA_STATION_MESSAGE_CONNECTION_REQUEST);
-    output.push(connection_id);
-    output.push(version.wire_value());
-    output.push(u8::from(is_inverse));
-    output.extend_from_slice(&info.encode()?);
-    output.extend_from_slice(&ack_id.to_be_bytes());
-    Ok(output)
-}
-
-/// A PIA 3.3–4.10 PlayerInfo is a fixed 36-byte UTF-16 name, length,
-/// language, and two padding bytes.
-pub fn encode_pia_player_info(name: &str, language: u8) -> Result<[u8; 36], String> {
-    let utf16 = name.encode_utf16().collect::<Vec<_>>();
-    if utf16.len() > 16 {
-        return Err("PIA player name must not exceed 16 UTF-16 code units".to_owned());
-    }
-    let mut output = [0u8; 36];
-    for (index, unit) in utf16.iter().enumerate() {
-        output[index * 2..index * 2 + 2].copy_from_slice(&unit.to_be_bytes());
-    }
-    output[32] = utf16.len() as u8;
-    output[33] = language;
-    Ok(output)
-}
-
-/// Encode an accepted legacy Station connection response.
-pub fn encode_pia_station_connection_response(
-    version: PiaStationProtocolVersion,
-    platform_id: u8,
-    identification_token: &[u8; 32],
-    player_info: &[u8; 36],
-    ack_id: u32,
-) -> Vec<u8> {
-    let mut output = Vec::with_capacity(76);
-    output.push(PIA_STATION_MESSAGE_CONNECTION_RESPONSE);
-    output.push(0); // accepted
-    output.push(version.wire_value());
-    output.push(platform_id);
-    output.extend_from_slice(identification_token);
-    output.extend_from_slice(player_info);
-    output.extend_from_slice(&ack_id.to_be_bytes());
-    output
-}
-
-/// Encode the 8-byte explicit Station-protocol acknowledgement.
-pub fn encode_pia_station_ack(ack_id: u32) -> [u8; 8] {
-    let mut output = [0u8; 8];
-    output[0] = PIA_STATION_MESSAGE_ACK;
-    output[4..8].copy_from_slice(&ack_id.to_be_bytes());
-    output
-}
 
 /// Bidirectionally punch through NAT using the same UDP socket later used for
 /// the Game-stream PRUDP handshake. include_variable_id selects the PIA
@@ -828,6 +702,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pia_station_messages_use_unreliable_unbundled_pid_routing() {
+        let payload = [PIA_STATION_MESSAGE_CONNECTION_REQUEST, 7, 3, 0];
+        let packet = encode_pia_station_datagram(&payload, 41, 42, 0x1234, 0x5678).unwrap();
+        assert_eq!(packet[12], PIA_MESSAGE_FLAGS_DIRECT_UNBUNDLED);
+        let decoded = decode_pia_station_datagram(&packet).unwrap();
+        assert_eq!(decoded.protocol_type, PIA_STATION_PROTOCOL_TYPE);
+        assert_eq!(decoded.protocol_port, 0);
+        assert_eq!(decoded.source_pid, 41);
+        assert_eq!(decoded.destination_pid, 42);
+        assert_eq!(decoded.source_timer, 0x1234);
+        assert_eq!(decoded.destination_timer, 0x5678);
+        assert_eq!(decoded.payload, payload);
+        assert!(decode_pia_station_datagram(&encode_pia_nat_datagram(
+            PiaNatProbeData {
+                service_variable_id: 42,
+                probe_type: PIA_NAT_PROBE_REQUEST,
+                system_time: 1,
+                variable_id: None,
+            },
+            false,
+            41,
+            42,
+            1,
+            0,
+        ).unwrap()).is_err());
+    }
+
+    #[test]
     fn legacy_pia_station_location_and_connection_info_round_trip() {
         let public = sample_station_location(Ipv4Addr::new(203, 0, 113, 20), 40100, 11, 12, 13, 3);
         let private = sample_station_location(Ipv4Addr::new(192, 168, 1, 20), 40100, 11, 12, 13, 1);
@@ -920,7 +822,7 @@ mod tests {
         assert_eq!(packet.len(), 48);
         assert_eq!(&packet[..4], &[0x32, 0xAB, 0x98, 0x64]);
         assert_eq!(&packet[4..12], &[1, 0, 0, 0, 0x12, 0x34, 0x56, 0x78]);
-        assert_eq!(packet[12], PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID);
+        assert_eq!(packet[12], PIA_MESSAGE_FLAGS_DIRECT_UNBUNDLED);
         assert_eq!(packet[13], PIA_STATION_INDEX_UNIDENTIFIED);
         assert_eq!(u16::from_be_bytes(packet[14..16].try_into().unwrap()), 16);
         assert_eq!(&packet[16..20], &0x5566_7788u32.to_be_bytes());
