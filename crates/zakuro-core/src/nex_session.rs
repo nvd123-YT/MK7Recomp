@@ -835,7 +835,7 @@ mod tests {
         assert!(online.is_connected());
         let auto_result = online
             .auto_matchmake(
-                &MatchmakeSearchCriteria::default(),
+                &MatchmakeSearchCriteria::public(),
                 "MK7 public race",
                 Duration::from_secs(2),
             )

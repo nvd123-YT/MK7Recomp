@@ -297,12 +297,31 @@ pub struct MatchmakeSearchCriteria {
     pub game_mode: String,
     pub min_participants: String,
     pub max_participants: String,
-    /// "1" = global matchmaking, "2" = friends matchmaking.
+    /// Empty = unspecified, "1" = Anybody/public, "2" = Friends only.
     pub matchmake_system: String,
     pub vacant_only: bool,
     pub exclude_locked: bool,
     pub exclude_non_host_pid: bool,
     pub selection_method: u32,
+}
+
+impl MatchmakeSearchCriteria {
+    /// Match public/Anybody sessions explicitly instead of leaving the optional
+    /// MatchmakeSystemTypeString unspecified.
+    pub fn public() -> Self {
+        Self {
+            matchmake_system: "1".to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// Restrict matching to friends-only sessions.
+    pub fn friends() -> Self {
+        Self {
+            matchmake_system: "2".to_owned(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for MatchmakeSearchCriteria {
@@ -312,7 +331,7 @@ impl Default for MatchmakeSearchCriteria {
             game_mode: String::new(),
             min_participants: String::new(),
             max_participants: String::new(),
-            matchmake_system: "1".to_owned(),
+            matchmake_system: String::new(),
             vacant_only: true,
             exclude_locked: true,
             exclude_non_host_pid: false,
@@ -1180,7 +1199,7 @@ mod tests {
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
-        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "1");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
         assert_eq!(take(&request, &mut cursor, 3).unwrap(), [1, 1, 0]);
         // NEX 2.4.3 has no SelectionMethod field; the separate ResultRange
         // follows the criteria directly.
@@ -1192,7 +1211,7 @@ mod tests {
     #[test]
     fn mk7_auto_matchmaking_request_encodes_a_gathering_holder() {
         let request = encode_matchmake_auto_request(
-            &MatchmakeSearchCriteria::default(),
+            &MatchmakeSearchCriteria::public(),
             "MK7 public race",
         ).unwrap();
         let mut cursor = 0usize;
@@ -1227,6 +1246,13 @@ mod tests {
         assert_eq!(gc, gathering.len());
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "MK7 public race");
         assert_eq!(cursor, request.len());
+    }
+
+    #[test]
+    fn matchmake_system_type_has_explicit_optional_public_and_friends_values() {
+        assert_eq!(MatchmakeSearchCriteria::default().matchmake_system, "");
+        assert_eq!(MatchmakeSearchCriteria::public().matchmake_system, "1");
+        assert_eq!(MatchmakeSearchCriteria::friends().matchmake_system, "2");
     }
 
     #[test]
