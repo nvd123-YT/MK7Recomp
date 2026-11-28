@@ -8,7 +8,7 @@ use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use crate::nex_bootstrap::{
-    decode_prudp_v0, encode_prudp_v0, PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY,
+    decode_prudp_v0, decode_rmc_response, encode_prudp_v0, encode_rmc_request, PrudpPacket, Rc4, RmcResponse, MK7_PRUDP_ACCESS_KEY,
 };
 
 const TYPE_SYN: u8 = 0;
@@ -240,6 +240,33 @@ impl PrudpSession {
                 "PRUDP message completed but socket timeout could not be restored: {error}"
             )),
         }
+    }
+
+    /// Send an RMC request and validate the matching NEX response envelope.
+    pub fn request_rmc(
+        &mut self,
+        socket: &UdpSocket,
+        server: SocketAddrV4,
+        protocol: u8,
+        method: u32,
+        call_id: u32,
+        body: &[u8],
+        session_key: &[u8],
+        outgoing_cipher: &mut Rc4,
+        incoming_cipher: &mut Rc4,
+        timeout: Duration,
+    ) -> Result<RmcResponse, String> {
+        let request = encode_rmc_request(protocol, method, call_id, body);
+        let response = self.send_reliable_message(
+            socket,
+            server,
+            &request,
+            session_key,
+            outgoing_cipher,
+            incoming_cipher,
+            timeout,
+        )?;
+        decode_rmc_response(&response, protocol, method, call_id)
     }
 
     fn send_reliable_message_inner(
@@ -499,7 +526,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn reliable_data_round_trip_uses_rc4_and_packet_acknowledgements() {
+    fn rmc_request_round_trip_uses_rc4_and_packet_acknowledgements() {
         let server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         server
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -564,7 +591,12 @@ mod tests {
                 FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE
             );
             let mut decrypt = Rc4::new(b"CD&ML").unwrap();
-            assert_eq!(decrypt.apply(&request.payload), b"RMC request bytes");
+            let clear_request = decrypt.apply(&request.payload);
+            assert_eq!(u32::from_le_bytes(clear_request[..4].try_into().unwrap()) as usize, clear_request.len() - 4);
+            assert_eq!(clear_request[4], 0x8A);
+            assert_eq!(u32::from_le_bytes(clear_request[5..9].try_into().unwrap()), 1);
+            assert_eq!(u32::from_le_bytes(clear_request[9..13].try_into().unwrap()), 2);
+            assert_eq!(&clear_request[13..], b"login parameters");
 
             let request_ack = PrudpPacket {
                 packet_type: TYPE_DATA,
@@ -582,8 +614,15 @@ mod tests {
                 .send_to(&encode_prudp_v0(&request_ack, MK7_PRUDP_ACCESS_KEY, &[]), client_address)
                 .unwrap();
 
+            let mut response_bytes = Vec::new();
+            response_bytes.extend_from_slice(&10u32.to_le_bytes());
+            response_bytes.push(0x0A);
+            response_bytes.push(1);
+            response_bytes.extend_from_slice(&1u32.to_le_bytes());
+            response_bytes.extend_from_slice(&(2u32 | 0x8000).to_le_bytes());
+
             let mut encrypt = Rc4::new(b"CD&ML").unwrap();
-            let encrypted_response = encrypt.apply(b"RMC response bytes");
+            let encrypted_response = encrypt.apply(&response_bytes);
             let response = PrudpPacket {
                 packet_type: TYPE_DATA,
                 flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
@@ -620,10 +659,13 @@ mod tests {
         .unwrap();
         let (mut outgoing, mut incoming) = new_payload_ciphers(&[]).unwrap();
         let response = session
-            .send_reliable_message(
+            .request_rmc(
                 &client,
                 server_address,
-                b"RMC request bytes",
+                0x0A,
+                2,
+                1,
+                b"login parameters",
                 &[],
                 &mut outgoing,
                 &mut incoming,
@@ -633,10 +675,12 @@ mod tests {
 
         server_thread.join().unwrap();
         receive.recv().unwrap();
-        assert_eq!(response, b"RMC response bytes");
+        assert_eq!(response.protocol, 0x0A);
+        assert_eq!(response.method, 2);
+        assert_eq!(response.call_id, 1);
+        assert!(response.body.is_empty());
         assert_eq!(session.next_reliable_packet_id, 3);
     }
-
     #[test]
     fn connection_signature_matches_the_ipv4_and_port_vector() {
         let address = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 12_345);
