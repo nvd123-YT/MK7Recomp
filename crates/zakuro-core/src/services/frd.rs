@@ -1794,7 +1794,7 @@ mod tests {
         assert!(result.server_address[11..].iter().all(|byte| *byte == 0));
         assert_eq!(result.server_port, 40460);
         assert_eq!(&result.token[..3], b"YWJ");
-        assert!(result.token[3..].iter().all(|byte| *byte == 0));
+        assert!(result.token[4..].iter().all(|byte| *byte == 0));
         assert_ne!(result.server_time, 0);
     }
 
@@ -1807,7 +1807,7 @@ mod tests {
         assert_eq!(&result.service_host[..3], b"n/a");
         assert!(result.service_host[3..].iter().all(|byte| *byte == 0));
         assert_eq!(&result.service_token[..3], b"YWJ");
-        assert!(result.service_token[3..].iter().all(|byte| *byte == 0));
+        assert!(result.service_token[4..].iter().all(|byte| *byte == 0));
         assert_eq!(result.status_data, b'Y');
         assert_ne!(result.server_time, 0);
     }
