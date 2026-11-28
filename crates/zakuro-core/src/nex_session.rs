@@ -281,7 +281,7 @@ mod tests {
     use crate::nex_bootstrap::{
         decode_nex_string, decode_prudp_v0, derive_kerberos_key, encode_nex_string,
         encode_prudp_v0, kerberos_decrypt, kerberos_encrypt, MatchmakeSearchCriteria,
-        PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY,
+        PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY, STREAM_TYPE_RV, STREAM_TYPE_RV_SECURE,
     };
     use crate::prudp_client::connection_signature;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -330,12 +330,15 @@ mod tests {
 
     fn test_accept_prudp(
         socket: &UdpSocket,
+        expected_stream_type: u8,
         connect_payload: impl FnOnce(&PrudpPacket) -> Vec<u8>,
     ) -> (SocketAddrV4, u8) {
         let mut bytes = [0u8; 65_535];
         let (length, client_address) = socket.recv_from(&mut bytes).unwrap();
         let syn = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
         assert_eq!(syn.packet_type, TEST_TYPE_SYN);
+        assert_eq!(syn.source_type, expected_stream_type);
+        assert_eq!(syn.destination_type, expected_stream_type);
         let client_address = match client_address {
             SocketAddr::V4(address) => address,
             _ => panic!("test NEX client did not use IPv4"),
@@ -543,7 +546,7 @@ mod tests {
         encode_nex_string("MK7 mock secure service", &mut login_body);
 
         let auth_thread = thread::spawn(move || {
-            let (client, session_id) = test_accept_prudp(&auth_server, |_| Vec::new());
+            let (client, session_id) = test_accept_prudp(&auth_server, STREAM_TYPE_RV, |_| Vec::new());
             let mut incoming_cipher = Rc4::new(b"CD&ML").unwrap();
             let mut outgoing_cipher = Rc4::new(b"CD&ML").unwrap();
             let response_body = login_body;
@@ -566,7 +569,7 @@ mod tests {
 
         let secure_thread = thread::spawn(move || {
             let server_session_key = session_key.clone();
-            let (client, session_id) = test_accept_prudp(&secure_server, |connect| {
+            let (client, session_id) = test_accept_prudp(&secure_server, STREAM_TYPE_RV_SECURE, |connect| {
                 let mut cursor = 0usize;
                 assert_eq!(test_take_buffer(&connect.payload, &mut cursor), internal_ticket);
                 let encrypted_request = test_take_buffer(&connect.payload, &mut cursor);
