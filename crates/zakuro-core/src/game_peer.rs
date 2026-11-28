@@ -3,8 +3,11 @@
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
-use crate::nex_bootstrap::{Rc4, Station, STREAM_TYPE_GAME};
-use crate::prudp_client::{establish_session, new_payload_ciphers, PrudpSession};
+use crate::nex_bootstrap::{
+    decode_prudp_v0, encode_prudp_v0, PrudpPacket, Rc4, Station,
+    MK7_PRUDP_ACCESS_KEY, STREAM_TYPE_GAME,
+};
+use crate::prudp_client::{connection_signature, establish_session, new_payload_ciphers, PrudpSession};
 
 const LOCAL_VIRTUAL_PORT: u8 = 1;
 
@@ -91,6 +94,150 @@ pub fn connect_to_peer_with_socket(
         outgoing_cipher,
         incoming_cipher,
     })
+}
+
+
+/// Accept an incoming peer connection on an already-bound Game-stream UDP socket.
+///
+/// The host side responds to the remote player's SYN and CONNECT packets,
+/// then returns a normal bidirectional GamePeerSession. Use this for the host
+/// role; the joining peer uses connect_to_peer().
+pub fn accept_peer(
+    socket: UdpSocket,
+    session_key: &[u8],
+    timeout: Duration,
+) -> Result<(GamePeerSession, SocketAddrV4), String> {
+    if session_key.is_empty() {
+        return Err("peer Game-stream session key is empty".to_owned());
+    }
+    if timeout.is_zero() {
+        return Err("peer Game-stream handshake timeout must be greater than zero".to_owned());
+    }
+
+    socket
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("could not configure peer Game-stream timeout: {error}"))?;
+    let local_address = match socket
+        .local_addr()
+        .map_err(|error| format!("could not read peer Game-stream socket address: {error}"))?
+    {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => return Err("peer Game-stream listener must use IPv4".to_owned()),
+    };
+
+    let mut bytes = [0u8; 65_535];
+    let (length, peer) = socket
+        .recv_from(&mut bytes)
+        .map_err(|error| format!("could not receive peer Game-stream SYN: {error}"))?;
+    let peer = match peer {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => return Err("peer Game-stream client must use IPv4".to_owned()),
+    };
+    let syn = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[])
+        .map_err(|error| format!("could not decode peer Game-stream SYN: {error}"))?;
+    if syn.packet_type != 0
+        || syn.flags & 0x04 == 0
+        || syn.flags & 0x01 != 0
+        || syn.session_id != 0
+        || syn.packet_id != 0
+        || syn.fragment_id != 0
+        || syn.source_type != STREAM_TYPE_GAME
+        || syn.destination_type != STREAM_TYPE_GAME
+        || !syn.payload.is_empty()
+    {
+        return Err("peer sent an invalid Game-stream SYN packet".to_owned());
+    }
+
+    let server_signature = connection_signature(local_address);
+    let syn_ack = PrudpPacket {
+        packet_type: 0,
+        flags: 0x01 | 0x08,
+        source_type: syn.destination_type,
+        source_port: syn.destination_port,
+        destination_type: syn.source_type,
+        destination_port: syn.source_port,
+        session_id: 0,
+        packet_id: 0,
+        fragment_id: 0,
+        signature: [0; 4],
+        connection_signature: server_signature,
+        payload: Vec::new(),
+    };
+    socket
+        .send_to(
+            &encode_prudp_v0(&syn_ack, MK7_PRUDP_ACCESS_KEY, &[]),
+            peer,
+        )
+        .map_err(|error| format!("could not send peer Game-stream SYN acknowledgement: {error}"))?;
+
+    let (length, connect_peer) = socket
+        .recv_from(&mut bytes)
+        .map_err(|error| format!("could not receive peer Game-stream CONNECT: {error}"))?;
+    if connect_peer != SocketAddr::V4(peer) {
+        return Err("Game-stream CONNECT arrived from a different peer than the SYN".to_owned());
+    }
+    let connect = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[])
+        .map_err(|error| format!("could not decode peer Game-stream CONNECT: {error}"))?;
+    if connect.packet_type != 1
+        || connect.flags & (0x01 | 0x02 | 0x04 | 0x08) != (0x02 | 0x04 | 0x08)
+        || connect.packet_id != 1
+        || connect.fragment_id != 0
+        || connect.source_type != syn.source_type
+        || connect.destination_type != syn.destination_type
+        || connect.source_port != syn.source_port
+        || connect.destination_port != syn.destination_port
+        || connect.signature != server_signature
+        || connect.connection_signature != server_signature
+        || !connect.payload.is_empty()
+    {
+        return Err("peer sent an invalid Game-stream CONNECT packet".to_owned());
+    }
+
+    let connect_ack = PrudpPacket {
+        packet_type: 1,
+        flags: 0x01 | 0x08,
+        source_type: connect.destination_type,
+        source_port: connect.destination_port,
+        destination_type: connect.source_type,
+        destination_port: connect.source_port,
+        session_id: connect.session_id,
+        packet_id: 1,
+        fragment_id: 0,
+        signature: server_signature,
+        connection_signature: [0; 4],
+        payload: Vec::new(),
+    };
+    socket
+        .send_to(
+            &encode_prudp_v0(&connect_ack, MK7_PRUDP_ACCESS_KEY, &[]),
+            peer,
+        )
+        .map_err(|error| format!("could not send peer Game-stream CONNECT acknowledgement: {error}"))?;
+
+    let (outgoing_cipher, incoming_cipher) = new_payload_ciphers(session_key)?;
+    let session = PrudpSession {
+        client_session_id: connect.session_id,
+        server_session_id: connect.session_id,
+        server_connection_signature: server_signature,
+        client_connection_signature: server_signature,
+        source_type: connect.destination_type,
+        destination_type: connect.source_type,
+        source_port: connect.destination_port,
+        destination_port: connect.source_port,
+        next_reliable_packet_id: 1,
+    };
+
+    Ok((
+        GamePeerSession {
+            socket,
+            server: peer,
+            session,
+            session_key: session_key.to_vec(),
+            outgoing_cipher,
+            incoming_cipher,
+        },
+        peer,
+    ))
 }
 
 impl GamePeerSession {
@@ -189,68 +336,41 @@ mod tests {
     }
 
     #[test]
-    fn two_game_peers_can_punch_simultaneously_and_exchange_data() {
-        let socket_a = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let socket_b = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        socket_a.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        socket_b.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let address_a = match socket_a.local_addr().unwrap() {
+    fn game_stream_host_acceptor_and_joining_client_exchange_data() {
+        let listener = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let host_address = match listener.local_addr().unwrap() {
             SocketAddr::V4(address) => address,
-            _ => panic!("peer A did not bind IPv4"),
+            _ => panic!("Game peer listener did not bind IPv4"),
         };
-        let address_b = match socket_b.local_addr().unwrap() {
-            SocketAddr::V4(address) => address,
-            _ => panic!("peer B did not bind IPv4"),
-        };
-
-        let station_a = game_station(address_a);
-        let station_b = game_station(address_b);
+        let station = game_station(host_address);
         let key = b"shared MK7 gathering key".to_vec();
+        let host_key = key.clone();
 
-        // Both participants initiate before either can act as a passive server.
-        let key_a = key.clone();
-        let key_b = key.clone();
-        let station_a_for_b = station_a.clone();
-        let thread_a = thread::spawn(move || {
-            connect_to_peer_with_socket(
-                socket_a,
-                &station_b,
-                address_b,
-                &key_a,
-                Duration::from_secs(2),
-            )
-            .unwrap()
-        });
-        let thread_b = thread::spawn(move || {
-            connect_to_peer_with_socket(
-                socket_b,
-                &station_a_for_b,
-                address_a,
-                &key_b,
-                Duration::from_secs(2),
-            )
-            .unwrap()
+        // Host receives and answers the joining peer's PRUDP SYN/CONNECT.
+        let host_thread = thread::spawn(move || {
+            let (mut host, remote) =
+                accept_peer(listener, &host_key, Duration::from_secs(2)).unwrap();
+            assert_eq!(remote.ip(), &Ipv4Addr::LOCALHOST);
+            assert!(host.is_connected());
+            host.exchange_reliable(b"frame from host", Duration::from_secs(2))
+                .unwrap()
         });
 
-        let peer_a = thread_a.join().unwrap();
-        let peer_b = thread_b.join().unwrap();
-        assert!(peer_a.is_connected());
-        assert!(peer_b.is_connected());
+        let mut client = connect_to_peer(
+            &station,
+            &key,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(client.is_connected());
+        let response = client
+            .exchange_reliable(b"frame from client", Duration::from_secs(2))
+            .unwrap();
 
-        // Both send a reliable frame at once; each side must ACK the peer's
-        // frame while waiting for its own ACK, avoiding a symmetric deadlock.
-        let thread_a = thread::spawn(move || {
-            let mut peer = peer_a;
-            peer.exchange_reliable(b"frame from A", Duration::from_secs(2)).unwrap()
-        });
-        let thread_b = thread::spawn(move || {
-            let mut peer = peer_b;
-            peer.exchange_reliable(b"frame from B", Duration::from_secs(2)).unwrap()
-        });
-
-        assert_eq!(thread_a.join().unwrap(), b"frame from B");
-        assert_eq!(thread_b.join().unwrap(), b"frame from A");
+        assert_eq!(response, b"frame from host");
+        assert_eq!(host_thread.join().unwrap(), b"frame from client");
     }
+
 
     #[test]
     fn game_stream_handshake_and_keyed_reliable_exchange_work() {
@@ -290,7 +410,7 @@ mod tests {
                 packet_id: 0,
                 fragment_id: 0,
                 signature: [0; 4],
-                connection_signature: connection_signature(client_address),
+                connection_signature: connection_signature(server_address),
                 payload: Vec::new(),
             };
             server

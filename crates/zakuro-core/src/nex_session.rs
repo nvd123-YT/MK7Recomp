@@ -406,7 +406,7 @@ mod tests {
             packet_id: 0,
             fragment_id: 0,
             signature: [0; 4],
-            connection_signature: connection_signature(client_address),
+            connection_signature: connection_signature(server_address),
             payload: Vec::new(),
         };
         socket
