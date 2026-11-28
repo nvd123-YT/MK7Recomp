@@ -47,7 +47,7 @@ pub struct PrudpSession {
     /// The CONNECT request consumes reliable sequence ID 1.
     pub next_reliable_packet_id: u16,
     /// Server-initiated RMC requests received while a client request was in flight.
-    pending_server_pushes: Vec<Vec<u8>>,
+    pub(crate) pending_server_pushes: Vec<Vec<u8>>,
 }
 
 /// Calculate the PRUDP v0 connection signature for an IPv4 socket address.

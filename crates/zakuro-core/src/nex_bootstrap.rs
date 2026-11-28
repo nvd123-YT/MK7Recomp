@@ -934,6 +934,13 @@ pub fn decode_ticket_granting_login_ex_response(
     })
 }
 
+impl Station {
+    pub fn is_public(&self) -> bool {
+        self.raw_url.split(';').find_map(|part| part.strip_prefix("type="))
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|flags| flags & 0x02 != 0)
+    }
+}
 pub fn parse_station_url(value: &str) -> Result<Station, String> {
     let (_, parameters) = value.split_once(":/")
         .ok_or_else(|| "NEX station URL is invalid".to_owned())?;
@@ -1009,6 +1016,18 @@ mod tests {
         assert_eq!(u32::from_le_bytes(request[5..9].try_into().unwrap()), 7);
     }
 
+    #[test]
+    fn server_initiated_rmc_probe_request_round_trips_with_success_reply() {
+        let request = encode_rmc_request(0x03, 0x02, 0xFFFF_0001, b"probe");
+        let parsed = decode_rmc_request(&request).unwrap();
+        assert_eq!(parsed.protocol, 0x03);
+        assert_eq!(parsed.method, 0x02);
+        assert_eq!(parsed.call_id, 0xFFFF_0001);
+        assert_eq!(parsed.body, b"probe");
+        let response = encode_rmc_success_response(&parsed, &[]);
+        let decoded = decode_rmc_response(&response, 0x03, 0x02, 0xFFFF_0001).unwrap();
+        assert!(decoded.body.is_empty());
+    }
     #[test]
     fn rmc_success_response_round_trips() {
         let mut response = Vec::new();
