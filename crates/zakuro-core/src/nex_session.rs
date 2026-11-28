@@ -931,6 +931,13 @@ mod tests {
             let mut register_response = Vec::new();
             register_response.extend_from_slice(&0u32.to_le_bytes()); // QResult success
             register_response.extend_from_slice(&99u32.to_le_bytes()); // assigned secure connection ID
+            encode_nex_string(
+                &format!(
+                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=42;CID=99;RVCID=99;natm=0;natf=0;type=3",
+                    game_client_address.port()
+                ),
+                &mut register_response,
+            );
             let register_request = test_serve_rmc_call(
                 &secure_server, client, session_id, 2, 1, 0x0B, 0x04, 1,
                 &server_session_key, &mut incoming_cipher, &mut outgoing_cipher, &register_response,
@@ -1017,29 +1024,11 @@ mod tests {
             );
             assert!(!browse_request.is_empty());
 
-            // MK7's 3DS NEX 2.4.3 method returns an empty success body.
-            let join_response = Vec::new();
-            let join_request = test_serve_rmc_call(
-                &secure_server,
-                client,
-                session_id,
-                5,
-                4,
-                0x6D,
-                0x07,
-                4,
-                &server_session_key,
-                &mut incoming_cipher,
-                &mut outgoing_cipher,
-                &join_response,
-            );
-            assert_eq!(u32::from_le_bytes(join_request[..4].try_into().unwrap()), 1234);
-
             let mut urls_response = Vec::new();
             urls_response.extend_from_slice(&1u32.to_le_bytes());
             encode_nex_string(
                 &format!(
-                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;RVCID=77;natm=0;natf=0;type=1",
+                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;RVCID=77;natm=0;natf=0;type=3",
                     game_peer_address.port()
                 ),
                 &mut urls_response,
@@ -1048,17 +1037,127 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
-                6,
                 5,
+                4,
                 0x15,
                 0x29,
-                5,
+                4,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
                 &urls_response,
             );
             assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
+
+            // Joiner requests that the gathering host start the reciprocal PIA probe.
+            let mut nat_response = Vec::new(); // successful NATTraversal response is empty
+            let nat_request = test_serve_rmc_call(
+                &secure_server, client, session_id, 6, 5, 0x03, 0x03, 5,
+                &server_session_key, &mut incoming_cipher, &mut outgoing_cipher, &nat_response,
+            );
+            let mut nat_cursor = 0usize;
+            assert_eq!(test_read_u32(&nat_request, &mut nat_cursor), 1);
+            let nat_target = decode_nex_string(&nat_request, &mut nat_cursor).unwrap();
+            let nat_own = decode_nex_string(&nat_request, &mut nat_cursor).unwrap();
+            assert!(nat_target.contains("RVCID=77"));
+            assert!(nat_own.contains("RVCID=99"));
+            assert_eq!(nat_cursor, nat_request.len());
+
+            // Simulate the host-side NEX connection pushing InitiateProbe back to
+            // the joiner. The client must ACK the PRUDP DATA packet and then send
+            // the NEX RMC success response for call ID 0xFFFF0005.
+            let host_station_url = format!(
+                "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;RVCID=77;natm=0;natf=0;type=3",
+                game_peer_address.port(),
+            );
+            let mut push_body = Vec::new();
+            encode_nex_string(&host_station_url, &mut push_body);
+            let push_rmc = crate::nex_bootstrap::encode_rmc_request(0x03, 0x02, 0xFFFF_0005, &push_body);
+            let mut push_ciphertext = outgoing_cipher.apply(&push_rmc);
+            let push_packet = PrudpPacket {
+                packet_type: TEST_TYPE_DATA,
+                flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
+                source_type: STREAM_TYPE_RV_SECURE,
+                source_port: 1,
+                destination_type: STREAM_TYPE_RV_SECURE,
+                destination_port: 1,
+                session_id,
+                packet_id: 6,
+                fragment_id: 0,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: std::mem::take(&mut push_ciphertext),
+            };
+            secure_server.send_to(
+                &encode_prudp_v0(&push_packet, MK7_PRUDP_ACCESS_KEY, &server_session_key),
+                client,
+            ).unwrap();
+            let mut secure_bytes = [0u8; 65_535];
+            let (ack_len, ack_peer) = secure_server.recv_from(&mut secure_bytes).unwrap();
+            assert_eq!(ack_peer, SocketAddr::V4(client));
+            let push_ack = decode_prudp_v0(&secure_bytes[..ack_len], MK7_PRUDP_ACCESS_KEY, &server_session_key).unwrap();
+            assert_eq!(push_ack.flags, TEST_FLAG_ACK);
+            assert_eq!(push_ack.packet_id, 6);
+            let (reply_len, reply_peer) = secure_server.recv_from(&mut secure_bytes).unwrap();
+            assert_eq!(reply_peer, SocketAddr::V4(client));
+            let push_reply = decode_prudp_v0(&secure_bytes[..reply_len], MK7_PRUDP_ACCESS_KEY, &server_session_key).unwrap();
+            assert_eq!(push_reply.packet_id, 7);
+            let push_reply_plain = incoming_cipher.apply(&push_reply.payload);
+            let mut push_reply_cursor = 0usize;
+            assert_eq!(test_read_u32(&push_reply_plain, &mut push_reply_cursor) as usize, push_reply_plain.len() - 4);
+            assert_eq!(push_reply_plain[push_reply_cursor], 0x03);
+            push_reply_cursor += 1;
+            assert_eq!(push_reply_plain[push_reply_cursor], 1);
+            push_reply_cursor += 1;
+            assert_eq!(test_read_u32(&push_reply_plain, &mut push_reply_cursor), 0xFFFF_0005);
+            assert_eq!(test_read_u32(&push_reply_plain, &mut push_reply_cursor), 0x02 | 0x8000);
+            let push_reply_ack = PrudpPacket {
+                packet_type: TEST_TYPE_DATA, flags: TEST_FLAG_ACK,
+                source_type: STREAM_TYPE_RV_SECURE, source_port: 1,
+                destination_type: STREAM_TYPE_RV_SECURE, destination_port: 1,
+                session_id, packet_id: 7, fragment_id: 0, signature: [0; 4],
+                connection_signature: [0; 4], payload: Vec::new(),
+            };
+            secure_server.send_to(&encode_prudp_v0(&push_reply_ack, MK7_PRUDP_ACCESS_KEY, &server_session_key), client).unwrap();
+
+            // PIA probes use the registered Game socket. Send the host's
+            // simultaneous probe to the joiner's registered public StationURL.
+            let local_station = crate::nex_bootstrap::parse_station_url(&nat_own).unwrap();
+            let joiner_game_address = SocketAddrV4::new(local_station.address.parse().unwrap(), local_station.port);
+            let host_probe_time = 0x1122_3344_5566_7788u64;
+            let host_probe = crate::game_peer::encode_pia_nat_probe_data(crate::game_peer::PiaNatProbeData {
+                service_variable_id: local_station.rv_connection_id,
+                probe_type: 0,
+                system_time: host_probe_time,
+                variable_id: None,
+            }).unwrap();
+            game_peer_server.send_to(&host_probe, joiner_game_address).unwrap();
+            let mut saw_joiner_request = false;
+            let mut saw_joiner_reply = false;
+            while !(saw_joiner_request && saw_joiner_reply) {
+                let (probe_len, probe_peer) = game_peer_server.recv_from(&mut peer_bytes).unwrap();
+                assert_eq!(probe_peer, SocketAddr::V4(joiner_game_address));
+                let probe = crate::game_peer::decode_pia_nat_probe_data(&peer_bytes[..probe_len]).unwrap();
+                if probe.service_variable_id == 77 && probe.probe_type == 0 {
+                    saw_joiner_request = true;
+                    let reply = crate::game_peer::encode_pia_nat_probe_data(crate::game_peer::PiaNatProbeData {
+                        service_variable_id: local_station.rv_connection_id,
+                        probe_type: 1, system_time: probe.system_time, variable_id: None,
+                    }).unwrap();
+                    game_peer_server.send_to(&reply, joiner_game_address).unwrap();
+                } else if probe.service_variable_id == 77 && probe.probe_type == 1 && probe.system_time == host_probe_time {
+                    saw_joiner_reply = true;
+                }
+            }
+
+            // The client reports its successful PIA traversal to NEX.
+            let nat_result_response = Vec::new();
+            let nat_result_request = test_serve_rmc_call(
+                &secure_server, client, session_id, 8, 7, 0x03, 0x04, 6,
+                &server_session_key, &mut incoming_cipher, &mut outgoing_cipher, &nat_result_response,
+            );
+            assert_eq!(test_read_u32(&nat_result_request, &mut 0usize), 77);
+            assert_eq!(nat_result_request[4], 1);
 
             // The Game stream uses the default CD&ML payload key; it has no gathering key.
             let mut peer_bytes = [0u8; 65_535];
