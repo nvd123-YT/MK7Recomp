@@ -533,7 +533,7 @@ fn build_stun_binding_request(transaction_id: [u8; 12], change_request: u32) -> 
     request
 }
 
-fn stun_binding(
+pub(crate) fn stun_binding(
     socket: &UdpSocket,
     server: SocketAddr,
     change_request: u32,

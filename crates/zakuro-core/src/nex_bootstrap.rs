@@ -631,6 +631,40 @@ pub fn encode_nat_probe_initiation_ext_request(
     Ok(output)
 }
 
+/// Encode SecureConnection::RegisterEx's List<StationURL> plus AccountExtraInfo DataHolder.
+pub fn encode_secure_register_ex_request(
+    station_urls: &[String],
+    local_friend_code: u64,
+    nex_token: &str,
+) -> Result<Vec<u8>, String> {
+    if station_urls.is_empty() || station_urls.len() > 8 {
+        return Err("SecureConnection::RegisterEx requires 1..=8 StationURLs".to_owned());
+    }
+    for station_url in station_urls { parse_station_url(station_url)?; }
+    let mut output = Vec::new();
+    output.extend_from_slice(&(station_urls.len() as u32).to_le_bytes());
+    for station_url in station_urls { encode_nex_string(station_url, &mut output); }
+    output.extend_from_slice(&encode_account_extra_info_for_user(local_friend_code, nex_token));
+    Ok(output)
+}
+
+/// Decode the RegisterEx QResult, assigned connection ID, and registered public StationURL.
+pub fn decode_secure_register_ex_response(body: &[u8]) -> Result<(u32, Station), String> {
+    let mut cursor = 0usize;
+    let result = read_u32(body, &mut cursor)?;
+    if result & 0x8000_0000 != 0 {
+        return Err(format!("SecureConnection::RegisterEx failed with result 0x{result:08X}"));
+    }
+    let connection_id = read_u32(body, &mut cursor)?;
+    if connection_id == 0 { return Err("SecureConnection::RegisterEx returned a zero connection ID".to_owned()); }
+    let public_url = decode_nex_string(body, &mut cursor)?;
+    if cursor != body.len() { return Err("RegisterEx response contained unexpected trailing bytes".to_owned()); }
+    let station = parse_station_url(&public_url)?;
+    if station.rv_connection_id != connection_id {
+        return Err(format!("RegisterEx StationURL RVCID {} does not match returned connection ID {connection_id}", station.rv_connection_id));
+    }
+    Ok((connection_id, station))
+}
 pub fn encode_nex_string(value: &str, output: &mut Vec<u8>) {
     let mut bytes = value.as_bytes().to_vec();
     bytes.push(0);
