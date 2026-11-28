@@ -1293,11 +1293,17 @@ mod tests {
         let holder_len = read_u32(&body, &mut cursor).unwrap() as usize;
         let holder = take(&body, &mut cursor, holder_len).unwrap();
         assert_eq!(cursor, body.len());
-        let (fields, _) = decode_buffered_structure(holder).unwrap();
+        let mut holder_cursor = 0usize;
+        let total = read_u32(holder, &mut holder_cursor).unwrap() as usize;
+        let fields_len = read_u32(holder, &mut holder_cursor).unwrap() as usize;
+        let fields = take(holder, &mut holder_cursor, fields_len).unwrap();
+        assert_eq!(total, fields_len + 4);
+        assert_eq!(holder_cursor, holder.len());
         let mut fields_cursor = 0usize;
         assert_eq!(read_u64(fields, &mut fields_cursor).unwrap(), 0x1122_3344_5566_7788);
         assert_eq!(read_u32(fields, &mut fields_cursor).unwrap(), 0);
         assert_eq!(decode_nex_string(fields, &mut fields_cursor).unwrap(), "nex-token");
+        assert_eq!(fields_cursor, fields.len());
     }
 
     #[test]

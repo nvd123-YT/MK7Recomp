@@ -189,8 +189,7 @@ impl NexOnlineSession {
     }
 
 
-    /// Bind a Game-stream socket, discover its public mapping with STUN, and
-    /// register both local and public StationURLs with SecureConnection::RegisterEx.
+    /// Bind a Game-stream socket, discover its public mapping with STUN, and register both StationURLs.
     pub fn register_game_station(&mut self, timeout: Duration) -> Result<Station, String> {
         if timeout.is_zero() { return Err("Game station registration timeout must be greater than zero".to_owned()); }
         if let Some(station) = &self.public_game_station { return Ok(station.clone()); }
@@ -200,9 +199,7 @@ impl NexOnlineSession {
         let mut resolved_servers = Vec::new();
         for server in stun_servers {
             if let Ok(addresses) = server.to_socket_addrs() {
-                if let Some(address) = addresses.into_iter().find(|addr| matches!(addr, SocketAddr::V4(_))) {
-                    resolved_servers.push(address);
-                }
+                if let Some(address) = addresses.into_iter().find(|addr| matches!(addr, SocketAddr::V4(_))) { resolved_servers.push(address); }
             }
         }
         if resolved_servers.is_empty() { return Err("could not resolve an IPv4 STUN server for Game-stream registration".to_owned()); }
@@ -222,27 +219,42 @@ impl NexOnlineSession {
         let mut mappings = Vec::new();
         for server in resolved_servers.iter().copied() {
             let mapped = crate::services::frd::stun_binding(&socket, server, 0).map(|pair| pair.0);
-            let _ = socket.set_read_timeout(previous_timeout);
+            socket.set_read_timeout(previous_timeout).map_err(|e| format!("could not restore Game socket timeout: {e}"))?;
             if let Some(SocketAddr::V4(address)) = mapped { mappings.push(address); }
         }
-        if mappings.is_empty() {
-            return Err("STUN did not return a public mapping for the bound Game-stream socket".to_owned());
-        }
+        if mappings.is_empty() { return Err("STUN did not return a public mapping for the bound Game-stream socket".to_owned()); }
         let public_address = mappings[0];
-        let mapping_type = if mappings.iter().all(|mapping| *mapping == public_address) && mappings.len() > 1 { 1u8 } else if mappings.len() > 1 { 2u8 } else { 0u8 };
-        let nat_filtering = 0u8; // Unknown until the RFC 3489 change-request tests succeed.
+        let mapping_type = if mappings.len() > 1 && mappings.iter().all(|mapping| *mapping == public_address) { 1u8 } else if mappings.len() > 1 { 2u8 } else { 0u8 };
+        let local_address = SocketAddrV4::new(local_ip, local_port);
+        self.register_game_station_with_mapping(socket, local_address, public_address, mapping_type, 0, timeout)
+    }
+
+    /// Register a caller-supplied local/public mapping. The normal application
+    /// path should use register_game_station(), which discovers the mapping.
+    pub fn register_game_station_with_mapping(
+        &mut self,
+        socket: UdpSocket,
+        local_address: SocketAddrV4,
+        public_address: SocketAddrV4,
+        nat_mapping: u8,
+        nat_filtering: u8,
+        timeout: Duration,
+    ) -> Result<Station, String> {
+        if self.public_game_station.is_some() { return Err("Game station is already registered on this NEX session".to_owned()); }
+        if local_address.port() == 0 || public_address.port() == 0 || local_address.ip().is_unspecified() || public_address.ip().is_unspecified() {
+            return Err("Game station local/public IPv4 endpoints must be concrete".to_owned());
+        }
+        if socket.local_addr().map_err(|e| e.to_string())?.port() != local_address.port() {
+            return Err("Game station local endpoint port does not match the bound UDP socket".to_owned());
+        }
         let mut cid_bytes = [0u8; 4];
         getrandom::fill(&mut cid_bytes).map_err(|e| format!("could not generate Game-stream CID: {e}"))?;
         let mut cid = u32::from_le_bytes(cid_bytes);
         if cid == 0 { cid = 1; }
-        let common = format!("sid=1;stream={};PID={};CID={};natm={};natf={}", crate::nex_bootstrap::STREAM_TYPE_GAME, self.principal_id, cid, mapping_type, nat_filtering);
-        let local_url = format!("prudp:/address={};port={};{};type=1", local_ip, local_port, common);
+        let common = format!("sid=1;stream={};PID={};CID={};natm={};natf={}", crate::nex_bootstrap::STREAM_TYPE_GAME, self.principal_id, cid, nat_mapping, nat_filtering);
+        let local_url = format!("prudp:/address={};port={};{};type=1", local_address.ip(), local_address.port(), common);
         let public_url = format!("prudp:/address={};port={};{};type=3", public_address.ip(), public_address.port(), common);
-        let body = crate::nex_bootstrap::encode_secure_register_ex_request(
-            &[local_url.clone(), public_url],
-            self.local_friend_code,
-            &self.nex_token,
-        )?;
+        let body = crate::nex_bootstrap::encode_secure_register_ex_request(&[local_url.clone(), public_url], self.local_friend_code, &self.nex_token)?;
         let response = self.request(0x0B, 0x04, &body, timeout)?;
         let (connection_id, public_station) = crate::nex_bootstrap::decode_secure_register_ex_response(&response.body)?;
         let local_station_url = format!("{};RVCID={}", local_url, connection_id);
@@ -252,7 +264,6 @@ impl NexOnlineSession {
         self.public_game_station = Some(public_station.clone());
         Ok(public_station)
     }
-
     pub fn registered_game_station(&self) -> Option<&Station> { self.public_game_station.as_ref() }
     /// Browse MK7's Matchmake Extension for sessions matching the supplied
     /// game-specific search fields.
@@ -368,7 +379,10 @@ impl NexOnlineSession {
                 "GetSessionURLs did not return a Game-stream StationURL for host PID {}",
                 result.host_pid
             ))?;
-        crate::game_peer::connect_to_peer(host, timeout)
+        let peer_address = resolve_station(host)?;
+        let game_socket = self.game_socket.take()
+            .ok_or_else(|| "Game-stream station was registered without a retained UDP socket".to_owned())?;
+        crate::game_peer::connect_to_peer_with_socket(game_socket, host, peer_address, timeout)
     }
 
     /// The principal ID authenticated by the NEX TicketGranting server.
