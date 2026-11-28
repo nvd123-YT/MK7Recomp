@@ -679,6 +679,32 @@ pub fn decode_nex_string(data: &[u8], cursor: &mut usize) -> Result<String, Stri
     String::from_utf8(bytes.to_vec()).map_err(|_| "NEX string is not valid UTF-8".to_owned())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RmcRequest { pub protocol: u8, pub call_id: u32, pub method: u32, pub body: Vec<u8> }
+
+pub fn decode_rmc_request(data: &[u8]) -> Result<RmcRequest, String> {
+    let mut cursor = 0usize;
+    let length = read_u32(data, &mut cursor)? as usize;
+    if length != data.len().saturating_sub(4) { return Err("RMC request length did not match its contents".to_owned()); }
+    let command = take(data, &mut cursor, 1)?[0];
+    if command & 0x80 == 0 { return Err("RMC message was not a request".to_owned()); }
+    let protocol = command & 0x7F;
+    let call_id = read_u32(data, &mut cursor)?;
+    let method = read_u32(data, &mut cursor)?;
+    Ok(RmcRequest { protocol, call_id, method, body: data[cursor..].to_vec() })
+}
+
+pub fn encode_rmc_success_response(request: &RmcRequest, body: &[u8]) -> Vec<u8> {
+    let length = 1 + 1 + 4 + 4 + body.len();
+    let mut output = Vec::with_capacity(4 + length);
+    output.extend_from_slice(&(length as u32).to_le_bytes());
+    output.push(request.protocol);
+    output.push(1);
+    output.extend_from_slice(&request.call_id.to_le_bytes());
+    output.extend_from_slice(&(request.method | 0x8000).to_le_bytes());
+    output.extend_from_slice(body);
+    output
+}
 pub fn encode_rmc_request(protocol: u8, method: u32, call_id: u32, body: &[u8]) -> Vec<u8> {
     let payload_length = 1 + 4 + 4 + body.len();
     let mut output = Vec::with_capacity(4 + payload_length);

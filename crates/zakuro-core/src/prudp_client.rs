@@ -46,6 +46,8 @@ pub struct PrudpSession {
     pub destination_port: u8,
     /// The CONNECT request consumes reliable sequence ID 1.
     pub next_reliable_packet_id: u16,
+    /// Server-initiated RMC requests received while a client request was in flight.
+    pending_server_pushes: Vec<Vec<u8>>,
 }
 
 /// Calculate the PRUDP v0 connection signature for an IPv4 socket address.
@@ -193,6 +195,7 @@ fn establish_session_inner(
         source_port,
         destination_port,
         next_reliable_packet_id: 2,
+        pending_server_pushes: Vec::new(),
     })
 }
 
@@ -214,6 +217,60 @@ pub fn new_payload_ciphers(session_key: &[u8]) -> Result<(Rc4, Rc4), String> {
 }
 
 impl PrudpSession {
+    pub fn take_server_push(&mut self) -> Option<Vec<u8>> {
+        if self.pending_server_pushes.is_empty() { None } else { Some(self.pending_server_pushes.remove(0)) }
+    }
+
+    /// Send a one-way reliable RMC response to a server-initiated request.
+    pub fn send_reliable_oneway(
+        &mut self, socket: &UdpSocket, server: SocketAddrV4, message: &[u8],
+        session_key: &[u8], outgoing_cipher: &mut Rc4, incoming_cipher: &mut Rc4, timeout: Duration,
+    ) -> Result<(), String> {
+        if timeout.is_zero() { return Err("PRUDP one-way response timeout must be greater than zero".to_owned()); }
+        if message.len() > RELIABLE_FRAGMENT_SIZE { return Err("one-way PRUDP RMC response exceeds one fragment".to_owned()); }
+        let previous_timeout = socket.read_timeout().map_err(|e| e.to_string())?;
+        socket.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let packet_id = self.next_reliable_packet_id;
+            self.next_reliable_packet_id = self.next_reliable_packet_id.wrapping_add(1);
+            let encrypted = outgoing_cipher.apply(message);
+            let request = PrudpPacket {
+                packet_type: TYPE_DATA,
+                flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+                source_type: self.source_type, source_port: self.source_port,
+                destination_type: self.destination_type, destination_port: self.destination_port,
+                session_id: self.client_session_id, packet_id, fragment_id: 0,
+                signature: [0; 4], connection_signature: [0; 4], payload: encrypted,
+            };
+            let encoded = encode_prudp_v0(&request, MK7_PRUDP_ACCESS_KEY, session_key);
+            for _ in 0..MAX_HANDSHAKE_ATTEMPTS {
+                socket.send_to(&encoded, server).map_err(|e| format!("could not send server-push response: {e}"))?;
+                loop {
+                    let Some(mut packet) = receive_from_server(socket, server, session_key)? else { break; };
+                    if packet.packet_type != TYPE_DATA { continue; }
+                    validate_session_packet(&packet, self.server_session_id, self.source_type, self.source_port, self.destination_port)?;
+                    if packet.flags & FLAG_ACK != 0 && packet.packet_id == packet_id { return Ok(()); }
+                    if packet.flags & FLAG_ACK == 0 {
+                        if packet.flags & FLAG_NEED_ACK != 0 {
+                            let ack = make_data_ack(&packet, self.source_type, self.source_port, self.destination_type, self.destination_port);
+                            socket.send_to(&encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, session_key), server)
+                                .map_err(|e| format!("could not acknowledge concurrent server data: {e}"))?;
+                        }
+                        let clear = incoming_cipher.apply(&packet.payload);
+                        if is_rmc_request_message(&clear) { self.pending_server_pushes.push(clear); }
+                    }
+                }
+            }
+            Err(format!("server did not acknowledge RMC push response packet {packet_id}"))
+        })();
+        let restore = socket.set_read_timeout(previous_timeout);
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(format!("one-way response sent but socket timeout restore failed: {error}")),
+        }
+    }
+
     /// Send one reliable NEX message and return its reassembled response.
     ///
     /// Keep the two RC4 streams alive and pass them back on every call: PRUDP
@@ -377,7 +434,13 @@ impl PrudpSession {
                                 .map_err(|error| format!("could not acknowledge simultaneous peer DATA: {error}"))?;
                             packet.flags &= !FLAG_NEED_ACK;
                         }
-                        pending_response.push_back(packet);
+                        let clear = incoming_cipher.apply(&packet.payload);
+                        if is_rmc_request_message(&clear) {
+                            self.pending_server_pushes.push(clear);
+                        } else {
+                            packet.payload = clear;
+                            pending_response.push_back(packet);
+                        }
                     }
                 }
 
@@ -395,10 +458,10 @@ impl PrudpSession {
 
         let mut response = Vec::new();
         loop {
-            let packet = match pending_response.pop_front() {
-                Some(packet) => packet,
-                None => receive_from_server(socket, server, session_key)?
-                    .ok_or_else(|| "timed out waiting for the NEX RMC response".to_owned())?,
+            let (mut packet, already_decrypted) = match pending_response.pop_front() {
+                Some(packet) => (packet, true),
+                None => (receive_from_server(socket, server, session_key)?
+                    .ok_or_else(|| "timed out waiting for the NEX RMC response".to_owned())?, false),
             };
             if packet.packet_type != TYPE_DATA {
                 continue;
@@ -437,7 +500,15 @@ impl PrudpSession {
             if packet.flags & FLAG_RELIABLE == 0 {
                 return Err("NEX RMC response arrived as unreliable PRUDP DATA".to_owned());
             }
-            response.extend_from_slice(&incoming_cipher.apply(&packet.payload));
+            if !already_decrypted {
+                let clear = incoming_cipher.apply(&packet.payload);
+                if is_rmc_request_message(&clear) {
+                    self.pending_server_pushes.push(clear);
+                    continue;
+                }
+                packet.payload = clear;
+            }
+            response.extend_from_slice(&packet.payload);
             if packet.fragment_id == 0 {
                 return Ok(response);
             }
@@ -445,7 +516,7 @@ impl PrudpSession {
     }
 }
 
-fn validate_session_packet(
+pub(crate) fn validate_session_packet(
     packet: &PrudpPacket,
     expected_session_id: u8,
     expected_stream_type: u8,
@@ -465,7 +536,22 @@ fn validate_session_packet(
 
 /// Receive one packet from the connected NEX endpoint. None means the socket
 /// read timeout elapsed; packets from unrelated UDP peers are discarded.
-fn receive_from_server(
+pub(crate) fn is_rmc_request_message(message: &[u8]) -> bool {
+    if message.len() < 13 { return false; }
+    let declared = u32::from_le_bytes(message[0..4].try_into().unwrap()) as usize;
+    declared == message.len() - 4 && message[4] & 0x80 != 0
+}
+
+pub(crate) fn make_data_ack(
+    packet: &PrudpPacket, source_type: u8, source_port: u8, destination_type: u8, destination_port: u8,
+) -> PrudpPacket {
+    PrudpPacket {
+        packet_type: TYPE_DATA, flags: FLAG_ACK, source_type, source_port, destination_type, destination_port,
+        session_id: packet.session_id, packet_id: packet.packet_id, fragment_id: packet.fragment_id,
+        signature: [0; 4], connection_signature: [0; 4], payload: Vec::new(),
+    }
+}
+pub(crate) fn receive_from_server(
     socket: &UdpSocket,
     server: SocketAddrV4,
     session_key: &[u8],

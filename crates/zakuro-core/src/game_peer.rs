@@ -365,6 +365,7 @@ pub fn accept_peer(
         source_port: connect.destination_port,
         destination_port: connect.source_port,
         next_reliable_packet_id: 1,
+        pending_server_pushes: Vec::new(),
     };
 
     Ok((
