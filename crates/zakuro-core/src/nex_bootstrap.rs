@@ -9,6 +9,8 @@ const ACCESS_KEY: &[u8] = b"6181dff1";
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
+const TYPE_ACK: u8 = 3;
+const LEGACY_ACCESS_KEY: &[u8] = b"ridfebb9";
 const FLAG_ACK: u8 = 1;
 const FLAG_RELIABLE: u8 = 2;
 const FLAG_NEED_ACK: u8 = 4;
@@ -115,15 +117,32 @@ fn checksum_v0(bytes: &[u8], access_key: &[u8]) -> u8 {
     checksum as u8
 }
 
-fn data_signature(payload: &[u8], access_key: &[u8]) -> [u8; 4] {
-    if payload.is_empty() {
+fn data_signature(
+    payload: &[u8],
+    sequence_id: u16,
+    fragment_id: u8,
+    access_key: &[u8],
+    session_key: &[u8],
+) -> [u8; 4] {
+    let mut authenticated = Vec::with_capacity(session_key.len() + 3 + payload.len());
+    if access_key != LEGACY_ACCESS_KEY {
+        authenticated.extend_from_slice(session_key);
+        authenticated.extend_from_slice(&sequence_id.to_le_bytes());
+        authenticated.push(fragment_id);
+    }
+    authenticated.extend_from_slice(payload);
+    if authenticated.is_empty() {
         return 0x12345678u32.to_le_bytes();
     }
-    let digest = hmac_md5(&md5_digest(access_key), payload);
+    let digest = hmac_md5(&md5_digest(access_key), &authenticated);
     [digest[0], digest[1], digest[2], digest[3]]
 }
 
-pub fn encode_prudp_v0(packet: &PrudpPacket, access_key: &[u8]) -> Vec<u8> {
+pub fn encode_prudp_v0(
+    packet: &PrudpPacket,
+    access_key: &[u8],
+    session_key: &[u8],
+) -> Vec<u8> {
     let mut output = Vec::with_capacity(20 + packet.payload.len());
     output.push(packet.source_port | (10 << 4));
     output.push(packet.destination_port | (10 << 4));
@@ -132,7 +151,13 @@ pub fn encode_prudp_v0(packet: &PrudpPacket, access_key: &[u8]) -> Vec<u8> {
     let signature = match packet.packet_type {
         TYPE_SYN => [0; 4],
         TYPE_CONNECT => packet.connection_signature,
-        TYPE_DATA => data_signature(&packet.payload, access_key),
+        TYPE_DATA => data_signature(
+            &packet.payload,
+            packet.packet_id,
+            packet.fragment_id,
+            access_key,
+            session_key,
+        ),
         _ => [0; 4],
     };
     output.extend_from_slice(&signature);
@@ -152,8 +177,8 @@ pub fn encode_prudp_v0(packet: &PrudpPacket, access_key: &[u8]) -> Vec<u8> {
     output
 }
 
-pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8]) -> Result<PrudpPacket, String> {
-    if bytes.len() < 13 {
+pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> Result<PrudpPacket, String> {
+    if bytes.len() < 12 {
         return Err("PRUDP packet is truncated".to_owned());
     }
 
@@ -217,7 +242,7 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8]) -> Result<PrudpPacket, S
     if checksum_v0(&bytes[..end], access_key) != bytes[end] {
         return Err("PRUDP packet checksum mismatch".to_owned());
     }
-    if packet_type == TYPE_DATA && signature != data_signature(&bytes[cursor..end], access_key) {
+    if packet_type == TYPE_DATA && signature != data_signature(&bytes[cursor..end], packet_id, fragment_id, access_key, session_key) {
         return Err("PRUDP data signature mismatch".to_owned());
     }
 
@@ -405,14 +430,51 @@ mod tests {
             connection_signature: [0; 4],
             payload: b"test payload".to_vec(),
         };
-        let encoded = encode_prudp_v0(&packet, ACCESS_KEY);
-        let decoded = decode_prudp_v0(&encoded, ACCESS_KEY).unwrap();
+        let session_key = b"mk7 test session key";
+        let encoded = encode_prudp_v0(&packet, ACCESS_KEY, session_key);
+        let decoded = decode_prudp_v0(&encoded, ACCESS_KEY, session_key).unwrap();
         assert_eq!(decoded, packet);
     }
 
     #[test]
     fn mario_kart_7_prudp_access_key_matches_its_server_endpoints() {
         assert_eq!(ACCESS_KEY, b"6181dff1");
+    }
+
+    #[test]
+    fn prudp_data_signature_uses_session_sequence_and_fragment() {
+        let payload = b"race packet";
+        let session_key = b"mk7 session key";
+        let signature = data_signature(payload, 42, 1, ACCESS_KEY, session_key);
+        assert_ne!(signature, data_signature(payload, 43, 1, ACCESS_KEY, session_key));
+        assert_ne!(signature, data_signature(payload, 42, 2, ACCESS_KEY, session_key));
+        assert_ne!(signature, data_signature(payload, 42, 1, ACCESS_KEY, b"other session"));
+    }
+
+    #[test]
+    fn prudp_legacy_access_key_keeps_the_legacy_payload_signature() {
+        let payload = b"legacy payload";
+        let signature = data_signature(payload, 42, 1, LEGACY_ACCESS_KEY, b"ignored session");
+        let expected = hmac_md5(&md5_digest(LEGACY_ACCESS_KEY), payload);
+        assert_eq!(&signature[..], &expected[..4]);
+    }
+
+    #[test]
+    fn prudp_v0_ack_without_optional_fields_is_a_valid_12_byte_packet() {
+        let packet = PrudpPacket {
+            packet_type: TYPE_ACK,
+            flags: 0,
+            source_port: 1,
+            destination_port: 2,
+            session_id: 3,
+            packet_id: 4,
+            fragment_id: 0,
+            connection_signature: [0; 4],
+            payload: Vec::new(),
+        };
+        let encoded = encode_prudp_v0(&packet, ACCESS_KEY, b"");
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(decode_prudp_v0(&encoded, ACCESS_KEY, b"").unwrap(), packet);
     }
 
     #[test]
@@ -423,7 +485,7 @@ mod tests {
             bytes[1] = 0xA2;
             bytes[2..4].copy_from_slice(&u16::from(packet_type).to_le_bytes());
             assert!(
-                decode_prudp_v0(&bytes, ACCESS_KEY).is_err(),
+                decode_prudp_v0(&bytes, ACCESS_KEY, b"test session").is_err(),
                 "truncated packet type {packet_type} should be rejected"
             );
         }
@@ -436,7 +498,7 @@ mod tests {
         bytes[1] = 0xA2;
         let type_flags = u16::from(TYPE_DATA) | (u16::from(FLAG_HAS_SIZE) << 4);
         bytes[2..4].copy_from_slice(&type_flags.to_le_bytes());
-        assert!(decode_prudp_v0(&bytes, ACCESS_KEY).is_err());
+        assert!(decode_prudp_v0(&bytes, ACCESS_KEY, b"test session").is_err());
     }
 
     #[test]
