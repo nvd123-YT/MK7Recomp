@@ -834,6 +834,7 @@ mod tests {
                 SocketAddr::V4(address) => address,
                 _ => panic!("test client did not use IPv4"),
             };
+            let client_signature = connection_signature(client_address);
             let server_signature = connection_signature(server_address);
             let syn_ack = PrudpPacket {
                 packet_type: TYPE_SYN,
@@ -846,7 +847,7 @@ mod tests {
                 packet_id: 0,
                 fragment_id: 0,
                 signature: [0; 4],
-                connection_signature: server_signature,
+                connection_signature: client_signature,
                 payload: Vec::new(),
             };
             server
@@ -866,7 +867,7 @@ mod tests {
             assert_eq!(connect.packet_type, TYPE_CONNECT);
             assert_eq!(connect.flags, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE);
             assert_eq!(connect.packet_id, 1);
-            assert_eq!(connect.signature, server_signature);
+            assert_eq!(connect.signature, client_signature);
             assert_eq!(
                 connect.connection_signature,
                 connection_signature(server_address)

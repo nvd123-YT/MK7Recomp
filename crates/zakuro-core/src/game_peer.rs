@@ -148,6 +148,7 @@ pub fn accept_peer(
         return Err("peer sent an invalid Game-stream SYN packet".to_owned());
     }
 
+    let peer_signature = connection_signature(peer);
     let server_signature = connection_signature(local_address);
     let syn_ack = PrudpPacket {
         packet_type: 0,
@@ -160,7 +161,7 @@ pub fn accept_peer(
         packet_id: 0,
         fragment_id: 0,
         signature: [0; 4],
-        connection_signature: server_signature,
+        connection_signature: peer_signature,
         payload: Vec::new(),
     };
     socket
@@ -186,7 +187,7 @@ pub fn accept_peer(
         || connect.destination_type != syn.destination_type
         || connect.source_port != syn.source_port
         || connect.destination_port != syn.destination_port
-        || connect.signature != server_signature
+        || connect.signature != peer_signature
         || connect.connection_signature != server_signature
         || !connect.payload.is_empty()
     {
@@ -203,7 +204,7 @@ pub fn accept_peer(
         session_id: connect.session_id,
         packet_id: 1,
         fragment_id: 0,
-        signature: server_signature,
+        signature: connect.connection_signature,
         connection_signature: [0; 4],
         payload: Vec::new(),
     };
@@ -218,7 +219,7 @@ pub fn accept_peer(
     let session = PrudpSession {
         client_session_id: connect.session_id,
         server_session_id: connect.session_id,
-        server_connection_signature: server_signature,
+        server_connection_signature: peer_signature,
         client_connection_signature: server_signature,
         connect_response: Vec::new(),
         source_type: connect.destination_type,
@@ -411,7 +412,7 @@ mod tests {
                 packet_id: 0,
                 fragment_id: 0,
                 signature: [0; 4],
-                connection_signature: connection_signature(server_address),
+                connection_signature: connection_signature(client_address),
                 payload: Vec::new(),
             };
             server
@@ -428,7 +429,9 @@ mod tests {
             assert_eq!(connect.destination_type, STREAM_TYPE_GAME);
             assert!(connect.payload.is_empty());
 
+            let peer_signature = connection_signature(client_address);
             let server_signature = connection_signature(server_address);
+            assert_eq!(connect.signature, peer_signature);
             assert_eq!(connect.connection_signature, server_signature);
             let connect_ack = PrudpPacket {
                 packet_type: TYPE_CONNECT,
