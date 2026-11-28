@@ -8,7 +8,7 @@ use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use crate::nex_bootstrap::{
-    decode_prudp_v0, encode_prudp_v0, PrudpPacket, MK7_PRUDP_ACCESS_KEY,
+    decode_prudp_v0, encode_prudp_v0, PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY,
 };
 
 const TYPE_SYN: u8 = 0;
@@ -20,6 +20,7 @@ const FLAG_NEED_ACK: u8 = 0x04;
 const FLAG_HAS_SIZE: u8 = 0x08;
 
 const MAX_HANDSHAKE_ATTEMPTS: usize = 3;
+const RELIABLE_FRAGMENT_SIZE: usize = 962;
 
 /// State retained after a successful PRUDP v0 SYN/CONNECT exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,11 @@ pub struct PrudpSession {
     /// Data returned by a secure endpoint in the CONNECT acknowledgement.
     /// Ordinary authentication endpoints return an empty payload.
     pub connect_response: Vec<u8>,
+    /// Local and remote virtual ports selected by the NEX station URLs.
+    pub source_port: u8,
+    pub destination_port: u8,
+    /// The CONNECT request consumes reliable sequence ID 1.
+    pub next_reliable_packet_id: u16,
 }
 
 /// Calculate the PRUDP v0 connection signature for an IPv4 socket address.
@@ -169,7 +175,258 @@ fn establish_session_inner(
         server_connection_signature: syn_ack.connection_signature,
         client_connection_signature,
         connect_response: connect_ack.payload,
+        source_port,
+        destination_port,
+        next_reliable_packet_id: 2,
     })
+}
+
+
+/// Create independent outgoing and incoming RC4 streams for a PRUDP session.
+///
+/// The non-secure NEX authentication endpoint starts with the protocol's
+/// default CD&ML key. The secure endpoint uses the Kerberos ticket session key.
+pub fn new_payload_ciphers(session_key: &[u8]) -> Result<(Rc4, Rc4), String> {
+    let key = if session_key.is_empty() {
+        b"CD&ML".as_slice()
+    } else {
+        session_key
+    };
+    Ok((
+        Rc4::new(key).map_err(|error| format!("could not initialize outgoing PRUDP RC4: {error}"))?,
+        Rc4::new(key).map_err(|error| format!("could not initialize incoming PRUDP RC4: {error}"))?,
+    ))
+}
+
+impl PrudpSession {
+    /// Send one reliable NEX message and return its reassembled response.
+    ///
+    /// Keep the two RC4 streams alive and pass them back on every call: PRUDP
+    /// encrypts a continuous stream per direction, not each RMC message anew.
+    pub fn send_reliable_message(
+        &mut self,
+        socket: &UdpSocket,
+        server: SocketAddrV4,
+        message: &[u8],
+        session_key: &[u8],
+        outgoing_cipher: &mut Rc4,
+        incoming_cipher: &mut Rc4,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        if timeout.is_zero() {
+            return Err("PRUDP data timeout must be greater than zero".to_owned());
+        }
+        let previous_timeout = socket
+            .read_timeout()
+            .map_err(|error| format!("could not read UDP socket timeout: {error}"))?;
+        socket
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| format!("could not configure PRUDP data timeout: {error}"))?;
+
+        let result = self.send_reliable_message_inner(
+            socket,
+            server,
+            message,
+            session_key,
+            outgoing_cipher,
+            incoming_cipher,
+        );
+        let restore = socket.set_read_timeout(previous_timeout);
+
+        match (result, restore) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(format!(
+                "PRUDP message completed but socket timeout could not be restored: {error}"
+            )),
+        }
+    }
+
+    fn send_reliable_message_inner(
+        &mut self,
+        socket: &UdpSocket,
+        server: SocketAddrV4,
+        message: &[u8],
+        session_key: &[u8],
+        outgoing_cipher: &mut Rc4,
+        incoming_cipher: &mut Rc4,
+    ) -> Result<Vec<u8>, String> {
+        let fragments = if message.is_empty() {
+            vec![&message[..]]
+        } else {
+            message.chunks(RELIABLE_FRAGMENT_SIZE).collect::<Vec<_>>()
+        };
+        if fragments.len() > u8::MAX as usize {
+            return Err("PRUDP message exceeds the v0 fragment-count limit".to_owned());
+        }
+
+        let mut pending_response = std::collections::VecDeque::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            let fragment_id = if index + 1 == fragments.len() {
+                0
+            } else {
+                (index + 1) as u8
+            };
+            let packet_id = self.next_reliable_packet_id;
+            self.next_reliable_packet_id = self.next_reliable_packet_id.wrapping_add(1);
+
+            let encrypted = outgoing_cipher.apply(fragment);
+            let request = PrudpPacket {
+                packet_type: TYPE_DATA,
+                flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+                source_port: self.source_port,
+                destination_port: self.destination_port,
+                session_id: self.client_session_id,
+                packet_id,
+                fragment_id,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: encrypted,
+            };
+            let encoded = encode_prudp_v0(&request, MK7_PRUDP_ACCESS_KEY, session_key);
+            let mut acknowledged = false;
+
+            for _ in 0..MAX_HANDSHAKE_ATTEMPTS {
+                socket
+                    .send_to(&encoded, server)
+                    .map_err(|error| format!("could not send reliable PRUDP DATA: {error}"))?;
+
+                loop {
+                    let Some(packet) = receive_from_server(socket, server, session_key)? else {
+                        break;
+                    };
+                    if packet.packet_type != TYPE_DATA {
+                        continue;
+                    }
+                    validate_session_packet(
+                        &packet,
+                        self.server_session_id,
+                        self.source_port,
+                        self.destination_port,
+                    )?;
+
+                    if packet.flags & FLAG_ACK != 0 {
+                        if packet.packet_id == packet_id {
+                            acknowledged = true;
+                            break;
+                        }
+                    } else {
+                        pending_response.push_back(packet);
+                    }
+                }
+
+                if acknowledged {
+                    break;
+                }
+            }
+
+            if !acknowledged {
+                return Err(format!(
+                    "PRUDP reliable DATA packet {packet_id} was not acknowledged"
+                ));
+            }
+        }
+
+        let mut response = Vec::new();
+        loop {
+            let packet = match pending_response.pop_front() {
+                Some(packet) => packet,
+                None => receive_from_server(socket, server, session_key)?
+                    .ok_or_else(|| "timed out waiting for the NEX RMC response".to_owned())?,
+            };
+            if packet.packet_type != TYPE_DATA {
+                continue;
+            }
+            validate_session_packet(
+                &packet,
+                self.server_session_id,
+                self.source_port,
+                self.destination_port,
+            )?;
+            if packet.flags & FLAG_ACK != 0 {
+                continue;
+            }
+
+            if packet.flags & FLAG_NEED_ACK != 0 {
+                let ack = PrudpPacket {
+                    packet_type: TYPE_DATA,
+                    flags: FLAG_ACK,
+                    source_port: self.source_port,
+                    destination_port: self.destination_port,
+                    session_id: self.client_session_id,
+                    packet_id: packet.packet_id,
+                    fragment_id: packet.fragment_id,
+                    signature: [0; 4],
+                    connection_signature: [0; 4],
+                    payload: Vec::new(),
+                };
+                socket
+                    .send_to(&encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, session_key), server)
+                    .map_err(|error| format!("could not acknowledge server PRUDP DATA: {error}"))?;
+            }
+
+            if packet.flags & FLAG_RELIABLE == 0 {
+                return Err("NEX RMC response arrived as unreliable PRUDP DATA".to_owned());
+            }
+            response.extend_from_slice(&incoming_cipher.apply(&packet.payload));
+            if packet.fragment_id == 0 {
+                return Ok(response);
+            }
+        }
+    }
+}
+
+fn validate_session_packet(
+    packet: &PrudpPacket,
+    expected_session_id: u8,
+    source_port: u8,
+    destination_port: u8,
+) -> Result<(), String> {
+    if packet.session_id != expected_session_id
+        || packet.source_port != destination_port
+        || packet.destination_port != source_port
+    {
+        return Err("received PRUDP DATA for a different session or virtual port".to_owned());
+    }
+    Ok(())
+}
+
+/// Receive one packet from the connected NEX endpoint. None means the socket
+/// read timeout elapsed; packets from unrelated UDP peers are discarded.
+fn receive_from_server(
+    socket: &UdpSocket,
+    server: SocketAddrV4,
+    session_key: &[u8],
+) -> Result<Option<PrudpPacket>, String> {
+    let expected_peer = SocketAddr::V4(server);
+    let mut response = [0u8; 65_535];
+    loop {
+        match socket.recv_from(&mut response) {
+            Ok((length, peer)) => {
+                if peer != expected_peer {
+                    continue;
+                }
+                let packet = decode_prudp_v0(
+                    &response[..length],
+                    MK7_PRUDP_ACCESS_KEY,
+                    session_key,
+                )
+                .map_err(|error| format!("could not decode PRUDP DATA packet: {error}"))?;
+                return Ok(Some(packet));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!("could not receive PRUDP DATA packet: {error}"));
+            }
+        }
+    }
 }
 
 fn send_and_receive(
@@ -240,6 +497,145 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::mpsc;
     use std::thread;
+
+    #[test]
+    fn reliable_data_round_trip_uses_rc4_and_packet_acknowledgements() {
+        let server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let server_address = match server.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("test server did not bind IPv4"),
+        };
+        let client = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let (send, receive) = mpsc::channel();
+
+        let server_thread = thread::spawn(move || {
+            let mut bytes = [0u8; 65_535];
+            let (length, client_address) = server.recv_from(&mut bytes).unwrap();
+            let syn = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+            assert_eq!(syn.packet_type, TYPE_SYN);
+            let client_address = match client_address {
+                SocketAddr::V4(address) => address,
+                _ => panic!("test client did not use IPv4"),
+            };
+
+            let syn_ack = PrudpPacket {
+                packet_type: TYPE_SYN,
+                flags: FLAG_ACK | FLAG_HAS_SIZE,
+                source_port: 1,
+                destination_port: 2,
+                session_id: 0,
+                packet_id: 0,
+                fragment_id: 0,
+                signature: [0; 4],
+                connection_signature: connection_signature(client_address),
+                payload: Vec::new(),
+            };
+            server
+                .send_to(&encode_prudp_v0(&syn_ack, MK7_PRUDP_ACCESS_KEY, &[]), client_address)
+                .unwrap();
+
+            let (length, _) = server.recv_from(&mut bytes).unwrap();
+            let connect = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+            let connect_ack = PrudpPacket {
+                packet_type: TYPE_CONNECT,
+                flags: FLAG_ACK | FLAG_HAS_SIZE,
+                source_port: 1,
+                destination_port: 2,
+                session_id: connect.session_id,
+                packet_id: 1,
+                fragment_id: 0,
+                signature: connect.connection_signature,
+                connection_signature: [0; 4],
+                payload: Vec::new(),
+            };
+            server
+                .send_to(&encode_prudp_v0(&connect_ack, MK7_PRUDP_ACCESS_KEY, &[]), client_address)
+                .unwrap();
+
+            let (length, _) = server.recv_from(&mut bytes).unwrap();
+            let request = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+            assert_eq!(request.packet_type, TYPE_DATA);
+            assert_eq!(request.packet_id, 2);
+            assert_eq!(
+                request.flags,
+                FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE
+            );
+            let mut decrypt = Rc4::new(b"CD&ML").unwrap();
+            assert_eq!(decrypt.apply(&request.payload), b"RMC request bytes");
+
+            let request_ack = PrudpPacket {
+                packet_type: TYPE_DATA,
+                flags: FLAG_ACK,
+                source_port: 1,
+                destination_port: 2,
+                session_id: request.session_id,
+                packet_id: request.packet_id,
+                fragment_id: request.fragment_id,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: Vec::new(),
+            };
+            server
+                .send_to(&encode_prudp_v0(&request_ack, MK7_PRUDP_ACCESS_KEY, &[]), client_address)
+                .unwrap();
+
+            let mut encrypt = Rc4::new(b"CD&ML").unwrap();
+            let encrypted_response = encrypt.apply(b"RMC response bytes");
+            let response = PrudpPacket {
+                packet_type: TYPE_DATA,
+                flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+                source_port: 1,
+                destination_port: 2,
+                session_id: request.session_id,
+                packet_id: 1,
+                fragment_id: 0,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: encrypted_response,
+            };
+            server
+                .send_to(&encode_prudp_v0(&response, MK7_PRUDP_ACCESS_KEY, &[]), client_address)
+                .unwrap();
+
+            let (length, _) = server.recv_from(&mut bytes).unwrap();
+            let response_ack = decode_prudp_v0(&bytes[..length], MK7_PRUDP_ACCESS_KEY, &[]).unwrap();
+            assert_eq!(response_ack.packet_type, TYPE_DATA);
+            assert_eq!(response_ack.flags, FLAG_ACK);
+            assert_eq!(response_ack.packet_id, 1);
+            assert!(response_ack.payload.is_empty());
+            let _ = send.send(());
+        });
+
+        let mut session = establish_session(
+            &client,
+            server_address,
+            2,
+            1,
+            &[],
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        let (mut outgoing, mut incoming) = new_payload_ciphers(&[]).unwrap();
+        let response = session
+            .send_reliable_message(
+                &client,
+                server_address,
+                b"RMC request bytes",
+                &[],
+                &mut outgoing,
+                &mut incoming,
+                Duration::from_millis(250),
+            )
+            .unwrap();
+
+        server_thread.join().unwrap();
+        receive.recv().unwrap();
+        assert_eq!(response, b"RMC response bytes");
+        assert_eq!(session.next_reliable_packet_id, 3);
+    }
 
     #[test]
     fn connection_signature_matches_the_ipv4_and_port_vector() {
