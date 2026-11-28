@@ -921,7 +921,6 @@ mod tests {
                 _ => panic!("test client did not use IPv4"),
             };
             let client_signature = connection_signature(client_address);
-            let server_signature = connection_signature(server_address);
             let syn_ack = PrudpPacket {
                 packet_type: TYPE_SYN,
                 flags: FLAG_ACK | FLAG_HAS_SIZE,

@@ -468,8 +468,12 @@ mod tests {
         let b_addr = match b.local_addr().unwrap() { SocketAddr::V4(v) => v, _ => unreachable!() };
         let a_station = Station { address: a_addr.ip().to_string(), port: a_addr.port(), stream_id: 1, stream_type: STREAM_TYPE_GAME, principal_id: 41, rv_connection_id: 0x1111, raw_url: String::new(), connection_id: 0xAAAA };
         let b_station = Station { address: b_addr.ip().to_string(), port: b_addr.port(), stream_id: 1, stream_type: STREAM_TYPE_GAME, principal_id: 42, rv_connection_id: 0x2222, raw_url: String::new(), connection_id: 0xBBBB };
-        let a_thread = thread::spawn(move || punch_through_nat(&a, &a_station, &b_station, Duration::from_secs(2), true).unwrap());
-        let b_thread = thread::spawn(move || punch_through_nat(&b, &b_station, &a_station, Duration::from_secs(2), true).unwrap());
+        let a_station_for_a = a_station.clone();
+        let b_station_for_a = b_station.clone();
+        let a_station_for_b = a_station.clone();
+        let b_station_for_b = b_station.clone();
+        let a_thread = thread::spawn(move || punch_through_nat(&a, &a_station_for_a, &b_station_for_a, Duration::from_secs(2), true).unwrap());
+        let b_thread = thread::spawn(move || punch_through_nat(&b, &b_station_for_b, &a_station_for_b, Duration::from_secs(2), true).unwrap());
         assert!(a_thread.join().unwrap() < Duration::from_secs(2));
         assert!(b_thread.join().unwrap() < Duration::from_secs(2));
     }
@@ -481,6 +485,8 @@ mod tests {
             stream_id: 1,
             stream_type: 10,
             principal_id: 42,
+            rv_connection_id: 77,
+            raw_url: String::new(),
             connection_id: 77,
         };
         assert!(connect_to_peer(&station, Duration::from_millis(10))
@@ -497,6 +503,8 @@ mod tests {
             stream_id: 1,
             stream_type: STREAM_TYPE_GAME,
             principal_id: 42,
+            rv_connection_id: 77,
+            raw_url: String::new(),
             connection_id: 77,
         };
         let (mut outgoing, mut incoming) = new_payload_ciphers(&[]).unwrap();

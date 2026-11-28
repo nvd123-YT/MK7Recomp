@@ -1285,7 +1285,6 @@ mod tests {
         let mut peer = online
             .connect_to_matchmake_host(
                 &auto_result,
-                "hello race",
                 Duration::from_secs(2),
             )
             .unwrap();
@@ -1325,6 +1324,8 @@ mod tests {
             stream_id: 1,
             stream_type: 10,
             principal_id: 2,
+            rv_connection_id: 3,
+            raw_url: String::new(),
             connection_id: 3,
         };
         assert!(resolve_station(&station)
@@ -1340,6 +1341,8 @@ mod tests {
             stream_id: 1,
             stream_type: 10,
             principal_id: 2,
+            rv_connection_id: 3,
+            raw_url: String::new(),
             connection_id: 3,
         };
         assert_eq!(
