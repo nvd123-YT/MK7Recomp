@@ -272,6 +272,194 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
     })
 }
 
+
+/// The 3DS 2.4.3 matchmaking query fields used by MK7's Matchmake Extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchmakeSearchCriteria {
+    /// Six title-defined attribute strings.
+    pub attributes: Vec<String>,
+    pub game_mode: String,
+    pub min_participants: String,
+    pub max_participants: String,
+    /// "1" = global matchmaking, "2" = friends matchmaking.
+    pub matchmake_system: String,
+    pub vacant_only: bool,
+    pub exclude_locked: bool,
+    pub exclude_non_host_pid: bool,
+    pub selection_method: u32,
+}
+
+impl Default for MatchmakeSearchCriteria {
+    fn default() -> Self {
+        Self {
+            attributes: vec![String::new(); 6],
+            game_mode: String::new(),
+            min_participants: String::new(),
+            max_participants: String::new(),
+            matchmake_system: "1".to_owned(),
+            vacant_only: true,
+            exclude_locked: true,
+            exclude_non_host_pid: false,
+            selection_method: 0,
+        }
+    }
+}
+
+/// A decoded MatchmakeSession record using the MK7 server's NEX 2.4.3 schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchmakeSessionSummary {
+    pub gathering_id: u32,
+    pub owner_pid: u32,
+    pub host_pid: u32,
+    pub minimum_participants: u16,
+    pub maximum_participants: u16,
+    pub participation_policy: u32,
+    pub policy_argument: u32,
+    pub flags: u32,
+    pub state: u32,
+    pub description: String,
+    pub game_mode: u32,
+    pub attributes: Vec<u32>,
+    pub open_participation: bool,
+    pub matchmake_system: u32,
+    pub application_buffer: Vec<u8>,
+    pub participation_count: u32,
+}
+
+/// Encode MatchmakeExtension::BrowseMatchmakeSessionNoHolder's parameters.
+///
+/// MK7's secure endpoint advertises NEX 2.4.3, so this omits fields introduced
+/// in NEX 3.0 and later. range_size is capped at the server's documented 100.
+pub fn encode_matchmake_browse_request(
+    criteria: &MatchmakeSearchCriteria,
+    range_offset: u32,
+    range_size: u32,
+) -> Result<Vec<u8>, String> {
+    if criteria.attributes.len() != 6 {
+        return Err("MK7 matchmaking requires exactly six attribute strings".to_owned());
+    }
+    if range_size == 0 || range_size > 100 {
+        return Err("MK7 matchmaking result range must contain between 1 and 100 entries".to_owned());
+    }
+
+    let mut output = Vec::new();
+    output.extend_from_slice(&(criteria.attributes.len() as u32).to_le_bytes());
+    for attribute in &criteria.attributes {
+        encode_nex_string(attribute, &mut output);
+    }
+    encode_nex_string(&criteria.game_mode, &mut output);
+    encode_nex_string(&criteria.min_participants, &mut output);
+    encode_nex_string(&criteria.max_participants, &mut output);
+    encode_nex_string(&criteria.matchmake_system, &mut output);
+    output.push(u8::from(criteria.vacant_only));
+    output.push(u8::from(criteria.exclude_locked));
+    output.push(u8::from(criteria.exclude_non_host_pid));
+    output.extend_from_slice(&criteria.selection_method.to_le_bytes());
+    output.extend_from_slice(&range_offset.to_le_bytes());
+    output.extend_from_slice(&range_size.to_le_bytes());
+    Ok(output)
+}
+
+/// Decode the MatchmakeExtension::BrowseMatchmakeSessionNoHolder response.
+pub fn decode_matchmake_session_list(
+    data: &[u8],
+) -> Result<Vec<MatchmakeSessionSummary>, String> {
+    let mut cursor = 0usize;
+    let count = read_u32(data, &mut cursor)? as usize;
+    if count > 100 {
+        return Err(format!("MK7 matchmaking returned too many sessions ({count})"));
+    }
+    let mut sessions = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let gathering_id = read_u32(data, &mut cursor)?;
+        let owner_pid = read_u32(data, &mut cursor)?;
+        let host_pid = read_u32(data, &mut cursor)?;
+        let minimum_participants = read_u16(data, &mut cursor)?;
+        let maximum_participants = read_u16(data, &mut cursor)?;
+        let participation_policy = read_u32(data, &mut cursor)?;
+        let policy_argument = read_u32(data, &mut cursor)?;
+        let flags = read_u32(data, &mut cursor)?;
+        let state = read_u32(data, &mut cursor)?;
+        let description = decode_nex_string(data, &mut cursor)?;
+
+        let game_mode = read_u32(data, &mut cursor)?;
+        let attribute_count = read_u32(data, &mut cursor)? as usize;
+        if attribute_count > 6 {
+            return Err(format!("MK7 matchmaking session has {attribute_count} attributes"));
+        }
+        let mut attributes = Vec::with_capacity(attribute_count);
+        for _ in 0..attribute_count {
+            attributes.push(read_u32(data, &mut cursor)?);
+        }
+        let open_participation = take(data, &mut cursor, 1)?[0] != 0;
+        let matchmake_system = read_u32(data, &mut cursor)?;
+        let application_buffer_length = read_u32(data, &mut cursor)? as usize;
+        let application_buffer = take(data, &mut cursor, application_buffer_length)?.to_vec();
+        let participation_count = read_u32(data, &mut cursor)?;
+
+        sessions.push(MatchmakeSessionSummary {
+            gathering_id,
+            owner_pid,
+            host_pid,
+            minimum_participants,
+            maximum_participants,
+            participation_policy,
+            policy_argument,
+            flags,
+            state,
+            description,
+            game_mode,
+            attributes,
+            open_participation,
+            matchmake_system,
+            application_buffer,
+            participation_count,
+        });
+    }
+
+    if cursor != data.len() {
+        return Err("MK7 matchmaking response contained unexpected trailing bytes".to_owned());
+    }
+    Ok(sessions)
+}
+
+/// Encode the basic MatchmakeExtension::JoinMatchmakeSession parameters.
+pub fn encode_matchmake_join_request(gathering_id: u32, message: &str) -> Vec<u8> {
+    let mut output = gathering_id.to_le_bytes().to_vec();
+    encode_nex_string(message, &mut output);
+    output
+}
+
+/// Decode a NEX Buffer response (u32 byte length followed by its contents).
+pub fn decode_nex_buffer_response(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cursor = 0usize;
+    let length = read_u32(data, &mut cursor)? as usize;
+    let value = take(data, &mut cursor, length)?.to_vec();
+    if cursor != data.len() {
+        return Err("NEX buffer response contained unexpected trailing bytes".to_owned());
+    }
+    Ok(value)
+}
+
+/// Decode MatchMaking::GetSessionURLs (a list of StationURL strings).
+pub fn decode_station_url_list(data: &[u8]) -> Result<Vec<Station>, String> {
+    let mut cursor = 0usize;
+    let count = read_u32(data, &mut cursor)? as usize;
+    if count > 32 {
+        return Err(format!("NEX session returned too many station URLs ({count})"));
+    }
+    let mut stations = Vec::with_capacity(count);
+    for _ in 0..count {
+        let url = decode_nex_string(data, &mut cursor)?;
+        stations.push(parse_station_url(&url)?);
+    }
+    if cursor != data.len() {
+        return Err("NEX station URL list contained unexpected trailing bytes".to_owned());
+    }
+    Ok(stations)
+}
+
 pub fn encode_nex_string(value: &str, output: &mut Vec<u8>) {
     let mut bytes = value.as_bytes().to_vec();
     bytes.push(0);
@@ -798,6 +986,94 @@ mod tests {
         let mut holder_cursor = 0usize;
         assert_eq!(decode_nex_string(data_holder, &mut holder_cursor).unwrap(), "AccountExtraInfo");
         assert!(data_holder.len() > holder_cursor);
+    }
+
+
+    #[test]
+    fn mk7_matchmake_browse_request_encodes_the_3ds_243_fields() {
+        let criteria = MatchmakeSearchCriteria::default();
+        let request = encode_matchmake_browse_request(&criteria, 0, 20).unwrap();
+        let mut cursor = 0usize;
+        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 6);
+        for _ in 0..6 {
+            assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        }
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "1");
+        assert_eq!(take(&request, &mut cursor, 3).unwrap(), [1, 1, 0]);
+        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 0);
+        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 0);
+        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 20);
+        assert_eq!(cursor, request.len());
+    }
+
+    #[test]
+    fn mk7_matchmake_browse_rejects_bad_attribute_count_and_range() {
+        let mut criteria = MatchmakeSearchCriteria::default();
+        criteria.attributes.pop();
+        assert!(encode_matchmake_browse_request(&criteria, 0, 20).is_err());
+        criteria.attributes = vec![String::new(); 6];
+        assert!(encode_matchmake_browse_request(&criteria, 0, 0).is_err());
+        assert!(encode_matchmake_browse_request(&criteria, 0, 101).is_err());
+    }
+
+    #[test]
+    fn mk7_matchmake_session_list_round_trips_its_243_fields() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&123u32.to_le_bytes());
+        body.extend_from_slice(&42u32.to_le_bytes());
+        body.extend_from_slice(&43u32.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&512u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        encode_nex_string("MK7 VS", &mut body);
+        body.extend_from_slice(&7u32.to_le_bytes());
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(&11u32.to_le_bytes());
+        body.extend_from_slice(&22u32.to_le_bytes());
+        body.push(1);
+        body.extend_from_slice(&1u32.to_le_bytes());
+        encode_buffer(b"race settings", &mut body);
+        body.extend_from_slice(&3u32.to_le_bytes());
+
+        let sessions = decode_matchmake_session_list(&body).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].gathering_id, 123);
+        assert_eq!(sessions[0].owner_pid, 42);
+        assert_eq!(sessions[0].host_pid, 43);
+        assert_eq!(sessions[0].description, "MK7 VS");
+        assert_eq!(sessions[0].game_mode, 7);
+        assert_eq!(sessions[0].attributes, [11, 22]);
+        assert!(sessions[0].open_participation);
+        assert_eq!(sessions[0].matchmake_system, 1);
+        assert_eq!(sessions[0].application_buffer, b"race settings");
+        assert_eq!(sessions[0].participation_count, 3);
+    }
+
+    #[test]
+    fn nex_session_url_list_and_buffer_responses_are_length_checked() {
+        let mut urls = Vec::new();
+        urls.extend_from_slice(&1u32.to_le_bytes());
+        encode_nex_string(
+            "prudp:/address=127.0.0.1;port=1234;sid=1;PID=2;CID=3",
+            &mut urls,
+        );
+        let stations = decode_station_url_list(&urls).unwrap();
+        assert_eq!(stations[0].address, "127.0.0.1");
+        assert_eq!(stations[0].port, 1234);
+        assert!(decode_station_url_list(&[1, 0, 0, 0]).is_err());
+
+        let mut buffer = Vec::new();
+        encode_buffer(b"session key", &mut buffer);
+        assert_eq!(decode_nex_buffer_response(&buffer).unwrap(), b"session key");
+        buffer.push(0);
+        assert!(decode_nex_buffer_response(&buffer).is_err());
     }
 
     #[test]

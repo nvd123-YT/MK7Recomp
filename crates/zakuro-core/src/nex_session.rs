@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::nex_bootstrap::{
     build_secure_connect_payload, decode_client_kerberos_ticket,
     decode_ticket_granting_login_ex_response, encode_ticket_granting_login_ex_body,
-    parse_station_url, verify_secure_connect_response, ClientKerberosTicket, RmcResponse,
+    verify_secure_connect_response, ClientKerberosTicket, RmcResponse,
     Station,
 };
 use crate::nex_bootstrap::Rc4;
@@ -35,13 +35,14 @@ pub struct NexOnlineSession {
     pub secure_station: Station,
 }
 
-/// Authenticate with the service-locator station and open the returned secure
-/// station using the Kerberos ticket supplied by TicketGranting::LoginEx.
+/// Authenticate with the NEX endpoint returned by NASC LOGIN and open the
+/// secure station supplied by TicketGranting::LoginEx.
 ///
-/// service_station_url is the NEX StationURL returned in FRD SVCLOC.
-/// username is the account UID-HMAC; nex_token is the SVCLOC service token.
+/// game_server_locator is NASC LOGIN's host:port string. NASC SVCLOC instead
+/// returns an independent-service token and may return svchost="n/a".
+/// nex_token is the NEX token from NASC LOGIN; username is the account UID-HMAC.
 pub fn connect(
-    service_station_url: &str,
+    game_server_locator: &str,
     username: &str,
     password: &str,
     principal_id: u32,
@@ -49,8 +50,15 @@ pub fn connect(
     nex_token: &str,
     timeout: Duration,
 ) -> Result<NexOnlineSession, String> {
-    let authentication_station = parse_station_url(service_station_url)?;
-    let authentication_address = resolve_station(&authentication_station)?;
+    let authentication_address = parse_game_server_locator(game_server_locator)?;
+    // The MK7 authentication endpoint is a PRUDP endpoint on stream ID 1.
+    let authentication_station = Station {
+        address: authentication_address.ip().to_string(),
+        port: authentication_address.port(),
+        stream_id: 1,
+        principal_id: 0,
+        connection_id: 0,
+    };
 
     let authentication_socket = UdpSocket::bind("0.0.0.0:0")
         .map_err(|error| format!("could not bind NEX authentication UDP socket: {error}"))?;
@@ -164,6 +172,47 @@ impl NexOnlineSession {
         )
     }
 
+
+    /// Browse MK7's Matchmake Extension for sessions matching the supplied
+    /// game-specific search fields.
+    pub fn browse_matchmake_sessions(
+        &mut self,
+        criteria: &crate::nex_bootstrap::MatchmakeSearchCriteria,
+        range_offset: u32,
+        range_size: u32,
+        timeout: Duration,
+    ) -> Result<Vec<crate::nex_bootstrap::MatchmakeSessionSummary>, String> {
+        let body = crate::nex_bootstrap::encode_matchmake_browse_request(
+            criteria,
+            range_offset,
+            range_size,
+        )?;
+        let response = self.request(0x6D, 0x2A, &body, timeout)?;
+        crate::nex_bootstrap::decode_matchmake_session_list(&response.body)
+    }
+
+    /// Join a known gathering and return the P2P session key.
+    pub fn join_matchmake_session(
+        &mut self,
+        gathering_id: u32,
+        message: &str,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        let body = crate::nex_bootstrap::encode_matchmake_join_request(gathering_id, message);
+        let response = self.request(0x6D, 0x07, &body, timeout)?;
+        crate::nex_bootstrap::decode_nex_buffer_response(&response.body)
+    }
+
+    /// Retrieve the StationURLs for the P2P host/participants of a gathering.
+    pub fn get_matchmake_session_urls(
+        &mut self,
+        gathering_id: u32,
+        timeout: Duration,
+    ) -> Result<Vec<Station>, String> {
+        let response = self.request(0x15, 0x29, &gathering_id.to_le_bytes(), timeout)?;
+        crate::nex_bootstrap::decode_station_url_list(&response.body)
+    }
+
     /// The principal ID authenticated by the NEX TicketGranting server.
     pub fn principal_id(&self) -> u32 {
         self.principal_id
@@ -179,6 +228,31 @@ impl NexOnlineSession {
         self.socket.local_addr().is_ok()
             && self.session.server_session_id == self.session.client_session_id
     }
+}
+
+
+fn parse_game_server_locator(locator: &str) -> Result<SocketAddrV4, String> {
+    let (host, port) = locator
+        .rsplit_once(':')
+        .ok_or_else(|| "NASC LOGIN locator omitted its port".to_owned())?;
+    if host.is_empty() {
+        return Err("NASC LOGIN locator has an empty host".to_owned());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "NASC LOGIN locator has an invalid port".to_owned())?;
+    if port == 0 {
+        return Err("NASC LOGIN locator port is zero".to_owned());
+    }
+    let endpoint = (host, port);
+    endpoint
+        .to_socket_addrs()
+        .map_err(|error| format!("could not resolve NASC LOGIN locator {locator}: {error}"))?
+        .find_map(|address| match address {
+            SocketAddr::V4(address) => Some(address),
+            SocketAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("NASC LOGIN locator {locator} did not resolve to IPv4"))
 }
 
 fn resolve_station(station: &Station) -> Result<SocketAddrV4, String> {
@@ -199,6 +273,18 @@ fn resolve_station(station: &Station) -> Result<SocketAddrV4, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn game_server_locator_parses_ipv4_and_rejects_invalid_ports() {
+        assert_eq!(
+            parse_game_server_locator("127.0.0.1:6000").unwrap(),
+            SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 6000)
+        );
+        assert!(parse_game_server_locator("127.0.0.1").is_err());
+        assert!(parse_game_server_locator("127.0.0.1:0").is_err());
+        assert!(parse_game_server_locator("127.0.0.1:not-a-port").is_err());
+    }
 
     #[test]
     fn station_resolution_rejects_zero_ports_before_dns() {
