@@ -15,7 +15,7 @@ use crate::prudp_client::{
     establish_session, make_data_ack, new_payload_ciphers, receive_from_server,
     validate_session_packet, PrudpSession,
 };
-use crate::game_peer::{punch_through_nat, connect_to_peer_with_socket, GamePeerSession};
+use crate::game_peer::{accept_peer, punch_through_nat, connect_to_peer_with_socket, GamePeerSession};
 
 const TICKET_GRANTING_PROTOCOL: u8 = 0x0A;
 const TICKET_GRANTING_LOGIN_EX: u32 = 0x02;
@@ -545,10 +545,26 @@ impl NexOnlineSession {
                 return Err(error);
             }
         }
-        let peer_address = resolve_station(&peer)?;
         let game_socket = self.game_socket.take()
             .ok_or_else(|| "Game-stream station was registered without a retained UDP socket".to_owned())?;
-        connect_to_peer_with_socket(game_socket, &peer, peer_address, timeout)
+        if result.host_pid == self.principal_id {
+            // The gathering host is the passive side of the Game-stream PRUDP
+            // handshake. The joining client sends SYN; the host accepts it.
+            let advertised_address = resolve_station(&own_station)?;
+            let (session, remote) = accept_peer(game_socket, advertised_address, timeout)?;
+            let expected_peer = resolve_station(&peer)?;
+            if remote.ip() != expected_peer.ip() {
+                return Err(format!(
+                    "accepted Game-stream peer {} did not match the PIA-probed peer address {}",
+                    remote,
+                    expected_peer
+                ));
+            }
+            Ok(session)
+        } else {
+            let peer_address = resolve_station(&peer)?;
+            connect_to_peer_with_socket(game_socket, &peer, peer_address, timeout)
+        }
     }
 
     /// The principal ID authenticated by the NEX TicketGranting server.
