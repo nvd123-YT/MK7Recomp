@@ -4,7 +4,8 @@
 
 use md5::{Digest, Md5};
 
-const ACCESS_KEY: &[u8] = b"ridfebb9";
+// Mario Kart 7 uses this key on both its NEX authentication and secure endpoints.
+const ACCESS_KEY: &[u8] = b"6181dff1";
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
@@ -155,40 +156,62 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8]) -> Result<PrudpPacket, S
     if bytes.len() < 13 {
         return Err("PRUDP packet is truncated".to_owned());
     }
+
     let mut cursor = 0usize;
-    let source = bytes[cursor]; cursor += 1;
-    let destination = bytes[cursor]; cursor += 1;
+    let source = take(bytes, &mut cursor, 1)?[0];
+    let destination = take(bytes, &mut cursor, 1)?[0];
     if source >> 4 != 10 || destination >> 4 != 10 {
         return Err("PRUDP packet used an unexpected transport type".to_owned());
     }
-    let type_flags = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()); cursor += 2;
+
+    let type_flags = u16::from_le_bytes(
+        take(bytes, &mut cursor, 2)?
+            .try_into()
+            .map_err(|_| "PRUDP packet omitted its type and flags".to_owned())?,
+    );
     let packet_type = (type_flags & 0x0f) as u8;
     let flags = (type_flags >> 4) as u8;
-    let session_id = bytes[cursor]; cursor += 1;
-    let signature: [u8; 4] = bytes[cursor..cursor + 4].try_into().unwrap(); cursor += 4;
-    let packet_id = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()); cursor += 2;
+    let session_id = take(bytes, &mut cursor, 1)?[0];
+    let signature: [u8; 4] = take(bytes, &mut cursor, 4)?
+        .try_into()
+        .map_err(|_| "PRUDP packet omitted its signature".to_owned())?;
+    let packet_id = u16::from_le_bytes(
+        take(bytes, &mut cursor, 2)?
+            .try_into()
+            .map_err(|_| "PRUDP packet omitted its packet ID".to_owned())?,
+    );
+
     let mut connection_signature = [0u8; 4];
     let fragment_id;
     if packet_type == TYPE_SYN || packet_type == TYPE_CONNECT {
-        connection_signature.copy_from_slice(&bytes[cursor..cursor + 4]);
-        cursor += 4;
+        connection_signature.copy_from_slice(
+            take(bytes, &mut cursor, 4)
+                .map_err(|_| "PRUDP handshake packet omitted its connection signature".to_owned())?,
+        );
         fragment_id = 0;
     } else if packet_type == TYPE_DATA {
-        fragment_id = *bytes.get(cursor).ok_or_else(|| "PRUDP data packet omitted its fragment ID".to_owned())?;
-        cursor += 1;
+        fragment_id = take(bytes, &mut cursor, 1)
+            .map_err(|_| "PRUDP data packet omitted its fragment ID".to_owned())?[0];
     } else {
         fragment_id = 0;
     }
+
     let payload_length = if flags & FLAG_HAS_SIZE != 0 {
-        let length = u16::from_le_bytes(bytes.get(cursor..cursor + 2)
-            .ok_or_else(|| "PRUDP packet omitted its payload size".to_owned())?.try_into().unwrap()) as usize;
-        cursor += 2;
-        length
+        u16::from_le_bytes(
+            take(bytes, &mut cursor, 2)?
+                .try_into()
+                .map_err(|_| "PRUDP packet omitted its payload size".to_owned())?,
+        ) as usize
     } else {
-        bytes.len().saturating_sub(cursor + 1)
+        bytes.len()
+            .checked_sub(cursor)
+            .and_then(|remaining| remaining.checked_sub(1))
+            .ok_or_else(|| "PRUDP packet omitted its checksum".to_owned())?
     };
-    let end = cursor.checked_add(payload_length).ok_or_else(|| "PRUDP payload length overflowed".to_owned())?;
-    if end + 1 != bytes.len() {
+    let end = cursor
+        .checked_add(payload_length)
+        .ok_or_else(|| "PRUDP payload length overflowed".to_owned())?;
+    if end.checked_add(1) != Some(bytes.len()) {
         return Err("PRUDP packet payload length is inconsistent".to_owned());
     }
     if checksum_v0(&bytes[..end], access_key) != bytes[end] {
@@ -197,6 +220,7 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8]) -> Result<PrudpPacket, S
     if packet_type == TYPE_DATA && signature != data_signature(&bytes[cursor..end], access_key) {
         return Err("PRUDP data signature mismatch".to_owned());
     }
+
     Ok(PrudpPacket {
         packet_type,
         flags,
@@ -384,6 +408,35 @@ mod tests {
         let encoded = encode_prudp_v0(&packet, ACCESS_KEY);
         let decoded = decode_prudp_v0(&encoded, ACCESS_KEY).unwrap();
         assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn mario_kart_7_prudp_access_key_matches_its_server_endpoints() {
+        assert_eq!(ACCESS_KEY, b"6181dff1");
+    }
+
+    #[test]
+    fn prudp_decoder_rejects_truncated_handshake_signatures() {
+        for packet_type in [TYPE_SYN, TYPE_CONNECT] {
+            let mut bytes = vec![0u8; 13];
+            bytes[0] = 0xA1;
+            bytes[1] = 0xA2;
+            bytes[2..4].copy_from_slice(&u16::from(packet_type).to_le_bytes());
+            assert!(
+                decode_prudp_v0(&bytes, ACCESS_KEY).is_err(),
+                "truncated packet type {packet_type} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn prudp_decoder_rejects_a_truncated_payload_size() {
+        let mut bytes = vec![0u8; 13];
+        bytes[0] = 0xA1;
+        bytes[1] = 0xA2;
+        let type_flags = u16::from(TYPE_DATA) | (u16::from(FLAG_HAS_SIZE) << 4);
+        bytes[2..4].copy_from_slice(&type_flags.to_le_bytes());
+        assert!(decode_prudp_v0(&bytes, ACCESS_KEY).is_err());
     }
 
     #[test]
