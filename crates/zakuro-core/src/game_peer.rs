@@ -114,14 +114,6 @@ pub fn accept_peer(
     socket
         .set_read_timeout(Some(timeout))
         .map_err(|error| format!("could not configure peer Game-stream timeout: {error}"))?;
-    let local_address = match socket
-        .local_addr()
-        .map_err(|error| format!("could not read peer Game-stream socket address: {error}"))?
-    {
-        SocketAddr::V4(address) => address,
-        SocketAddr::V6(_) => return Err("peer Game-stream listener must use IPv4".to_owned()),
-    };
-
     let mut bytes = [0u8; 65_535];
     let (length, peer) = socket
         .recv_from(&mut bytes)
@@ -459,7 +451,7 @@ mod tests {
             assert_eq!(request.source_type, STREAM_TYPE_GAME);
             assert_eq!(request.destination_type, STREAM_TYPE_GAME);
             assert_eq!(request.flags, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE);
-            let mut decrypt = Rc4::new(&[]).unwrap();
+            let mut decrypt = Rc4::new(b"CD&ML").unwrap();
             assert_eq!(decrypt.apply(&request.payload), b"race frame from client");
 
             let ack = PrudpPacket {
@@ -483,7 +475,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let mut encrypt = Rc4::new(&[]).unwrap();
+            let mut encrypt = Rc4::new(b"CD&ML").unwrap();
             let response_payload = encrypt.apply(b"race frame accepted");
             let response = PrudpPacket {
                 packet_type: TYPE_DATA,

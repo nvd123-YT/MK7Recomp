@@ -733,8 +733,8 @@ mod tests {
             );
             assert!(!browse_request.is_empty());
 
-            let mut join_response = Vec::new();
-            test_put_buffer(b"p2p-session-key", &mut join_response);
+            // MK7's 3DS NEX 2.4.3 method returns an empty success body.
+            let join_response = Vec::new();
             let join_request = test_serve_rmc_call(
                 &secure_server,
                 client,
@@ -776,7 +776,7 @@ mod tests {
             );
             assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
 
-            // The matchmake session key authenticates the Game-stream P2P link.
+            // The Game stream uses the default CD&ML payload key; it has no gathering key.
             let mut peer_bytes = [0u8; 65_535];
             let (peer_client, peer_session_id) =
                 test_accept_prudp(&game_peer_server, STREAM_TYPE_GAME, |_| Vec::new());
@@ -785,14 +785,14 @@ mod tests {
             let peer_request = decode_prudp_v0(
                 &peer_bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
-                b"p2p-session-key",
+                b"",
             )
             .unwrap();
             assert_eq!(peer_request.packet_type, TEST_TYPE_DATA);
             assert_eq!(peer_request.session_id, peer_session_id);
             assert_eq!(peer_request.source_type, STREAM_TYPE_GAME);
             assert_eq!(peer_request.destination_type, STREAM_TYPE_GAME);
-            let mut game_decrypt = Rc4::new(b"p2p-session-key").unwrap();
+            let mut game_decrypt = Rc4::new(b"").unwrap();
             assert_eq!(game_decrypt.apply(&peer_request.payload), b"race frame from client");
 
             let peer_ack = PrudpPacket {
@@ -811,12 +811,12 @@ mod tests {
             };
             game_peer_server
                 .send_to(
-                    &encode_prudp_v0(&peer_ack, MK7_PRUDP_ACCESS_KEY, b"p2p-session-key"),
+                    &encode_prudp_v0(&peer_ack, MK7_PRUDP_ACCESS_KEY, b""),
                     peer_client,
                 )
                 .unwrap();
 
-            let mut game_encrypt = Rc4::new(b"p2p-session-key").unwrap();
+            let mut game_encrypt = Rc4::new(b"").unwrap();
             let peer_response = PrudpPacket {
                 packet_type: TEST_TYPE_DATA,
                 flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
@@ -833,7 +833,7 @@ mod tests {
             };
             game_peer_server
                 .send_to(
-                    &encode_prudp_v0(&peer_response, MK7_PRUDP_ACCESS_KEY, b"p2p-session-key"),
+                    &encode_prudp_v0(&peer_response, MK7_PRUDP_ACCESS_KEY, b""),
                     peer_client,
                 )
                 .unwrap();
@@ -842,7 +842,7 @@ mod tests {
             let peer_response_ack = decode_prudp_v0(
                 &peer_bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
-                b"p2p-session-key",
+                b"",
             )
             .unwrap();
             assert_eq!(peer_response_ack.flags, TEST_FLAG_ACK);
