@@ -328,7 +328,7 @@ mod tests {
     use crate::nex_bootstrap::{
         decode_nex_string, decode_prudp_v0, derive_kerberos_key, encode_nex_string,
         encode_prudp_v0, kerberos_decrypt, kerberos_encrypt, MatchmakeSearchCriteria,
-        PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY, STREAM_TYPE_RV, STREAM_TYPE_RV_SECURE,
+        PrudpPacket, Rc4, MK7_PRUDP_ACCESS_KEY, STREAM_TYPE_GAME, STREAM_TYPE_RV, STREAM_TYPE_RV_SECURE,
     };
     use crate::prudp_client::connection_signature;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
