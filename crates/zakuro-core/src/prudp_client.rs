@@ -789,7 +789,7 @@ mod tests {
 
         server_thread.join().unwrap();
         receive.recv().unwrap();
-        assert_ne!(session.client_session_id, 0);
+        // PRUDP v0 permits a randomly selected session ID of zero.
         assert_eq!(session.server_session_id, session.client_session_id);
         assert_eq!(
             session.client_connection_signature,
