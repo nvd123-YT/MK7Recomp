@@ -11,16 +11,15 @@ use crate::prudp_client::{connection_signature, establish_session, new_payload_c
 
 const LOCAL_VIRTUAL_PORT: u8 = 1;
 
-/// A direct peer connection established with a Matchmake Join session key.
+/// A direct peer connection on MK7's Game stream (PRUDP stream type 9).
 ///
-/// This is the Game stream (PRUDP stream type 9), separate from the secure
-/// Rendez-Vous server connection (stream type 10). session_key is the
-/// per-gathering key returned by JoinMatchmakeSession.
+/// The P2P link is separate from the authenticated secure Rendez-Vous
+/// connection. MK7's 3DS Game stream uses the default CD&ML RC4 payload key
+/// and an empty PRUDP session-key input; it does not use a gathering key.
 pub struct GamePeerSession {
     socket: UdpSocket,
     server: SocketAddrV4,
     session: PrudpSession,
-    session_key: Vec<u8>,
     outgoing_cipher: Rc4,
     incoming_cipher: Rc4,
 }
@@ -32,7 +31,6 @@ pub struct GamePeerSession {
 /// cannot be established, the caller gets the underlying transport error.
 pub fn connect_to_peer(
     station: &Station,
-    session_key: &[u8],
     timeout: Duration,
 ) -> Result<GamePeerSession, String> {
     if station.stream_type != STREAM_TYPE_GAME {
@@ -40,9 +38,6 @@ pub fn connect_to_peer(
             "peer StationURL uses stream type {}, expected Game stream type {}",
             station.stream_type, STREAM_TYPE_GAME
         ));
-    }
-    if session_key.is_empty() {
-        return Err("peer Game-stream session key is empty".to_owned());
     }
     if station.port == 0 || station.stream_id > 15 {
         return Err("peer StationURL has an invalid port or stream ID".to_owned());
@@ -60,7 +55,7 @@ pub fn connect_to_peer(
 
     let socket = UdpSocket::bind("0.0.0.0:0")
         .map_err(|error| format!("could not bind peer Game-stream UDP socket: {error}"))?;
-    connect_to_peer_with_socket(socket, station, server, session_key, timeout)
+    connect_to_peer_with_socket(socket, station, server, timeout)
 }
 
 /// Connect using an already-bound UDP socket. Use this when the socket's public
@@ -69,11 +64,10 @@ pub fn connect_to_peer_with_socket(
     socket: UdpSocket,
     station: &Station,
     server: SocketAddrV4,
-    session_key: &[u8],
     timeout: Duration,
 ) -> Result<GamePeerSession, String> {
-    if station.stream_type != STREAM_TYPE_GAME || session_key.is_empty() {
-        return Err("peer station or session key is invalid".to_owned());
+    if station.stream_type != STREAM_TYPE_GAME {
+        return Err("peer station is not a Game stream".to_owned());
     }
     let session = establish_session(
         &socket,
@@ -84,13 +78,12 @@ pub fn connect_to_peer_with_socket(
         &[],
         timeout,
     )?;
-    let (outgoing_cipher, incoming_cipher) = new_payload_ciphers(session_key)?;
+    let (outgoing_cipher, incoming_cipher) = new_payload_ciphers(&[])?;
 
     Ok(GamePeerSession {
         socket,
         server,
         session,
-        session_key: session_key.to_vec(),
         outgoing_cipher,
         incoming_cipher,
     })
@@ -109,12 +102,8 @@ pub fn connect_to_peer_with_socket(
 pub fn accept_peer(
     socket: UdpSocket,
     advertised_address: SocketAddrV4,
-    session_key: &[u8],
     timeout: Duration,
 ) -> Result<(GamePeerSession, SocketAddrV4), String> {
-    if session_key.is_empty() {
-        return Err("peer Game-stream session key is empty".to_owned());
-    }
     if advertised_address.port() == 0 || advertised_address.ip().is_unspecified() {
         return Err("peer Game-stream advertised address must be a concrete IPv4 endpoint".to_owned());
     }
@@ -225,7 +214,7 @@ pub fn accept_peer(
         )
         .map_err(|error| format!("could not send peer Game-stream CONNECT acknowledgement: {error}"))?;
 
-    let (outgoing_cipher, incoming_cipher) = new_payload_ciphers(session_key)?;
+    let (outgoing_cipher, incoming_cipher) = new_payload_ciphers(&[])?;
     let session = PrudpSession {
         client_session_id: connect.session_id,
         server_session_id: connect.session_id,
@@ -244,7 +233,6 @@ pub fn accept_peer(
             socket,
             server: peer,
             session,
-            session_key: session_key.to_vec(),
             outgoing_cipher,
             incoming_cipher,
         },
@@ -267,7 +255,7 @@ impl GamePeerSession {
             &self.socket,
             self.server,
             payload,
-            &self.session_key,
+            &[],
             &mut self.outgoing_cipher,
             &mut self.incoming_cipher,
             timeout,
@@ -311,6 +299,8 @@ mod tests {
             stream_id: 1,
             stream_type: STREAM_TYPE_GAME,
             principal_id: 42,
+            rv_connection_id: 88,
+            raw_url: String::new(),
             connection_id: 77,
         }
     }
@@ -325,14 +315,14 @@ mod tests {
             principal_id: 42,
             connection_id: 77,
         };
-        assert!(connect_to_peer(&station, b"key", Duration::from_millis(10))
+        assert!(connect_to_peer(&station, Duration::from_millis(10))
             .err()
             .unwrap()
             .contains("expected Game stream type"));
     }
 
     #[test]
-    fn rejects_an_empty_peer_session_key() {
+    fn game_stream_uses_the_default_cdml_payload_key() {
         let station = Station {
             address: "127.0.0.1".to_owned(),
             port: 1234,
@@ -341,10 +331,9 @@ mod tests {
             principal_id: 42,
             connection_id: 77,
         };
-        assert!(connect_to_peer(&station, &[], Duration::from_millis(10))
-            .err()
-            .unwrap()
-            .contains("session key is empty"));
+        let (mut outgoing, mut incoming) = new_payload_ciphers(&[]).unwrap();
+        let encrypted = outgoing.apply(b"MK7 PIA peer data");
+        assert_eq!(incoming.apply(&encrypted), b"MK7 PIA peer data");
     }
 
     #[test]
@@ -355,13 +344,10 @@ mod tests {
             _ => panic!("Game peer listener did not bind IPv4"),
         };
         let station = game_station(host_address);
-        let key = b"shared MK7 gathering key".to_vec();
-        let host_key = key.clone();
-
         // Host receives and answers the joining peer's PRUDP SYN/CONNECT.
         let host_thread = thread::spawn(move || {
             let (mut host, remote) =
-                accept_peer(listener, host_address, &host_key, Duration::from_secs(2)).unwrap();
+                accept_peer(listener, host_address, Duration::from_secs(2)).unwrap();
             assert_eq!(remote.ip(), &Ipv4Addr::LOCALHOST);
             assert!(host.is_connected());
             host.exchange_reliable(b"frame from host", Duration::from_secs(2))
@@ -370,7 +356,6 @@ mod tests {
 
         let mut client = connect_to_peer(
             &station,
-            &key,
             Duration::from_secs(2),
         )
         .unwrap();
@@ -385,7 +370,7 @@ mod tests {
 
 
     #[test]
-    fn game_stream_handshake_and_keyed_reliable_exchange_work() {
+    fn game_stream_handshake_and_default_cdml_reliable_exchange_work() {
         let server = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         server
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -395,8 +380,6 @@ mod tests {
             _ => panic!("Game peer server did not bind IPv4"),
         };
 
-        let session_key = b"mk7-gathering-session-key".to_vec();
-        let server_key = session_key.clone();
         let (send, receive) = mpsc::channel();
 
         let server_thread = thread::spawn(move || {
@@ -469,14 +452,14 @@ mod tests {
             let request = decode_prudp_v0(
                 &bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
-                &server_key,
+                &[],
             )
             .unwrap();
             assert_eq!(request.packet_type, TYPE_DATA);
             assert_eq!(request.source_type, STREAM_TYPE_GAME);
             assert_eq!(request.destination_type, STREAM_TYPE_GAME);
             assert_eq!(request.flags, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE);
-            let mut decrypt = Rc4::new(&server_key).unwrap();
+            let mut decrypt = Rc4::new(&[]).unwrap();
             assert_eq!(decrypt.apply(&request.payload), b"race frame from client");
 
             let ack = PrudpPacket {
@@ -495,12 +478,12 @@ mod tests {
             };
             server
                 .send_to(
-                    &encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, &server_key),
+                    &encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, &[]),
                     client_address,
                 )
                 .unwrap();
 
-            let mut encrypt = Rc4::new(&server_key).unwrap();
+            let mut encrypt = Rc4::new(&[]).unwrap();
             let response_payload = encrypt.apply(b"race frame accepted");
             let response = PrudpPacket {
                 packet_type: TYPE_DATA,
@@ -518,7 +501,7 @@ mod tests {
             };
             server
                 .send_to(
-                    &encode_prudp_v0(&response, MK7_PRUDP_ACCESS_KEY, &server_key),
+                    &encode_prudp_v0(&response, MK7_PRUDP_ACCESS_KEY, &[]),
                     client_address,
                 )
                 .unwrap();
@@ -527,7 +510,7 @@ mod tests {
             let response_ack = decode_prudp_v0(
                 &bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
-                &server_key,
+                &[],
             )
             .unwrap();
             assert_eq!(response_ack.flags, FLAG_ACK);
@@ -537,7 +520,6 @@ mod tests {
 
         let mut peer = connect_to_peer(
             &game_station(server_address),
-            &session_key,
             Duration::from_millis(250),
         )
         .unwrap();
