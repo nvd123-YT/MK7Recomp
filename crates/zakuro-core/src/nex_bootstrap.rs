@@ -854,7 +854,9 @@ mod tests {
         let packet = PrudpPacket {
             packet_type: TYPE_DISCONNECT,
             flags: FLAG_ACK,
+            source_type: 10,
             source_port: 1,
+            destination_type: 10,
             destination_port: 2,
             session_id: 3,
             packet_id: 4,

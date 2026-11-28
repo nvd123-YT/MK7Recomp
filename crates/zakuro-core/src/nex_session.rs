@@ -18,6 +18,7 @@ const TICKET_GRANTING_PROTOCOL: u8 = 0x0A;
 const TICKET_GRANTING_LOGIN_EX: u32 = 0x02;
 const MK7_SESSION_KEY_LENGTH: usize = 32;
 const CLIENT_VIRTUAL_PORT: u8 = 1;
+const AUTHENTICATION_STREAM_TYPE: u8 = 2;
 
 /// A completed LoginEx plus secure PRUDP session.
 ///
@@ -56,6 +57,7 @@ pub fn connect(
         address: authentication_address.ip().to_string(),
         port: authentication_address.port(),
         stream_id: 1,
+        stream_type: AUTHENTICATION_STREAM_TYPE,
         principal_id: 0,
         connection_id: 0,
     };
@@ -65,6 +67,7 @@ pub fn connect(
     let mut authentication_session = establish_session(
         &authentication_socket,
         authentication_address,
+        authentication_station.stream_type,
         CLIENT_VIRTUAL_PORT,
         authentication_station.stream_id,
         &[],
@@ -124,6 +127,7 @@ pub fn connect(
     let secure_session = establish_session(
         &secure_socket,
         secure_address,
+        login.secure_station.stream_type,
         CLIENT_VIRTUAL_PORT,
         login.secure_station.stream_id,
         &connect_payload,
@@ -344,7 +348,9 @@ mod tests {
         let syn_ack = PrudpPacket {
             packet_type: TEST_TYPE_SYN,
             flags: TEST_FLAG_ACK | TEST_FLAG_HAS_SIZE,
+            source_type: syn.destination_type,
             source_port: syn.destination_port,
+            destination_type: syn.source_type,
             destination_port: syn.source_port,
             session_id: 0,
             packet_id: 0,
@@ -371,7 +377,9 @@ mod tests {
         let connect_ack = PrudpPacket {
             packet_type: TEST_TYPE_CONNECT,
             flags: TEST_FLAG_ACK | TEST_FLAG_HAS_SIZE,
+            source_type: connect.destination_type,
             source_port: connect.destination_port,
+            destination_type: connect.source_type,
             destination_port: connect.source_port,
             session_id: connect.session_id,
             packet_id: 1,
@@ -431,7 +439,9 @@ mod tests {
         let ack = PrudpPacket {
             packet_type: TEST_TYPE_DATA,
             flags: TEST_FLAG_ACK,
+            source_type: request.destination_type,
             source_port: request.destination_port,
+            destination_type: request.source_type,
             destination_port: request.source_port,
             session_id,
             packet_id: request.packet_id,
@@ -457,7 +467,9 @@ mod tests {
         let response = PrudpPacket {
             packet_type: TEST_TYPE_DATA,
             flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
+            source_type: request.destination_type,
             source_port: request.destination_port,
+            destination_type: request.source_type,
             destination_port: request.source_port,
             session_id,
             packet_id: response_packet_id,
@@ -517,7 +529,7 @@ mod tests {
         let encrypted_ticket = kerberos_encrypt(&user_key, &outer_ticket).unwrap();
 
         let station_url = format!(
-            "prudp:/address=127.0.0.1;port={};sid=1;PID={};CID=77;type=1",
+            "prudp:/address=127.0.0.1;port={};sid=1;stream=10;PID={};CID=77;type=1",
             secure_address.port(),
             target_principal_id,
         );
@@ -610,7 +622,7 @@ mod tests {
             let mut urls_response = Vec::new();
             urls_response.extend_from_slice(&1u32.to_le_bytes());
             encode_nex_string(
-                "prudp:/address=127.0.0.1;port=3456;sid=1;PID=2;CID=77;type=1",
+                "prudp:/address=127.0.0.1;port=3456;sid=1;stream=9;PID=2;CID=77;type=1",
                 &mut urls_response,
             );
             let urls_request = test_serve_rmc_call(
@@ -690,6 +702,7 @@ mod tests {
             address: "invalid.invalid".to_owned(),
             port: 0,
             stream_id: 1,
+            stream_type: 10,
             principal_id: 2,
             connection_id: 3,
         };
@@ -704,6 +717,7 @@ mod tests {
             address: "127.0.0.1".to_owned(),
             port: 1234,
             stream_id: 1,
+            stream_type: 10,
             principal_id: 2,
             connection_id: 3,
         };
