@@ -99,16 +99,24 @@ pub fn connect_to_peer_with_socket(
 
 /// Accept an incoming peer connection on an already-bound Game-stream UDP socket.
 ///
+/// advertised_address must be the IPv4 address and mapped port published in
+/// the host's StationURL (for example, the mapping found by the NEX/NAT layer).
+/// It can differ from socket.local_addr() when the host is behind NAT.
+///
 /// The host side responds to the remote player's SYN and CONNECT packets,
 /// then returns a normal bidirectional GamePeerSession. Use this for the host
 /// role; the joining peer uses connect_to_peer().
 pub fn accept_peer(
     socket: UdpSocket,
+    advertised_address: SocketAddrV4,
     session_key: &[u8],
     timeout: Duration,
 ) -> Result<(GamePeerSession, SocketAddrV4), String> {
     if session_key.is_empty() {
         return Err("peer Game-stream session key is empty".to_owned());
+    }
+    if advertised_address.port() == 0 || advertised_address.ip().is_unspecified() {
+        return Err("peer Game-stream advertised address must be a concrete IPv4 endpoint".to_owned());
     }
     if timeout.is_zero() {
         return Err("peer Game-stream handshake timeout must be greater than zero".to_owned());
@@ -149,7 +157,9 @@ pub fn accept_peer(
     }
 
     let peer_signature = connection_signature(peer);
-    let server_signature = connection_signature(local_address);
+    // This must be the externally advertised mapping used in the host's
+    // StationURL, not necessarily the socket's private bind address.
+    let server_signature = connection_signature(advertised_address);
     let syn_ack = PrudpPacket {
         packet_type: 0,
         flags: 0x01 | 0x08,
@@ -351,7 +361,7 @@ mod tests {
         // Host receives and answers the joining peer's PRUDP SYN/CONNECT.
         let host_thread = thread::spawn(move || {
             let (mut host, remote) =
-                accept_peer(listener, &host_key, Duration::from_secs(2)).unwrap();
+                accept_peer(listener, host_address, &host_key, Duration::from_secs(2)).unwrap();
             assert_eq!(remote.ip(), &Ipv4Addr::LOCALHOST);
             assert!(host.is_connected());
             host.exchange_reliable(b"frame from host", Duration::from_secs(2))
