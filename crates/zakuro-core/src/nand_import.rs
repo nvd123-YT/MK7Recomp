@@ -742,9 +742,8 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let mut random = [0u8; 8];
         getrandom::fill(&mut random).unwrap();
-        let path = std::env::temp_dir().join(format!("mk7-nand-import-{}", format_mac([
-            random[0], random[1], random[2], random[3], random[4], random[5]
-        ])));
+        let suffix = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let path = std::env::temp_dir().join(format!("mk7-nand-import-{suffix}"));
         fs::create_dir(&path).unwrap();
         path
     }
@@ -753,7 +752,7 @@ mod tests {
     fn parses_godmode9_nand_and_embedded_essential_backup() {
         let prefix = fake_nand_prefix();
         let report = parse_prefix("NAND.bin", PREFIX_SIZE as u64, &prefix).unwrap();
-        assert_eq!(report.console_model, "Old 3DS");
+        assert_eq!(report.console_model, "Old 3DS (CTR)");
         assert_eq!(report.region, "USA");
         assert_eq!(report.serial_number, "CTR1234567");
     }
@@ -859,7 +858,7 @@ mod tests {
         fs::create_dir_all(data_dir.join("sysdata")).unwrap();
         fs::write(data_dir.join("sysdata/LocalFriendCodeSeed_B"), b"existing").unwrap();
 
-        assert!(import_nand_backup(&nand, &data_dir).unwrap_err().contains("already exists"));
+        assert!(import_nand_backup(&nand, &data_dir).unwrap_err().contains("already contains different system data"));
         assert_eq!(fs::read(data_dir.join("sysdata/LocalFriendCodeSeed_B")).unwrap(), b"existing");
 
         fs::remove_dir_all(directory).unwrap();
