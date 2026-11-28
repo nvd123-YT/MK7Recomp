@@ -30,6 +30,7 @@ pub struct Station {
     pub address: String,
     pub port: u16,
     pub stream_id: u8,
+    pub stream_type: u8,
     pub principal_id: u32,
     pub connection_id: u32,
 }
@@ -38,7 +39,9 @@ pub struct Station {
 pub struct PrudpPacket {
     pub packet_type: u8,
     pub flags: u8,
+    pub source_type: u8,
     pub source_port: u8,
+    pub destination_type: u8,
     pub destination_port: u8,
     pub session_id: u8,
     pub packet_id: u16,
@@ -147,8 +150,8 @@ pub fn encode_prudp_v0(
     session_key: &[u8],
 ) -> Vec<u8> {
     let mut output = Vec::with_capacity(20 + packet.payload.len());
-    output.push(packet.source_port | (10 << 4));
-    output.push(packet.destination_port | (10 << 4));
+    output.push((packet.source_type << 4) | (packet.source_port & 0x0f));
+    output.push((packet.destination_type << 4) | (packet.destination_port & 0x0f));
     output.extend_from_slice(&(u16::from(packet.packet_type) | (u16::from(packet.flags) << 4)).to_le_bytes());
     output.push(packet.session_id);
     let signature = match packet.packet_type {
@@ -261,7 +264,9 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
     Ok(PrudpPacket {
         packet_type,
         flags,
+        source_type: source >> 4,
         source_port: source & 0x0f,
+        destination_type: destination >> 4,
         destination_port: destination & 0x0f,
         session_id,
         packet_id,
@@ -718,6 +723,7 @@ pub fn parse_station_url(value: &str) -> Result<Station, String> {
         address: get("address")?.to_owned(),
         port: get("port")?.parse().map_err(|_| "NEX station URL port is invalid".to_owned())?,
         stream_id: get("sid")?.parse().map_err(|_| "NEX station URL stream ID is invalid".to_owned())?,
+        stream_type: get("stream")?.parse().map_err(|_| "NEX station URL stream type is invalid".to_owned())?,
         principal_id: get("PID")?.parse().map_err(|_| "NEX station URL principal ID is invalid".to_owned())?,
         connection_id: get("CID")?.parse().map_err(|_| "NEX station URL connection ID is invalid".to_owned())?,
     })
@@ -803,7 +809,9 @@ mod tests {
         let packet = PrudpPacket {
             packet_type: TYPE_DATA,
             flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+            source_type: 10,
             source_port: 1,
+            destination_type: 10,
             destination_port: 2,
             session_id: 7,
             packet_id: 42,
@@ -865,7 +873,9 @@ mod tests {
         let packet = PrudpPacket {
             packet_type: TYPE_CONNECT,
             flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+            source_type: 10,
             source_port: 1,
+            destination_type: 10,
             destination_port: 1,
             session_id: 7,
             packet_id: 1,
@@ -1061,7 +1071,7 @@ mod tests {
         let mut urls = Vec::new();
         urls.extend_from_slice(&1u32.to_le_bytes());
         encode_nex_string(
-            "prudp:/address=127.0.0.1;port=1234;sid=1;PID=2;CID=3",
+            "prudp:/address=127.0.0.1;port=1234;sid=1;stream=10;PID=2;CID=3",
             &mut urls,
         );
         let stations = decode_station_url_list(&urls).unwrap();
@@ -1078,10 +1088,11 @@ mod tests {
 
     #[test]
     fn station_url_parser_extracts_secure_server_fields() {
-        let station = parse_station_url("prudp:/address=127.0.0.1;port=1234;sid=1;PID=2;CID=3;type=1").unwrap();
+        let station = parse_station_url("prudp:/address=127.0.0.1;port=1234;sid=1;stream=10;PID=2;CID=3;type=1").unwrap();
         assert_eq!(station.address, "127.0.0.1");
         assert_eq!(station.port, 1234);
         assert_eq!(station.stream_id, 1);
+        assert_eq!(station.stream_type, 10);
         assert_eq!(station.principal_id, 2);
         assert_eq!(station.connection_id, 3);
     }
