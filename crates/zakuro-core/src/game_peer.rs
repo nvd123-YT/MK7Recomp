@@ -167,7 +167,8 @@ mod tests {
             connection_id: 77,
         };
         assert!(connect_to_peer(&station, b"key", Duration::from_millis(10))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .contains("expected Game stream type"));
     }
 
@@ -182,7 +183,8 @@ mod tests {
             connection_id: 77,
         };
         assert!(connect_to_peer(&station, &[], Duration::from_millis(10))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .contains("session key is empty"));
     }
 

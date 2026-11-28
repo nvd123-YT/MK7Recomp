@@ -746,12 +746,13 @@ mod tests {
             assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
 
             // The matchmake session key authenticates the Game-stream P2P link.
+            let mut peer_bytes = [0u8; 65_535];
             let (peer_client, peer_session_id) =
                 test_accept_prudp(&game_peer_server, STREAM_TYPE_GAME, |_| Vec::new());
-            let (length, peer_address) = game_peer_server.recv_from(&mut bytes).unwrap();
+            let (length, peer_address) = game_peer_server.recv_from(&mut peer_bytes).unwrap();
             assert_eq!(peer_address, SocketAddr::V4(peer_client));
             let peer_request = decode_prudp_v0(
-                &bytes[..length],
+                &peer_bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
                 b"p2p-session-key",
             )
@@ -806,9 +807,9 @@ mod tests {
                 )
                 .unwrap();
 
-            let (length, _) = game_peer_server.recv_from(&mut bytes).unwrap();
+            let (length, _) = game_peer_server.recv_from(&mut peer_bytes).unwrap();
             let peer_response_ack = decode_prudp_v0(
-                &bytes[..length],
+                &peer_bytes[..length],
                 MK7_PRUDP_ACCESS_KEY,
                 b"p2p-session-key",
             )
