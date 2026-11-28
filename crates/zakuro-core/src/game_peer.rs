@@ -11,6 +11,153 @@ use crate::prudp_client::{connection_signature, establish_session, new_payload_c
 
 const LOCAL_VIRTUAL_PORT: u8 = 1;
 
+const PIA_NAT_PROBE_REQUEST: u8 = 0;
+const PIA_NAT_PROBE_REPLY: u8 = 1;
+
+/// PIA NAT probe datagram, with the variable ID appended on PIA 5.11+.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PiaNatProbeData {
+    pub service_variable_id: u32,
+    pub probe_type: u8,
+    pub system_time: u64,
+    pub variable_id: Option<u32>,
+}
+
+pub fn encode_pia_nat_probe_data(data: PiaNatProbeData) -> Result<Vec<u8>, String> {
+    if !matches!(data.probe_type, PIA_NAT_PROBE_REQUEST | PIA_NAT_PROBE_REPLY | 0xFF) {
+        return Err("PIA NAT probe has an unsupported probe type".to_owned());
+    }
+    let mut output = Vec::with_capacity(if data.variable_id.is_some() { 20 } else { 16 });
+    output.extend_from_slice(&data.service_variable_id.to_be_bytes());
+    output.push(data.probe_type);
+    output.extend_from_slice(&[0; 3]);
+    output.extend_from_slice(&data.system_time.to_be_bytes());
+    if let Some(variable_id) = data.variable_id {
+        output.extend_from_slice(&variable_id.to_be_bytes());
+    }
+    Ok(output)
+}
+
+pub fn decode_pia_nat_probe_data(bytes: &[u8]) -> Result<PiaNatProbeData, String> {
+    if bytes.len() != 16 && bytes.len() != 20 {
+        return Err(format!("PIA NAT probe datagram has invalid size {}", bytes.len()));
+    }
+    let service_variable_id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    let probe_type = bytes[4];
+    if !matches!(probe_type, PIA_NAT_PROBE_REQUEST | PIA_NAT_PROBE_REPLY | 0xFF) {
+        return Err(format!("PIA NAT probe type {probe_type} is invalid"));
+    }
+    if bytes[5..8] != [0; 3] {
+        return Err("PIA NAT probe reserved padding is not zero".to_owned());
+    }
+    let system_time = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+    let variable_id = if bytes.len() == 20 {
+        Some(u32::from_be_bytes(bytes[16..20].try_into().unwrap()))
+    } else {
+        None
+    };
+    Ok(PiaNatProbeData { service_variable_id, probe_type, system_time, variable_id })
+}
+
+/// Bidirectionally punch through NAT using the same UDP socket later used for
+/// the Game-stream PRUDP handshake. include_variable_id selects the PIA
+/// 5.11+ 20-byte form; the legacy form is 16 bytes.
+pub fn punch_through_nat(
+    socket: &UdpSocket,
+    local_station: &Station,
+    peer_station: &Station,
+    timeout: Duration,
+    include_variable_id: bool,
+) -> Result<Duration, String> {
+    if timeout.is_zero() {
+        return Err("PIA NAT probe timeout must be greater than zero".to_owned());
+    }
+    if local_station.stream_type != STREAM_TYPE_GAME || peer_station.stream_type != STREAM_TYPE_GAME {
+        return Err("PIA NAT probe requires two Game-stream StationURLs".to_owned());
+    }
+    if local_station.rv_connection_id == 0 || peer_station.rv_connection_id == 0 {
+        return Err("PIA NAT probe requires RVCID on both StationURLs".to_owned());
+    }
+    if include_variable_id && (local_station.connection_id == 0 || peer_station.connection_id == 0) {
+        return Err("PIA 5.11+ NAT probe requires CID on both StationURLs".to_owned());
+    }
+    let peer = (peer_station.address.as_str(), peer_station.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("could not resolve PIA peer {}: {error}", peer_station.address))?
+        .find_map(|address| match address {
+            SocketAddr::V4(address) => Some(address),
+            SocketAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("PIA peer {} did not resolve to IPv4", peer_station.address))?;
+    let previous_timeout = socket.read_timeout()
+        .map_err(|error| format!("could not read PIA UDP socket timeout: {error}"))?;
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    let system_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_nanos() as u64;
+    let request = encode_pia_nat_probe_data(PiaNatProbeData {
+        service_variable_id: peer_station.rv_connection_id,
+        probe_type: PIA_NAT_PROBE_REQUEST,
+        system_time,
+        variable_id: if include_variable_id { Some(peer_station.connection_id) } else { None },
+    })?;
+    let mut got_peer_request = false;
+    let mut got_reply = false;
+    let mut last_sent: Option<std::time::Instant> = None;
+    let result = (|| {
+        let mut buffer = [0u8; 256];
+        while std::time::Instant::now() < deadline {
+            let now = std::time::Instant::now();
+            if last_sent.map_or(true, |last| now.duration_since(last) >= Duration::from_millis(200)) {
+                socket.send_to(&request, peer)
+                    .map_err(|error| format!("could not send PIA NAT probe: {error}"))?;
+                last_sent = Some(now);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            socket.set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
+                .map_err(|error| format!("could not set PIA NAT probe timeout: {error}"))?;
+            match socket.recv_from(&mut buffer) {
+                Ok((length, source)) => {
+                    if source != SocketAddr::V4(peer) { continue; }
+                    let probe = match decode_pia_nat_probe_data(&buffer[..length]) {
+                        Ok(probe) => probe,
+                        Err(_) => continue,
+                    };
+                    let addressed_to_us = probe.service_variable_id == local_station.rv_connection_id
+                        && (!include_variable_id || probe.variable_id == Some(local_station.connection_id));
+                    if !addressed_to_us { continue; }
+                    match probe.probe_type {
+                        PIA_NAT_PROBE_REQUEST => {
+                            got_peer_request = true;
+                            let reply = encode_pia_nat_probe_data(PiaNatProbeData {
+                                service_variable_id: peer_station.rv_connection_id,
+                                probe_type: PIA_NAT_PROBE_REPLY,
+                                system_time: probe.system_time,
+                                variable_id: if include_variable_id { Some(peer_station.connection_id) } else { None },
+                            })?;
+                            socket.send_to(&reply, source)
+                                .map_err(|error| format!("could not send PIA NAT probe reply: {error}"))?;
+                        }
+                        PIA_NAT_PROBE_REPLY if probe.system_time == system_time => got_reply = true,
+                        _ => {},
+                    }
+                    if got_peer_request && got_reply { return Ok(started.elapsed()); }
+                }
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+                Err(error) => return Err(format!("could not receive PIA NAT probe: {error}")),
+            }
+        }
+        Err(format!("PIA NAT hole punch timed out (peer request received: {got_peer_request}, reply received: {got_reply})"))
+    })();
+    let restore = socket.set_read_timeout(previous_timeout);
+    match (result, restore) {
+        (Ok(rtt), Ok(())) => Ok(rtt),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("PIA NAT probe succeeded but socket timeout could not be restored: {error}")),
+    }
+}
+
 /// A direct peer connection on MK7's Game stream (PRUDP stream type 9).
 ///
 /// The P2P link is separate from the authenticated secure Rendez-Vous
@@ -297,6 +444,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pia_nat_probe_data_encodes_legacy_and_modern_forms() {
+        let legacy = PiaNatProbeData { service_variable_id: 0x0102_0304, probe_type: 0, system_time: 0x0102_0304_0506_0708, variable_id: None };
+        let bytes = encode_pia_nat_probe_data(legacy).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[..4], &[1, 2, 3, 4]);
+        assert_eq!(decode_pia_nat_probe_data(&bytes).unwrap(), legacy);
+        let modern = PiaNatProbeData { variable_id: Some(0xA1B2_C3D4), ..legacy };
+        let bytes = encode_pia_nat_probe_data(modern).unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(&bytes[16..20], &[0xA1, 0xB2, 0xC3, 0xD4]);
+        assert_eq!(decode_pia_nat_probe_data(&bytes).unwrap(), modern);
+        assert!(decode_pia_nat_probe_data(&bytes[..15]).is_err());
+    }
+
+    #[test]
+    fn two_peers_complete_bidirectional_pia_nat_probes_on_their_bound_sockets() {
+        let a = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let b = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let a_addr = match a.local_addr().unwrap() { SocketAddr::V4(v) => v, _ => unreachable!() };
+        let b_addr = match b.local_addr().unwrap() { SocketAddr::V4(v) => v, _ => unreachable!() };
+        let a_station = Station { address: a_addr.ip().to_string(), port: a_addr.port(), stream_id: 1, stream_type: STREAM_TYPE_GAME, principal_id: 41, rv_connection_id: 0x1111, raw_url: String::new(), connection_id: 0xAAAA };
+        let b_station = Station { address: b_addr.ip().to_string(), port: b_addr.port(), stream_id: 1, stream_type: STREAM_TYPE_GAME, principal_id: 42, rv_connection_id: 0x2222, raw_url: String::new(), connection_id: 0xBBBB };
+        let a_thread = thread::spawn(move || punch_through_nat(&a, &a_station, &b_station, Duration::from_secs(2), true).unwrap());
+        let b_thread = thread::spawn(move || punch_through_nat(&b, &b_station, &a_station, Duration::from_secs(2), true).unwrap());
+        assert!(a_thread.join().unwrap() < Duration::from_secs(2));
+        assert!(b_thread.join().unwrap() < Duration::from_secs(2));
+    }
     #[test]
     fn rejects_a_non_game_station() {
         let station = Station {
