@@ -1229,6 +1229,7 @@ mod tests {
         encode_nex_string("MatchmakeSession", &mut response);
         let mut object = Vec::new();
         object.extend_from_slice(&1234u32.to_le_bytes());
+        response.extend_from_slice(&((object.len() + 4) as u32).to_le_bytes());
         encode_buffer(&object, &mut response);
         let decoded = decode_matchmake_auto_response(&response).unwrap();
         assert_eq!(decoded.object_id, "MatchmakeSession");

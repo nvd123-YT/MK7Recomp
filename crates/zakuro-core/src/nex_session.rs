@@ -601,17 +601,59 @@ mod tests {
             let mut incoming_cipher = Rc4::new(&server_session_key).unwrap();
             let mut outgoing_cipher = Rc4::new(&server_session_key).unwrap();
 
-            let mut browse_response = Vec::new();
-            browse_response.extend_from_slice(&0u32.to_le_bytes());
-            let browse_request = test_serve_rmc_call(
+            // MK7's automatic matchmaking method: one search criteria, one
+            // empty GatheringHolder, then the in-game matchmaking message.
+            let mut auto_response = Vec::new();
+            encode_nex_string("MatchmakeSession", &mut auto_response);
+            let mut auto_object = Vec::new();
+            auto_object.extend_from_slice(&1234u32.to_le_bytes());
+            auto_response.extend_from_slice(&((auto_object.len() + 4) as u32).to_le_bytes());
+            test_put_buffer(&auto_object, &mut auto_response);
+
+            let auto_request = test_serve_rmc_call(
                 &secure_server,
                 client,
                 session_id,
                 2,
                 1,
                 0x6D,
-                0x2A,
+                0x0F,
                 1,
+                &server_session_key,
+                &mut incoming_cipher,
+                &mut outgoing_cipher,
+                &auto_response,
+            );
+            let mut auto_cursor = 0usize;
+            assert_eq!(test_read_u32(&auto_request, &mut auto_cursor), 1);
+            assert_eq!(test_read_u32(&auto_request, &mut auto_cursor), 6);
+            for _ in 0..6 {
+                assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "");
+            }
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "");
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "");
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "");
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "1");
+            assert_eq!(auto_request[auto_cursor..auto_cursor + 3], [1, 1, 0]);
+            auto_cursor += 3;
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "Gathering");
+            let holder_length = test_read_u32(&auto_request, &mut auto_cursor) as usize;
+            let gathering = test_take_buffer(&auto_request, &mut auto_cursor);
+            assert_eq!(holder_length, gathering.len() + 4);
+            assert_eq!(decode_nex_string(&auto_request, &mut auto_cursor).unwrap(), "MK7 public race");
+            assert_eq!(auto_cursor, auto_request.len());
+
+            let mut browse_response = Vec::new();
+            browse_response.extend_from_slice(&0u32.to_le_bytes());
+            let browse_request = test_serve_rmc_call(
+                &secure_server,
+                client,
+                session_id,
+                3,
+                2,
+                0x6D,
+                0x2A,
+                2,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -625,11 +667,11 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                4,
                 3,
-                2,
                 0x6D,
                 0x07,
-                2,
+                3,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -647,17 +689,18 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                5,
                 4,
-                3,
                 0x15,
                 0x29,
-                3,
+                4,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
                 &urls_response,
             );
             assert_eq!(u32::from_le_bytes(urls_request[..4].try_into().unwrap()), 1234);
+
         });
 
         let locator = format!("127.0.0.1:{}", auth_address.port());
@@ -674,6 +717,16 @@ mod tests {
 
         assert_eq!(online.principal_id(), principal_id);
         assert!(online.is_connected());
+        let auto_result = online
+            .auto_matchmake(
+                &MatchmakeSearchCriteria::default(),
+                "MK7 public race",
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(auto_result.object_id, "MatchmakeSession");
+        assert_eq!(auto_result.gathering_id, 1234);
+
         let sessions = online
             .browse_matchmake_sessions(
                 &MatchmakeSearchCriteria::default(),
@@ -685,12 +738,12 @@ mod tests {
         assert!(sessions.is_empty());
 
         let session_key_from_join = online
-            .join_matchmake_session(1234, "hello race", Duration::from_secs(2))
+            .join_matchmake_session(auto_result.gathering_id, "hello race", Duration::from_secs(2))
             .unwrap();
         assert_eq!(session_key_from_join, b"p2p-session-key");
 
         let urls = online
-            .get_matchmake_session_urls(1234, Duration::from_secs(2))
+            .get_matchmake_session_urls(auto_result.gathering_id, Duration::from_secs(2))
             .unwrap();
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0].address, "127.0.0.1");
