@@ -26,6 +26,11 @@ const AUTHENTICATION_STREAM_TYPE: u8 = STREAM_TYPE_RV;
 /// matchmaking, NAT traversal, and game-server requests reuse the same state.
 pub struct NexOnlineSession {
     socket: UdpSocket,
+    game_socket: Option<UdpSocket>,
+    local_game_station: Option<Station>,
+    public_game_station: Option<Station>,
+    local_friend_code: u64,
+    nex_token: String,
     server: SocketAddrV4,
     session: PrudpSession,
     ticket: ClientKerberosTicket,
@@ -142,6 +147,11 @@ pub fn connect(
 
     Ok(NexOnlineSession {
         socket: secure_socket,
+        game_socket: None,
+        local_game_station: None,
+        public_game_station: None,
+        local_friend_code,
+        nex_token: nex_token.to_owned(),
         server: secure_address,
         session: secure_session,
         ticket,
@@ -179,6 +189,71 @@ impl NexOnlineSession {
     }
 
 
+    /// Bind a Game-stream socket, discover its public mapping with STUN, and
+    /// register both local and public StationURLs with SecureConnection::RegisterEx.
+    pub fn register_game_station(&mut self, timeout: Duration) -> Result<Station, String> {
+        if timeout.is_zero() { return Err("Game station registration timeout must be greater than zero".to_owned()); }
+        if let Some(station) = &self.public_game_station { return Ok(station.clone()); }
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|error| format!("could not bind Game-stream UDP socket: {error}"))?;
+        let stun_servers = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+        let mut resolved_servers = Vec::new();
+        for server in stun_servers {
+            if let Ok(addresses) = server.to_socket_addrs() {
+                if let Some(address) = addresses.into_iter().find(|addr| matches!(addr, SocketAddr::V4(_))) {
+                    resolved_servers.push(address);
+                }
+            }
+        }
+        if resolved_servers.is_empty() { return Err("could not resolve an IPv4 STUN server for Game-stream registration".to_owned()); }
+        let route_probe = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|error| format!("could not create route probe socket: {error}"))?;
+        route_probe.connect(resolved_servers[0])
+            .map_err(|error| format!("could not select the Game-stream network route: {error}"))?;
+        let local_ip = match route_probe.local_addr().map_err(|e| e.to_string())? {
+            SocketAddr::V4(address) => *address.ip(),
+            SocketAddr::V6(_) => return Err("Game-stream registration currently requires IPv4".to_owned()),
+        };
+        let local_port = match socket.local_addr().map_err(|e| e.to_string())? {
+            SocketAddr::V4(address) => address.port(),
+            SocketAddr::V6(_) => return Err("Game-stream socket did not bind IPv4".to_owned()),
+        };
+        let previous_timeout = socket.read_timeout().map_err(|e| e.to_string())?;
+        let mut mappings = Vec::new();
+        for server in resolved_servers.iter().copied() {
+            let mapped = crate::services::frd::stun_binding(&socket, server, 0).map(|pair| pair.0);
+            let _ = socket.set_read_timeout(previous_timeout);
+            if let Some(SocketAddr::V4(address)) = mapped { mappings.push(address); }
+        }
+        if mappings.is_empty() {
+            return Err("STUN did not return a public mapping for the bound Game-stream socket".to_owned());
+        }
+        let public_address = mappings[0];
+        let mapping_type = if mappings.iter().all(|mapping| *mapping == public_address) && mappings.len() > 1 { 1u8 } else if mappings.len() > 1 { 2u8 } else { 0u8 };
+        let nat_filtering = 0u8; // Unknown until the RFC 3489 change-request tests succeed.
+        let mut cid_bytes = [0u8; 4];
+        getrandom::fill(&mut cid_bytes).map_err(|e| format!("could not generate Game-stream CID: {e}"))?;
+        let mut cid = u32::from_le_bytes(cid_bytes);
+        if cid == 0 { cid = 1; }
+        let common = format!("sid=1;stream={};PID={};CID={};natm={};natf={}", crate::nex_bootstrap::STREAM_TYPE_GAME, self.principal_id, cid, mapping_type, nat_filtering);
+        let local_url = format!("prudp:/address={};port={};{};type=1", local_ip, local_port, common);
+        let public_url = format!("prudp:/address={};port={};{};type=3", public_address.ip(), public_address.port(), common);
+        let body = crate::nex_bootstrap::encode_secure_register_ex_request(
+            &[local_url.clone(), public_url],
+            self.local_friend_code,
+            &self.nex_token,
+        )?;
+        let response = self.request(0x0B, 0x04, &body, timeout)?;
+        let (connection_id, public_station) = crate::nex_bootstrap::decode_secure_register_ex_response(&response.body)?;
+        let local_station_url = format!("{};RVCID={}", local_url, connection_id);
+        let local_station = crate::nex_bootstrap::parse_station_url(&local_station_url)?;
+        self.game_socket = Some(socket);
+        self.local_game_station = Some(local_station);
+        self.public_game_station = Some(public_station.clone());
+        Ok(public_station)
+    }
+
+    pub fn registered_game_station(&self) -> Option<&Station> { self.public_game_station.as_ref() }
     /// Browse MK7's Matchmake Extension for sessions matching the supplied
     /// game-specific search fields.
     pub fn browse_matchmake_sessions(
@@ -280,6 +355,7 @@ impl NexOnlineSession {
         if result.host_pid == 0 {
             return Err("automatic matchmaking returned a zero host PID".to_owned());
         }
+        self.register_game_station(timeout)?;
         self.join_matchmake_session(result.gathering_id, message, timeout)?;
         let stations = self.get_matchmake_session_urls(result.gathering_id, timeout)?;
         let host = stations

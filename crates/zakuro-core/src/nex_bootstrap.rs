@@ -1281,6 +1281,38 @@ mod tests {
     }
 
     #[test]
+    fn secure_register_ex_encodes_station_url_list_and_account_extra_info() {
+        let local = "prudp:/address=192.168.1.20;port=5000;sid=1;stream=9;PID=42;CID=77;natm=0;natf=0;type=1".to_owned();
+        let public = "prudp:/address=203.0.113.10;port=6000;sid=1;stream=9;PID=42;CID=77;natm=0;natf=0;type=3".to_owned();
+        let body = encode_secure_register_ex_request(&[local.clone(), public.clone()], 0x1122_3344_5566_7788, "nex-token").unwrap();
+        let mut cursor = 0usize;
+        assert_eq!(read_u32(&body, &mut cursor).unwrap(), 2);
+        assert_eq!(decode_nex_string(&body, &mut cursor).unwrap(), local);
+        assert_eq!(decode_nex_string(&body, &mut cursor).unwrap(), public);
+        assert_eq!(decode_nex_string(&body, &mut cursor).unwrap(), "AccountExtraInfo");
+        let holder_len = read_u32(&body, &mut cursor).unwrap() as usize;
+        let holder = take(&body, &mut cursor, holder_len).unwrap();
+        assert_eq!(cursor, body.len());
+        let (fields, _) = decode_buffered_structure(holder).unwrap();
+        let mut fields_cursor = 0usize;
+        assert_eq!(read_u64(fields, &mut fields_cursor).unwrap(), 0x1122_3344_5566_7788);
+        assert_eq!(read_u32(fields, &mut fields_cursor).unwrap(), 0);
+        assert_eq!(decode_nex_string(fields, &mut fields_cursor).unwrap(), "nex-token");
+    }
+
+    #[test]
+    fn secure_register_ex_response_returns_connection_id_and_public_station() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&77u32.to_le_bytes());
+        encode_nex_string("prudp:/address=203.0.113.10;port=6000;sid=1;stream=9;PID=42;CID=77;RVCID=77;type=3", &mut body);
+        let (connection_id, station) = decode_secure_register_ex_response(&body).unwrap();
+        assert_eq!(connection_id, 77);
+        assert_eq!(station.rv_connection_id, 77);
+        assert_eq!(station.connection_id, 77);
+        assert_eq!(station.stream_type, STREAM_TYPE_GAME);
+    }
+    #[test]
     fn mk7_matchmake_browse_request_encodes_the_3ds_243_fields() {
         let criteria = MatchmakeSearchCriteria::default();
         let request = encode_matchmake_browse_request(&criteria, 0, 20).unwrap();
