@@ -396,6 +396,8 @@ pub struct MatchmakeAutoResult {
     /// Holder type, normally "MatchmakeSession" or "Gathering".
     pub object_id: String,
     pub gathering_id: u32,
+    pub owner_pid: u32,
+    pub host_pid: u32,
     /// Serialized Gathering/MatchmakeSession body for later inspection.
     pub object_data: Vec<u8>,
 }
@@ -457,9 +459,13 @@ pub fn decode_matchmake_auto_response(data: &[u8]) -> Result<MatchmakeAutoResult
     }
     let mut object_cursor = 0usize;
     let gathering_id = read_u32(&object_data, &mut object_cursor)?;
+    let owner_pid = read_u32(&object_data, &mut object_cursor)?;
+    let host_pid = read_u32(&object_data, &mut object_cursor)?;
     Ok(MatchmakeAutoResult {
         object_id,
         gathering_id,
+        owner_pid,
+        host_pid,
         object_data,
     })
 }
@@ -1229,11 +1235,15 @@ mod tests {
         encode_nex_string("MatchmakeSession", &mut response);
         let mut object = Vec::new();
         object.extend_from_slice(&1234u32.to_le_bytes());
+        object.extend_from_slice(&42u32.to_le_bytes());
+        object.extend_from_slice(&77u32.to_le_bytes());
         response.extend_from_slice(&((object.len() + 4) as u32).to_le_bytes());
         encode_buffer(&object, &mut response);
         let decoded = decode_matchmake_auto_response(&response).unwrap();
         assert_eq!(decoded.object_id, "MatchmakeSession");
         assert_eq!(decoded.gathering_id, 1234);
+        assert_eq!(decoded.owner_pid, 42);
+        assert_eq!(decoded.host_pid, 77);
         assert_eq!(decoded.object_data, object);
         response.push(0);
         assert!(decode_matchmake_auto_response(&response).is_err());

@@ -232,6 +232,38 @@ impl NexOnlineSession {
         crate::nex_bootstrap::decode_station_url_list(&response.body)
     }
 
+    /// Join a gathering and establish its host's Game-stream PRUDP session.
+    ///
+    /// The host peer is selected by the PID returned in the auto-match result;
+    /// the per-gathering key returned by JoinMatchmakeSession is used for
+    /// subsequent PRUDP DATA signatures and RC4 payload encryption.
+    pub fn connect_to_matchmake_host(
+        &mut self,
+        result: &crate::nex_bootstrap::MatchmakeAutoResult,
+        message: &str,
+        timeout: Duration,
+    ) -> Result<crate::game_peer::GamePeerSession, String> {
+        if result.host_pid == 0 {
+            return Err("automatic matchmaking returned a zero host PID".to_owned());
+        }
+        let session_key = self.join_matchmake_session(result.gathering_id, message, timeout)?;
+        if session_key.is_empty() {
+            return Err("JoinMatchmakeSession returned an empty P2P session key".to_owned());
+        }
+        let stations = self.get_matchmake_session_urls(result.gathering_id, timeout)?;
+        let host = stations
+            .iter()
+            .find(|station| {
+                station.principal_id == result.host_pid
+                    && station.stream_type == crate::nex_bootstrap::STREAM_TYPE_GAME
+            })
+            .ok_or_else(|| format!(
+                "GetSessionURLs did not return a Game-stream StationURL for host PID {}",
+                result.host_pid
+            ))?;
+        crate::game_peer::connect_to_peer(host, &session_key, timeout)
+    }
+
     /// The principal ID authenticated by the NEX TicketGranting server.
     pub fn principal_id(&self) -> u32 {
         self.principal_id

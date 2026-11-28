@@ -24,6 +24,7 @@ pub mod nand_disa;
 pub mod nex_bootstrap;
 pub mod prudp_client;
 pub mod nex_session;
+pub mod game_peer;
 pub mod room;
 pub mod recompiled;
 pub mod services;
