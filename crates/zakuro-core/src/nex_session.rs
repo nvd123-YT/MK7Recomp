@@ -195,6 +195,21 @@ impl NexOnlineSession {
         crate::nex_bootstrap::decode_matchmake_session_list(&response.body)
     }
 
+    /// Ask the NEX server to place this user into a public MK7 gathering.
+    ///
+    /// This is the actual title-style matchmaking operation; it may block
+    /// until a compatible session is found or the server rejects the request.
+    pub fn auto_matchmake(
+        &mut self,
+        criteria: &crate::nex_bootstrap::MatchmakeSearchCriteria,
+        message: &str,
+        timeout: Duration,
+    ) -> Result<crate::nex_bootstrap::MatchmakeAutoResult, String> {
+        let body = crate::nex_bootstrap::encode_matchmake_auto_request(criteria, message)?;
+        let response = self.request(0x6D, 0x0F, &body, timeout)?;
+        crate::nex_bootstrap::decode_matchmake_auto_response(&response.body)
+    }
+
     /// Join a known gathering and return the P2P session key.
     pub fn join_matchmake_session(
         &mut self,

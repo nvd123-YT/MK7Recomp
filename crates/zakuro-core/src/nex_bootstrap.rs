@@ -346,16 +346,11 @@ pub struct MatchmakeSessionSummary {
 ///
 /// MK7's secure endpoint advertises NEX 2.4.3, so this omits fields introduced
 /// in NEX 3.0 and later. range_size is capped at the server's documented 100.
-pub fn encode_matchmake_browse_request(
+fn encode_matchmake_search_criteria(
     criteria: &MatchmakeSearchCriteria,
-    range_offset: u32,
-    range_size: u32,
 ) -> Result<Vec<u8>, String> {
     if criteria.attributes.len() != 6 {
         return Err("MK7 matchmaking requires exactly six attribute strings".to_owned());
-    }
-    if range_size == 0 || range_size > 100 {
-        return Err("MK7 matchmaking result range must contain between 1 and 100 entries".to_owned());
     }
 
     let mut output = Vec::new();
@@ -370,11 +365,105 @@ pub fn encode_matchmake_browse_request(
     output.push(u8::from(criteria.vacant_only));
     output.push(u8::from(criteria.exclude_locked));
     output.push(u8::from(criteria.exclude_non_host_pid));
-    output.extend_from_slice(&criteria.selection_method.to_le_bytes());
+
+    // MK7's server exposes NEX 2.4.3 MatchMaking. SelectionMethod is only
+    // serialized by the protocol from version 3.0.0 onward.
+    Ok(output)
+}
+
+/// Encode MatchmakeExtension::BrowseMatchmakeSessionNoHolder's parameters.
+///
+/// MK7's server passes a standalone ResultRange after the criteria. Its
+/// 2.4.3 criteria schema does not include SelectionMethod or a nested range.
+pub fn encode_matchmake_browse_request(
+    criteria: &MatchmakeSearchCriteria,
+    range_offset: u32,
+    range_size: u32,
+) -> Result<Vec<u8>, String> {
+    if range_size == 0 || range_size > 100 {
+        return Err("MK7 matchmaking result range must contain between 1 and 100 entries".to_owned());
+    }
+
+    let mut output = encode_matchmake_search_criteria(criteria)?;
     output.extend_from_slice(&range_offset.to_le_bytes());
     output.extend_from_slice(&range_size.to_le_bytes());
     Ok(output)
 }
+
+/// A server-issued gathering returned by auto matchmaking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchmakeAutoResult {
+    /// Holder type, normally "MatchmakeSession" or "Gathering".
+    pub object_id: String,
+    pub gathering_id: u32,
+    /// Serialized Gathering/MatchmakeSession body for later inspection.
+    pub object_data: Vec<u8>,
+}
+
+/// Encode MatchmakeExtension::AutoMatchmakeWithSearchCriteriaPostpone.
+///
+/// The request has a list of search criteria, an AnyObjectHolder containing
+/// an empty Gathering, then a user-visible matchmaking message.
+pub fn encode_matchmake_auto_request(
+    criteria: &MatchmakeSearchCriteria,
+    message: &str,
+) -> Result<Vec<u8>, String> {
+    let criteria_bytes = encode_matchmake_search_criteria(criteria)?;
+    let mut output = Vec::new();
+
+    // List<MatchmakeSessionSearchCriteria>.
+    output.extend_from_slice(&1u32.to_le_bytes());
+    output.extend_from_slice(&criteria_bytes);
+
+    // GatheringHolder (AnyObjectHolder<GatheringInterface>).
+    let mut gathering = Vec::new();
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // ID
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // OwnerPID
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // HostPID
+    gathering.extend_from_slice(&0u16.to_le_bytes()); // MinimumParticipants
+    gathering.extend_from_slice(&0u16.to_le_bytes()); // MaximumParticipants
+    gathering.extend_from_slice(&1u32.to_le_bytes()); // NewGathering default ParticipationPolicy
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // PolicyArgument
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // Flags
+    gathering.extend_from_slice(&0u32.to_le_bytes()); // State
+    encode_nex_string("", &mut gathering); // Description
+
+    encode_nex_string("Gathering", &mut output);
+    output.extend_from_slice(&((gathering.len() + 4) as u32).to_le_bytes());
+    encode_buffer(&gathering, &mut output);
+    encode_nex_string(message, &mut output);
+    Ok(output)
+}
+
+/// Decode the AnyObjectHolder returned by AutoMatchmakeWithSearchCriteriaPostpone.
+pub fn decode_matchmake_auto_response(data: &[u8]) -> Result<MatchmakeAutoResult, String> {
+    let mut cursor = 0usize;
+    let object_id = decode_nex_string(data, &mut cursor)?;
+    let holder_length = read_u32(data, &mut cursor)? as usize;
+    if holder_length < 4 {
+        return Err("matchmaking AnyObjectHolder length is invalid".to_owned());
+    }
+    let object_length = read_u32(data, &mut cursor)? as usize;
+    if holder_length != object_length + 4 {
+        return Err("matchmaking AnyObjectHolder length did not match its buffer".to_owned());
+    }
+    let object_data = take(data, &mut cursor, object_length)?.to_vec();
+    if cursor != data.len() {
+        return Err("matchmaking AnyObjectHolder contained trailing bytes".to_owned());
+    }
+
+    if object_id != "Gathering" && object_id != "MatchmakeSession" {
+        return Err(format!("unexpected matchmaking object type: {object_id}"));
+    }
+    let mut object_cursor = 0usize;
+    let gathering_id = read_u32(&object_data, &mut object_cursor)?;
+    Ok(MatchmakeAutoResult {
+        object_id,
+        gathering_id,
+        object_data,
+    })
+}
+
 
 /// Decode the MatchmakeExtension::BrowseMatchmakeSessionNoHolder response.
 pub fn decode_matchmake_session_list(
@@ -1087,10 +1176,66 @@ mod tests {
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
         assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "1");
         assert_eq!(take(&request, &mut cursor, 3).unwrap(), [1, 1, 0]);
-        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 0);
+        // NEX 2.4.3 has no SelectionMethod field; the separate ResultRange
+        // follows the criteria directly.
         assert_eq!(read_u32(&request, &mut cursor).unwrap(), 0);
         assert_eq!(read_u32(&request, &mut cursor).unwrap(), 20);
         assert_eq!(cursor, request.len());
+    }
+
+    #[test]
+    fn mk7_auto_matchmaking_request_encodes_a_gathering_holder() {
+        let request = encode_matchmake_auto_request(
+            &MatchmakeSearchCriteria::default(),
+            "MK7 public race",
+        ).unwrap();
+        let mut cursor = 0usize;
+        assert_eq!(read_u32(&request, &mut cursor).unwrap(), 1);
+        let attrib_count = read_u32(&request, &mut cursor).unwrap();
+        assert_eq!(attrib_count, 6);
+        for _ in 0..6 {
+            assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        }
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "");
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "1");
+        assert_eq!(take(&request, &mut cursor, 3).unwrap(), [1, 1, 0]);
+
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "Gathering");
+        let holder_length = read_u32(&request, &mut cursor).unwrap() as usize;
+        let gathering_length = read_u32(&request, &mut cursor).unwrap() as usize;
+        assert_eq!(holder_length, gathering_length + 4);
+        let gathering = take(&request, &mut cursor, gathering_length).unwrap();
+        let mut gc = 0usize;
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0); // gathering ID
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0); // owner PID
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0); // host PID
+        assert_eq!(read_u16(gathering, &mut gc).unwrap(), 0);
+        assert_eq!(read_u16(gathering, &mut gc).unwrap(), 0);
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 1); // policy
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0);
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0);
+        assert_eq!(read_u32(gathering, &mut gc).unwrap(), 0);
+        assert_eq!(decode_nex_string(gathering, &mut gc).unwrap(), "");
+        assert_eq!(gc, gathering.len());
+        assert_eq!(decode_nex_string(&request, &mut cursor).unwrap(), "MK7 public race");
+        assert_eq!(cursor, request.len());
+    }
+
+    #[test]
+    fn mk7_auto_matchmaking_response_extracts_gathering_id() {
+        let mut response = Vec::new();
+        encode_nex_string("MatchmakeSession", &mut response);
+        let mut object = Vec::new();
+        object.extend_from_slice(&1234u32.to_le_bytes());
+        encode_buffer(&object, &mut response);
+        let decoded = decode_matchmake_auto_response(&response).unwrap();
+        assert_eq!(decoded.object_id, "MatchmakeSession");
+        assert_eq!(decoded.gathering_id, 1234);
+        assert_eq!(decoded.object_data, object);
+        response.push(0);
+        assert!(decode_matchmake_auto_response(&response).is_err());
     }
 
     #[test]
