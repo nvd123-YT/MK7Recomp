@@ -200,6 +200,199 @@ pub fn decode_pia_nat_datagram(
     })
 }
 
+pub const PIA_STATION_PROTOCOL_TYPE: u16 = 0x0100;
+pub const PIA_STATION_MESSAGE_CONNECTION_REQUEST: u8 = 1;
+pub const PIA_STATION_MESSAGE_CONNECTION_RESPONSE: u8 = 2;
+pub const PIA_STATION_MESSAGE_ACK: u8 = 5;
+
+/// The station protocol version used by legacy PIA releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiaStationProtocolVersion {
+    V2,
+    V3,
+}
+
+impl PiaStationProtocolVersion {
+    pub fn from_pia_3x(major: u8, minor: u8) -> Result<Self, String> {
+        if major != 3 || !(3..=10).contains(&minor) {
+            return Err(format!("unsupported legacy PIA version {major}.{minor}"));
+        }
+        Ok(if minor <= 6 { Self::V2 } else { Self::V3 })
+    }
+
+    pub const fn wire_value(self) -> u8 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+}
+
+/// One legacy PIA StationLocation (the 3.3–4.10 27-byte form).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiaStationLocation {
+    pub address: SocketAddrV4,
+    pub extension_id: u16,
+    pub constant_id: u32,
+    pub variable_id: u32,
+    pub service_variable_id: u32,
+    pub url_type: u8,
+    pub nex_stream_id: u8,
+    pub nex_stream_type: u8,
+    pub nat_mapping: u8,
+    pub nat_filtering: u8,
+    pub nat_flags: u8,
+    pub probe_initiation: u8,
+}
+
+impl PiaStationLocation {
+    pub fn encode(&self, output: &mut Vec<u8>) -> Result<(), String> {
+        if self.address.port() == 0 || self.address.ip().is_unspecified() {
+            return Err("PIA StationLocation requires a concrete IPv4 address and port".to_owned());
+        }
+        if self.constant_id == 0 || self.variable_id == 0 || self.service_variable_id == 0 {
+            return Err("PIA StationLocation requires non-zero PID, CID, and RVCID".to_owned());
+        }
+        if self.url_type == 0 || self.nex_stream_id > 15 || self.nex_stream_type == 0 || self.nex_stream_type > 11 {
+            return Err("PIA StationLocation contains an invalid URL or NEX stream type".to_owned());
+        }
+        output.extend_from_slice(&self.address.ip().octets());
+        output.extend_from_slice(&self.address.port().to_be_bytes());
+        output.extend_from_slice(&self.extension_id.to_be_bytes());
+        output.extend_from_slice(&self.constant_id.to_be_bytes());
+        output.extend_from_slice(&self.variable_id.to_be_bytes());
+        output.extend_from_slice(&self.service_variable_id.to_be_bytes());
+        output.push(self.url_type);
+        output.push(self.nex_stream_id);
+        output.push(self.nex_stream_type);
+        output.push(self.nat_mapping);
+        output.push(self.nat_filtering);
+        output.push(self.nat_flags);
+        output.push(self.probe_initiation);
+        Ok(())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != 27 {
+            return Err(format!("legacy PIA StationLocation must be 27 bytes, got {}", bytes.len()));
+        }
+        let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+        let location = Self {
+            address: SocketAddrV4::new(ip, u16::from_be_bytes(bytes[4..6].try_into().unwrap())),
+            extension_id: u16::from_be_bytes(bytes[6..8].try_into().unwrap()),
+            constant_id: u32::from_be_bytes(bytes[8..12].try_into().unwrap()),
+            variable_id: u32::from_be_bytes(bytes[12..16].try_into().unwrap()),
+            service_variable_id: u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+            url_type: bytes[20],
+            nex_stream_id: bytes[21],
+            nex_stream_type: bytes[22],
+            nat_mapping: bytes[23],
+            nat_filtering: bytes[24],
+            nat_flags: bytes[25],
+            probe_initiation: bytes[26],
+        };
+        if location.address.port() == 0 || location.address.ip().is_unspecified()
+            || location.constant_id == 0 || location.variable_id == 0 || location.service_variable_id == 0
+            || location.url_type == 0 || location.nex_stream_id > 15
+            || location.nex_stream_type == 0 || location.nex_stream_type > 11
+        {
+            return Err("legacy PIA StationLocation contains an invalid field".to_owned());
+        }
+        Ok(location)
+    }
+}
+
+/// Connection information contains the public StationLocation followed by
+/// the private StationLocation for PIA versions through 4.10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiaStationConnectionInfo {
+    pub public_location: PiaStationLocation,
+    pub private_location: PiaStationLocation,
+}
+
+impl PiaStationConnectionInfo {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut output = Vec::with_capacity(54);
+        self.public_location.encode(&mut output)?;
+        self.private_location.encode(&mut output)?;
+        Ok(output)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != 54 {
+            return Err(format!("legacy PIA StationConnectionInfo must be 54 bytes, got {}", bytes.len()));
+        }
+        Ok(Self {
+            public_location: PiaStationLocation::decode(&bytes[..27])?,
+            private_location: PiaStationLocation::decode(&bytes[27..])?,
+        })
+    }
+}
+
+/// Encode the legacy 3.3–4.10 Station connection request payload.
+pub fn encode_pia_station_connection_request(
+    connection_id: u8,
+    version: PiaStationProtocolVersion,
+    is_inverse: bool,
+    info: &PiaStationConnectionInfo,
+    ack_id: u32,
+) -> Result<Vec<u8>, String> {
+    if connection_id < 2 {
+        return Err("PIA Station connection ID must be between 2 and 255".to_owned());
+    }
+    let mut output = Vec::with_capacity(62);
+    output.push(PIA_STATION_MESSAGE_CONNECTION_REQUEST);
+    output.push(connection_id);
+    output.push(version.wire_value());
+    output.push(u8::from(is_inverse));
+    output.extend_from_slice(&info.encode()?);
+    output.extend_from_slice(&ack_id.to_be_bytes());
+    Ok(output)
+}
+
+/// A PIA 3.3–4.10 PlayerInfo is a fixed 36-byte UTF-16 name, length,
+/// language, and two padding bytes.
+pub fn encode_pia_player_info(name: &str, language: u8) -> Result<[u8; 36], String> {
+    let utf16 = name.encode_utf16().collect::<Vec<_>>();
+    if utf16.len() > 16 {
+        return Err("PIA player name must not exceed 16 UTF-16 code units".to_owned());
+    }
+    let mut output = [0u8; 36];
+    for (index, unit) in utf16.iter().enumerate() {
+        output[index * 2..index * 2 + 2].copy_from_slice(&unit.to_be_bytes());
+    }
+    output[32] = utf16.len() as u8;
+    output[33] = language;
+    Ok(output)
+}
+
+/// Encode an accepted legacy Station connection response.
+pub fn encode_pia_station_connection_response(
+    version: PiaStationProtocolVersion,
+    platform_id: u8,
+    identification_token: &[u8; 32],
+    player_info: &[u8; 36],
+    ack_id: u32,
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity(76);
+    output.push(PIA_STATION_MESSAGE_CONNECTION_RESPONSE);
+    output.push(0); // accepted
+    output.push(version.wire_value());
+    output.push(platform_id);
+    output.extend_from_slice(identification_token);
+    output.extend_from_slice(player_info);
+    output.extend_from_slice(&ack_id.to_be_bytes());
+    output
+}
+
+/// Encode the 8-byte explicit Station-protocol acknowledgement.
+pub fn encode_pia_station_ack(ack_id: u32) -> [u8; 8] {
+    let mut output = [0u8; 8];
+    output[0] = PIA_STATION_MESSAGE_ACK;
+    output[4..8].copy_from_slice(&ack_id.to_be_bytes());
+    output
+}
+
 /// Bidirectionally punch through NAT using the same UDP socket later used for
 /// the Game-stream PRUDP handshake. include_variable_id selects the PIA
 /// 5.11+ 20-byte form; the legacy form is 16 bytes.
@@ -608,6 +801,107 @@ mod tests {
             raw_url: String::new(),
             connection_id: 77,
         }
+    }
+
+    fn sample_station_location(
+        ip: Ipv4Addr,
+        port: u16,
+        pid: u32,
+        cid: u32,
+        rvcid: u32,
+        nat_flags: u8,
+    ) -> PiaStationLocation {
+        PiaStationLocation {
+            address: SocketAddrV4::new(ip, port),
+            extension_id: 0,
+            constant_id: pid,
+            variable_id: cid,
+            service_variable_id: rvcid,
+            url_type: 1, // prudp
+            nex_stream_id: 1,
+            nex_stream_type: STREAM_TYPE_GAME,
+            nat_mapping: 1,
+            nat_filtering: 1,
+            nat_flags,
+            probe_initiation: 1,
+        }
+    }
+
+    #[test]
+    fn legacy_pia_station_location_and_connection_info_round_trip() {
+        let public = sample_station_location(Ipv4Addr::new(203, 0, 113, 20), 40100, 11, 12, 13, 3);
+        let private = sample_station_location(Ipv4Addr::new(192, 168, 1, 20), 40100, 11, 12, 13, 1);
+        let info = PiaStationConnectionInfo {
+            public_location: public.clone(),
+            private_location: private.clone(),
+        };
+        let encoded = info.encode().unwrap();
+        assert_eq!(encoded.len(), 54);
+        assert_eq!(PiaStationLocation::decode(&encoded[..27]).unwrap(), public);
+        assert_eq!(PiaStationLocation::decode(&encoded[27..]).unwrap(), private);
+        assert_eq!(PiaStationConnectionInfo::decode(&encoded).unwrap(), info);
+    }
+
+    #[test]
+    fn legacy_pia_station_connection_messages_match_the_3ds_field_layout() {
+        let public = sample_station_location(Ipv4Addr::new(203, 0, 113, 20), 40100, 11, 12, 13, 3);
+        let private = sample_station_location(Ipv4Addr::new(192, 168, 1, 20), 40100, 11, 12, 13, 1);
+        let info = PiaStationConnectionInfo {
+            public_location: public,
+            private_location: private,
+        };
+        assert_eq!(PiaStationProtocolVersion::from_pia_3x(3, 3).unwrap(), PiaStationProtocolVersion::V2);
+        assert_eq!(PiaStationProtocolVersion::from_pia_3x(3, 6).unwrap(), PiaStationProtocolVersion::V2);
+        assert_eq!(PiaStationProtocolVersion::from_pia_3x(3, 7).unwrap(), PiaStationProtocolVersion::V3);
+        assert_eq!(PiaStationProtocolVersion::from_pia_3x(3, 10).unwrap(), PiaStationProtocolVersion::V3);
+        assert!(PiaStationProtocolVersion::from_pia_3x(3, 11).is_err());
+
+        let request = encode_pia_station_connection_request(
+            7,
+            PiaStationProtocolVersion::V3,
+            false,
+            &info,
+            0x1122_3344,
+        ).unwrap();
+        assert_eq!(request.len(), 62);
+        assert_eq!(&request[..4], &[1, 7, 3, 0]);
+        assert_eq!(&request[4..8], &[203, 0, 113, 20]);
+        assert_eq!(&request[58..62], &0x1122_3344u32.to_be_bytes());
+
+        let inverse = encode_pia_station_connection_request(
+            8,
+            PiaStationProtocolVersion::V3,
+            true,
+            &info,
+            0x5566_7788,
+        ).unwrap();
+        assert_eq!(&inverse[..4], &[1, 8, 3, 1]);
+
+        let player = encode_pia_player_info("MK7 Racer", 1).unwrap();
+        assert_eq!(&player[..18], &[
+            0, 0x4D, 0, 0x4B, 0, 0x37, 0, 0x20, 0, 0x52,
+            0, 0x61, 0, 0x63, 0, 0x65, 0, 0x72,
+        ]);
+        assert_eq!(player[32], 9);
+        assert_eq!(player[33], 1);
+        assert_eq!(&player[34..], &[0, 0]);
+
+        let token = *b"0123456789ABCDEF0123456789ABCDEF";
+        let response = encode_pia_station_connection_response(
+            PiaStationProtocolVersion::V3,
+            2,
+            &token,
+            &player,
+            0xAABB_CCDD,
+        );
+        assert_eq!(response.len(), 76);
+        assert_eq!(&response[..4], &[2, 0, 3, 2]);
+        assert_eq!(&response[4..36], &token);
+        assert_eq!(&response[36..72], &player);
+        assert_eq!(&response[72..76], &0xAABB_CCDDu32.to_be_bytes());
+        assert_eq!(encode_pia_station_ack(0x1020_3040), [5, 0, 0, 0, 0x10, 0x20, 0x30, 0x40]);
+        assert!(encode_pia_station_connection_request(1, PiaStationProtocolVersion::V2, false, &info, 1).is_err());
+        assert!(encode_pia_player_info("this name is definitely too long", 1).is_err());
     }
 
     #[test]
