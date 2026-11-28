@@ -13,6 +13,7 @@ use crate::nex_bootstrap::{
 
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
+const TYPE_DATA: u8 = 2;
 
 const FLAG_ACK: u8 = 0x01;
 const FLAG_RELIABLE: u8 = 0x02;
