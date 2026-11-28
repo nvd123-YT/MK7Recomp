@@ -548,6 +548,10 @@ fn read_u32(data: &[u8], cursor: &mut usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes(take(data, cursor, 4)?.try_into().unwrap()))
 }
 
+fn read_u64(data: &[u8], cursor: &mut usize) -> Result<u64, String> {
+    Ok(u64::from_le_bytes(take(data, cursor, 8)?.try_into().unwrap()))
+}
+
 fn take<'a>(data: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u8], String> {
     let end = cursor.checked_add(length).ok_or_else(|| "NEX field length overflowed".to_owned())?;
     if end > data.len() {
@@ -742,7 +746,8 @@ mod tests {
         };
         let payload = build_secure_connect_payload(&ticket, 1234, 77, 0x12345678).unwrap();
         let mut cursor = 0usize;
-        assert_eq!(take(&payload, &mut cursor, read_u32(&payload, &mut cursor).unwrap() as usize).unwrap(), b"encrypted server ticket");
+        let internal_length = read_u32(&payload, &mut cursor).unwrap() as usize;
+        assert_eq!(take(&payload, &mut cursor, internal_length).unwrap(), b"encrypted server ticket");
         let encrypted_length = read_u32(&payload, &mut cursor).unwrap() as usize;
         let encrypted = take(&payload, &mut cursor, encrypted_length).unwrap();
         let decrypted = kerberos_decrypt(&ticket.session_key, encrypted).unwrap();
