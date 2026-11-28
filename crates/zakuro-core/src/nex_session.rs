@@ -1148,27 +1148,38 @@ mod tests {
             let joiner_game_address = SocketAddrV4::new(local_station.address.parse().unwrap(), local_station.port);
             let mut peer_bytes = [0u8; 65_535];
             let host_probe_time = 0x1122_3344_5566_7788u64;
-            let host_probe = crate::game_peer::encode_pia_nat_datagram(crate::game_peer::PiaNatProbeData {
-                service_variable_id: 77, // Host's own RVCID.
-                probe_type: 0,
-                system_time: host_probe_time,
-                variable_id: None,
-            }, false).unwrap();
+            let host_probe = crate::game_peer::encode_pia_nat_datagram(
+                crate::game_peer::PiaNatProbeData {
+                    service_variable_id: 99, // Joiner's RVCID, the probe recipient.
+                    probe_type: 0,
+                    system_time: host_probe_time,
+                    variable_id: None,
+                },
+                false, 77, 42, 1, 0,
+            ).unwrap();
             game_peer_server.send_to(&host_probe, joiner_game_address).unwrap();
             let mut saw_joiner_request = false;
             let mut saw_joiner_reply = false;
             while !(saw_joiner_request && saw_joiner_reply) {
                 let (probe_len, probe_peer) = game_peer_server.recv_from(&mut peer_bytes).unwrap();
                 assert_eq!(probe_peer, SocketAddr::V4(joiner_game_address));
-                let (probe, _port) = crate::game_peer::decode_pia_nat_datagram(&peer_bytes[..probe_len], false).unwrap();
+                let datagram = crate::game_peer::decode_pia_nat_datagram(&peer_bytes[..probe_len], false).unwrap();
+                let probe = datagram.probe;
+                assert_eq!(datagram.source_pid, 42);
+                assert_eq!(datagram.destination_pid, 77);
                 if probe.service_variable_id == local_station.rv_connection_id && probe.probe_type == 0 {
                     saw_joiner_request = true;
-                    let reply = crate::game_peer::encode_pia_nat_datagram(crate::game_peer::PiaNatProbeData {
-                        service_variable_id: 77, // Reply sender is the host.
-                        probe_type: 1, system_time: probe.system_time, variable_id: None,
-                    }, false).unwrap();
+                    let reply = crate::game_peer::encode_pia_nat_datagram(
+                        crate::game_peer::PiaNatProbeData {
+                            service_variable_id: 77, // Host RVCID, the reply recipient.
+                            probe_type: 1,
+                            system_time: probe.system_time,
+                            variable_id: None,
+                        },
+                        false, 42, 77, 2, datagram.source_timer,
+                    ).unwrap();
                     game_peer_server.send_to(&reply, joiner_game_address).unwrap();
-                } else if probe.service_variable_id == local_station.rv_connection_id
+                } else if probe.service_variable_id == 77
                     && probe.probe_type == 1 && probe.system_time == host_probe_time
                 {
                     saw_joiner_reply = true;

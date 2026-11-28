@@ -61,9 +61,35 @@ pub fn decode_pia_nat_probe_data(bytes: &[u8]) -> Result<PiaNatProbeData, String
 
 pub const PIA_NAT_PROTOCOL_TYPE: u16 = 0x0400;
 pub const PIA_PACKET_MAGIC: u32 = 0x6498_AB32;
+pub const PIA_STATION_INDEX_UNIDENTIFIED: u8 = 253;
+pub const PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID: u8 = 0x01;
 
-/// Wrap NatProbeData in the native PIA common-packet and protocol-message headers.
-pub fn encode_pia_nat_datagram(data: PiaNatProbeData, pia_511_plus: bool) -> Result<Vec<u8>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PiaNatDatagram {
+    pub probe: PiaNatProbeData,
+    pub protocol_port: u16,
+    pub source_pid: u32,
+    pub destination_pid: u32,
+    pub source_timer: u16,
+    pub destination_timer: u16,
+}
+
+/// Wrap NatProbeData in the legacy PIA common-packet and protocol-message headers.
+///
+/// For a not-yet-connected station, the common packet uses connection ID 0,
+/// packet ID 0, the unencrypted state, and an unidentified source station index.
+/// The protocol message is addressed by the peer's Constant ID (NEX PID).
+pub fn encode_pia_nat_datagram(
+    data: PiaNatProbeData,
+    pia_511_plus: bool,
+    source_pid: u32,
+    destination_pid: u32,
+    source_timer: u16,
+    destination_timer: u16,
+) -> Result<Vec<u8>, String> {
+    if source_pid == 0 || destination_pid == 0 {
+        return Err("PIA NAT datagrams require non-zero source and destination PIDs".to_owned());
+    }
     if pia_511_plus != data.variable_id.is_some() {
         return Err("PIA NatProbeData variable-ID format does not match the selected PIA version".to_owned());
     }
@@ -78,60 +104,76 @@ pub fn encode_pia_nat_datagram(data: PiaNatProbeData, pia_511_plus: bool) -> Res
         }
     };
     let body = encode_pia_nat_probe_data(data)?;
-    let protocol_id = (u32::from(PIA_NAT_PROTOCOL_TYPE) << 16) | u32::from(port);
     let mut packet = Vec::with_capacity(12 + 20 + body.len());
 
-    // common::Packet header (raw little-endian object header).
+    // PIA common::Packet header. The magic is stored in its native wire order.
     packet.extend_from_slice(&PIA_PACKET_MAGIC.to_le_bytes());
-    packet.push(1); // STATE_PLAIN
-    packet.push(0); // Unknown0x5
-    packet.extend_from_slice(&0u16.to_le_bytes()); // SequenceId
-    packet.extend_from_slice(&[0; 4]); // RTT timestamp and echo
+    packet.push(1); // packet is not encrypted
+    packet.push(0); // no established PIA station connection yet
+    packet.extend_from_slice(&0u16.to_be_bytes()); // packet ID
+    packet.extend_from_slice(&source_timer.to_be_bytes());
+    packet.extend_from_slice(&destination_timer.to_be_bytes());
 
-    // transport::ProtocolMessageWriter header.
-    packet.push(0x08); // FLAG_OWN_PACKET
-    packet.push(0xFF); // STATION_INDEX_UNIDENTIFIED
+    // transport::ProtocolMessage header. NAT probes are addressed to a PID.
+    packet.push(PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID);
+    packet.push(PIA_STATION_INDEX_UNIDENTIFIED);
     packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
-    packet.extend_from_slice(&0u32.to_be_bytes()); // destination station key / bitmap
-    packet.extend_from_slice(&0u32.to_be_bytes()); // source station key (unidentified)
-    packet.extend_from_slice(&protocol_id.to_be_bytes());
+    packet.extend_from_slice(&destination_pid.to_be_bytes());
+    packet.extend_from_slice(&source_pid.to_be_bytes());
+    packet.extend_from_slice(&PIA_NAT_PROTOCOL_TYPE.to_be_bytes());
+    packet.extend_from_slice(&port.to_be_bytes());
     packet.extend_from_slice(&0u32.to_be_bytes()); // reserved
     packet.extend_from_slice(&body);
+    while packet.len() % 4 != 0 {
+        packet.push(0);
+    }
     Ok(packet)
 }
 
-/// Decode one complete native PIA packet and validate its NAT protocol envelope.
+/// Decode and validate one complete PIA NAT-traversal datagram.
 pub fn decode_pia_nat_datagram(
     packet: &[u8],
     pia_511_plus: bool,
-) -> Result<(PiaNatProbeData, u16), String> {
+) -> Result<PiaNatDatagram, String> {
     if packet.len() < 48 {
         return Err(format!("PIA packet is shorter than its headers and probe body: {}", packet.len()));
     }
-    if u32::from_le_bytes(packet[0..4].try_into().unwrap()) != PIA_PACKET_MAGIC || packet[4] != 1 {
-        return Err("PIA common-packet magic or state is invalid".to_owned());
+    if packet[0..4] != PIA_PACKET_MAGIC.to_le_bytes() || packet[4] != 1 {
+        return Err("PIA common-packet magic or encryption state is invalid".to_owned());
     }
-    if packet[12] & 0x08 == 0 || packet[13] != 0xFF {
-        return Err("PIA protocol-message flags or source station index are invalid".to_owned());
+    if packet[5] != 0 || u16::from_be_bytes(packet[6..8].try_into().unwrap()) != 0 {
+        return Err("unconnected PIA NAT packet must use connection ID and packet ID zero".to_owned());
+    }
+    let source_timer = u16::from_be_bytes(packet[8..10].try_into().unwrap());
+    let destination_timer = u16::from_be_bytes(packet[10..12].try_into().unwrap());
+
+    if packet[12] != PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID
+        || packet[13] != PIA_STATION_INDEX_UNIDENTIFIED
+    {
+        return Err("PIA NAT message must be PID-addressed from an unidentified station".to_owned());
     }
     let payload_size = u16::from_be_bytes(packet[14..16].try_into().unwrap()) as usize;
-    let destination = u32::from_be_bytes(packet[16..20].try_into().unwrap());
-    let source_key = u32::from_be_bytes(packet[20..24].try_into().unwrap());
-    let protocol_id = u32::from_be_bytes(packet[24..28].try_into().unwrap());
+    let destination_pid = u32::from_be_bytes(packet[16..20].try_into().unwrap());
+    let source_pid = u32::from_be_bytes(packet[20..24].try_into().unwrap());
+    let protocol_type = u16::from_be_bytes(packet[24..26].try_into().unwrap());
+    let protocol_port = u16::from_be_bytes(packet[26..28].try_into().unwrap());
     let reserved = u32::from_be_bytes(packet[28..32].try_into().unwrap());
-    if destination != 0 || source_key != 0 || reserved != 0 {
-        return Err("PIA protocol-message destination/source/reserved fields are invalid".to_owned());
+    if source_pid == 0 || destination_pid == 0 || reserved != 0 {
+        return Err("PIA NAT message has invalid PIDs or reserved field".to_owned());
     }
-    if protocol_id >> 16 != u32::from(PIA_NAT_PROTOCOL_TYPE) {
+    if protocol_type != PIA_NAT_PROTOCOL_TYPE {
         return Err("PIA packet is not a NAT traversal message".to_owned());
     }
-    if packet.len() != 32 + payload_size {
+    let padded_size = (payload_size + 3) & !3;
+    if packet.len() != 32 + padded_size {
         return Err("PIA message payload size does not match datagram length".to_owned());
     }
-    let port = (protocol_id & 0xFFFF) as u16;
-    let probe = decode_pia_nat_probe_data(&packet[32..])?;
+    if packet[32 + payload_size..].iter().any(|byte| *byte != 0) {
+        return Err("PIA message padding must be zero".to_owned());
+    }
+    let probe = decode_pia_nat_probe_data(&packet[32..32 + payload_size])?;
     if pia_511_plus {
-        if port != 0 || probe.variable_id.is_none() {
+        if protocol_port != 0 || probe.variable_id.is_none() {
             return Err("PIA 5.11+ NAT packet requires protocol port 0 and a variable ID".to_owned());
         }
     } else {
@@ -144,11 +186,18 @@ pub fn decode_pia_nat_datagram(
             0xFF => 3,
             _ => return Err("legacy PIA NAT probe type is invalid".to_owned()),
         };
-        if port != expected_port {
+        if protocol_port != expected_port {
             return Err("legacy PIA NAT probe type does not match protocol port".to_owned());
         }
     }
-    Ok((probe, port))
+    Ok(PiaNatDatagram {
+        probe,
+        protocol_port,
+        source_pid,
+        destination_pid,
+        source_timer,
+        destination_timer,
+    })
 }
 
 /// Bidirectionally punch through NAT using the same UDP socket later used for
@@ -170,6 +219,9 @@ pub fn punch_through_nat(
     if local_station.rv_connection_id == 0 || peer_station.rv_connection_id == 0 {
         return Err("PIA NAT probe requires RVCID on both StationURLs".to_owned());
     }
+    if local_station.principal_id == 0 || peer_station.principal_id == 0 {
+        return Err("PIA NAT probe requires non-zero PIDs on both StationURLs".to_owned());
+    }
     if include_variable_id && (local_station.connection_id == 0 || peer_station.connection_id == 0) {
         return Err("PIA 5.11+ NAT probe requires CID on both StationURLs".to_owned());
     }
@@ -188,12 +240,6 @@ pub fn punch_through_nat(
     let system_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default().as_nanos() as u64;
-    let request = encode_pia_nat_datagram(PiaNatProbeData {
-        service_variable_id: local_station.rv_connection_id,
-        probe_type: PIA_NAT_PROBE_REQUEST,
-        system_time,
-        variable_id: if include_variable_id { Some(local_station.connection_id) } else { None },
-    }, include_variable_id)?;
     let mut got_peer_request = false;
     let mut got_reply = false;
     let mut last_sent: Option<std::time::Instant> = None;
@@ -202,6 +248,19 @@ pub fn punch_through_nat(
         while std::time::Instant::now() < deadline {
             let now = std::time::Instant::now();
             if last_sent.map_or(true, |last| now.duration_since(last) >= Duration::from_millis(200)) {
+                let request = encode_pia_nat_datagram(
+                    PiaNatProbeData {
+                        service_variable_id: peer_station.rv_connection_id,
+                        probe_type: PIA_NAT_PROBE_REQUEST,
+                        system_time,
+                        variable_id: if include_variable_id { Some(peer_station.connection_id) } else { None },
+                    },
+                    include_variable_id,
+                    local_station.principal_id,
+                    peer_station.principal_id,
+                    started.elapsed().as_millis() as u16,
+                    0,
+                )?;
                 socket.send_to(&request, peer)
                     .map_err(|error| format!("could not send PIA NAT probe: {error}"))?;
                 last_sent = Some(now);
@@ -212,22 +271,35 @@ pub fn punch_through_nat(
             match socket.recv_from(&mut buffer) {
                 Ok((length, source)) => {
                     if source != SocketAddr::V4(peer) { continue; }
-                    let (probe, _port) = match decode_pia_nat_datagram(&buffer[..length], include_variable_id) {
-                        Ok(probe) => probe,
+                    let datagram = match decode_pia_nat_datagram(&buffer[..length], include_variable_id) {
+                        Ok(datagram) => datagram,
                         Err(_) => continue,
                     };
-                    let addressed_to_us = probe.service_variable_id == peer_station.rv_connection_id
-                        && (!include_variable_id || probe.variable_id == Some(peer_station.connection_id));
+                    if datagram.source_pid != peer_station.principal_id
+                        || datagram.destination_pid != local_station.principal_id
+                    {
+                        continue;
+                    }
+                    let probe = datagram.probe;
+                    let addressed_to_us = probe.service_variable_id == local_station.rv_connection_id
+                        && (!include_variable_id || probe.variable_id == Some(local_station.connection_id));
                     if !addressed_to_us { continue; }
                     match probe.probe_type {
                         PIA_NAT_PROBE_REQUEST => {
                             got_peer_request = true;
-                            let reply = encode_pia_nat_datagram(PiaNatProbeData {
-                                service_variable_id: local_station.rv_connection_id,
-                                probe_type: PIA_NAT_PROBE_REPLY,
-                                system_time: probe.system_time,
-                                variable_id: if include_variable_id { Some(local_station.connection_id) } else { None },
-                            }, include_variable_id)?;
+                            let reply = encode_pia_nat_datagram(
+                                PiaNatProbeData {
+                                    service_variable_id: peer_station.rv_connection_id,
+                                    probe_type: PIA_NAT_PROBE_REPLY,
+                                    system_time: probe.system_time,
+                                    variable_id: if include_variable_id { Some(peer_station.connection_id) } else { None },
+                                },
+                                include_variable_id,
+                                local_station.principal_id,
+                                peer_station.principal_id,
+                                started.elapsed().as_millis() as u16,
+                                datagram.source_timer,
+                            )?;
                             socket.send_to(&reply, source)
                                 .map_err(|error| format!("could not send PIA NAT probe reply: {error}"))?;
                         }
@@ -249,6 +321,7 @@ pub fn punch_through_nat(
         (Ok(_), Err(error)) => Err(format!("PIA NAT probe succeeded but socket timeout could not be restored: {error}")),
     }
 }
+
 
 /// A direct peer connection on MK7's Game stream (PRUDP stream type 9).
 ///
@@ -548,22 +621,42 @@ mod tests {
         let raw = encode_pia_nat_probe_data(legacy).unwrap();
         assert_eq!(raw.len(), 16);
         assert_eq!(decode_pia_nat_probe_data(&raw).unwrap(), legacy);
-        let packet = encode_pia_nat_datagram(legacy, false).unwrap();
+
+        let packet = encode_pia_nat_datagram(legacy, false, 0x1122_3344, 0x5566_7788, 0x1234, 0x5678).unwrap();
         assert_eq!(packet.len(), 48);
-        assert_eq!(&packet[..4], &PIA_PACKET_MAGIC.to_le_bytes());
-        assert_eq!(&packet[24..28], &0x0400_0001u32.to_be_bytes());
-        assert_eq!(decode_pia_nat_datagram(&packet, false).unwrap(), (legacy, 1));
+        assert_eq!(&packet[..4], &[0x32, 0xAB, 0x98, 0x64]);
+        assert_eq!(&packet[4..12], &[1, 0, 0, 0, 0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(packet[12], PIA_MESSAGE_FLAG_DESTINATION_IS_CONSTANT_ID);
+        assert_eq!(packet[13], PIA_STATION_INDEX_UNIDENTIFIED);
+        assert_eq!(u16::from_be_bytes(packet[14..16].try_into().unwrap()), 16);
+        assert_eq!(&packet[16..20], &0x5566_7788u32.to_be_bytes());
+        assert_eq!(&packet[20..24], &0x1122_3344u32.to_be_bytes());
+        assert_eq!(&packet[24..28], &[0x04, 0x00, 0x00, 0x01]);
+        assert_eq!(&packet[28..32], &[0; 4]);
+        assert_eq!(&packet[32..36], &[1, 2, 3, 4]);
+        let decoded = decode_pia_nat_datagram(&packet, false).unwrap();
+        assert_eq!(decoded.probe, legacy);
+        assert_eq!(decoded.protocol_port, 1);
+        assert_eq!(decoded.source_pid, 0x1122_3344);
+        assert_eq!(decoded.destination_pid, 0x5566_7788);
+        assert_eq!(decoded.source_timer, 0x1234);
+        assert_eq!(decoded.destination_timer, 0x5678);
 
         let modern = PiaNatProbeData { variable_id: Some(0xA1B2_C3D4), ..legacy };
         let raw = encode_pia_nat_probe_data(modern).unwrap();
         assert_eq!(raw.len(), 20);
         assert_eq!(decode_pia_nat_probe_data(&raw).unwrap(), modern);
-        let packet = encode_pia_nat_datagram(modern, true).unwrap();
+        let packet = encode_pia_nat_datagram(modern, true, 42, 77, 1, 0).unwrap();
         assert_eq!(packet.len(), 52);
-        assert_eq!(&packet[24..28], &0x0400_0000u32.to_be_bytes());
-        assert_eq!(decode_pia_nat_datagram(&packet, true).unwrap(), (modern, 0));
+        assert_eq!(&packet[24..28], &[0x04, 0x00, 0x00, 0x00]);
+        assert_eq!(decode_pia_nat_datagram(&packet, true).unwrap().probe, modern);
         assert!(decode_pia_nat_probe_data(&raw[..15]).is_err());
+
+        let mut invalid = packet.clone();
+        invalid[12] = 0x08;
+        assert!(decode_pia_nat_datagram(&invalid, true).is_err());
     }
+
     #[test]
     fn two_peers_complete_bidirectional_pia_nat_probes_on_their_bound_sockets() {
         let a = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
