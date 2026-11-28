@@ -7,6 +7,12 @@ use md5::{Digest, Md5};
 // Mario Kart 7 uses this key on both its NEX authentication and secure endpoints.
 const ACCESS_KEY: &[u8] = b"6181dff1";
 pub const MK7_PRUDP_ACCESS_KEY: &[u8] = ACCESS_KEY;
+/// Standard Rendez-Vous stream used by the 3DS NEX authentication endpoint.
+pub const STREAM_TYPE_RV: u8 = 2;
+/// Game-data stream used for peer-to-peer race traffic.
+pub const STREAM_TYPE_GAME: u8 = 9;
+/// Secure Rendez-Vous stream advertised by MK7's TicketGranting server.
+pub const STREAM_TYPE_RV_SECURE: u8 = 10;
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
@@ -197,8 +203,13 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
     let mut cursor = 0usize;
     let source = take(bytes, &mut cursor, 1)?[0];
     let destination = take(bytes, &mut cursor, 1)?[0];
-    if source >> 4 != 10 || destination >> 4 != 10 {
-        return Err("PRUDP packet used an unexpected transport type".to_owned());
+    let source_type = source >> 4;
+    let destination_type = destination >> 4;
+    if source_type == 0
+        || source_type > 11
+        || destination_type != source_type
+    {
+        return Err("PRUDP packet used an invalid or mismatched stream type".to_owned());
     }
 
     let type_flags = u16::from_le_bytes(
@@ -264,9 +275,9 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
     Ok(PrudpPacket {
         packet_type,
         flags,
-        source_type: source >> 4,
+        source_type,
         source_port: source & 0x0f,
-        destination_type: destination >> 4,
+        destination_type,
         destination_port: destination & 0x0f,
         session_id,
         packet_id,
@@ -719,11 +730,17 @@ pub fn parse_station_url(value: &str) -> Result<Station, String> {
     }
     let get = |key: &str| fields.get(key).copied()
         .ok_or_else(|| format!("NEX station URL omitted {key}"));
+    let port = get("port")?.parse().map_err(|_| "NEX station URL port is invalid".to_owned())?;
+    let stream_id = get("sid")?.parse().map_err(|_| "NEX station URL stream ID is invalid".to_owned())?;
+    let stream_type = get("stream")?.parse().map_err(|_| "NEX station URL stream type is invalid".to_owned())?;
+    if port == 0 || stream_id > 15 || stream_type == 0 || stream_type > 11 {
+        return Err("NEX station URL contains an invalid port or stream type".to_owned());
+    }
     Ok(Station {
         address: get("address")?.to_owned(),
-        port: get("port")?.parse().map_err(|_| "NEX station URL port is invalid".to_owned())?,
-        stream_id: get("sid")?.parse().map_err(|_| "NEX station URL stream ID is invalid".to_owned())?,
-        stream_type: get("stream")?.parse().map_err(|_| "NEX station URL stream type is invalid".to_owned())?,
+        port,
+        stream_id,
+        stream_type,
         principal_id: get("PID")?.parse().map_err(|_| "NEX station URL principal ID is invalid".to_owned())?,
         connection_id: get("CID")?.parse().map_err(|_| "NEX station URL connection ID is invalid".to_owned())?,
     })
@@ -804,6 +821,61 @@ mod tests {
         assert_eq!(fields, structure.len());
         assert_eq!(cursor, bytes.len());
     }
+    #[test]
+    fn prudp_v0_preserves_authentication_and_secure_stream_types() {
+        for stream_type in [STREAM_TYPE_RV, STREAM_TYPE_RV_SECURE, STREAM_TYPE_GAME] {
+            let packet = PrudpPacket {
+                packet_type: TYPE_DATA,
+                flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+                source_type: stream_type,
+                source_port: 1,
+                destination_type: stream_type,
+                destination_port: 1,
+                session_id: 7,
+                packet_id: 2,
+                fragment_id: 0,
+                signature: [0; 4],
+                connection_signature: [0; 4],
+                payload: b"stream-type".to_vec(),
+            };
+            let encoded = encode_prudp_v0(&packet, ACCESS_KEY, b"session");
+            let decoded = decode_prudp_v0(&encoded, ACCESS_KEY, b"session").unwrap();
+            assert_eq!(decoded.source_type, stream_type);
+            assert_eq!(decoded.destination_type, stream_type);
+            assert_eq!(decoded, packet);
+        }
+    }
+
+    #[test]
+    fn prudp_v0_rejects_mismatched_or_unsupported_stream_types() {
+        let mut packet = PrudpPacket {
+            packet_type: TYPE_DATA,
+            flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+            source_type: STREAM_TYPE_RV,
+            source_port: 1,
+            destination_type: STREAM_TYPE_RV,
+            destination_port: 1,
+            session_id: 7,
+            packet_id: 2,
+            fragment_id: 0,
+            signature: [0; 4],
+            connection_signature: [0; 4],
+            payload: b"stream-type".to_vec(),
+        };
+        let valid = encode_prudp_v0(&packet, ACCESS_KEY, b"session");
+        let mut mismatched = valid.clone();
+        mismatched[1] = (STREAM_TYPE_RV_SECURE << 4) | (mismatched[1] & 0x0f);
+        // The packet checksum covers the virtual-port bytes, so refresh it.
+        let checksum_offset = mismatched.len() - 1;
+        mismatched[checksum_offset] = checksum_v0(&mismatched[..checksum_offset], ACCESS_KEY);
+        assert!(decode_prudp_v0(&mismatched, ACCESS_KEY, b"session").is_err());
+
+        packet.source_type = 12;
+        packet.destination_type = 12;
+        let unsupported = encode_prudp_v0(&packet, ACCESS_KEY, b"session");
+        assert!(decode_prudp_v0(&unsupported, ACCESS_KEY, b"session").is_err());
+    }
+
     #[test]
     fn prudp_v0_packet_round_trips() {
         let packet = PrudpPacket {

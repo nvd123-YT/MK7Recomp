@@ -7,7 +7,7 @@ use crate::nex_bootstrap::{
     build_secure_connect_payload, decode_client_kerberos_ticket,
     decode_ticket_granting_login_ex_response, encode_ticket_granting_login_ex_body,
     verify_secure_connect_response, ClientKerberosTicket, RmcResponse,
-    Station,
+    Station, STREAM_TYPE_RV,
 };
 use crate::nex_bootstrap::Rc4;
 use crate::prudp_client::{
@@ -18,7 +18,7 @@ const TICKET_GRANTING_PROTOCOL: u8 = 0x0A;
 const TICKET_GRANTING_LOGIN_EX: u32 = 0x02;
 const MK7_SESSION_KEY_LENGTH: usize = 32;
 const CLIENT_VIRTUAL_PORT: u8 = 1;
-const AUTHENTICATION_STREAM_TYPE: u8 = 2;
+const AUTHENTICATION_STREAM_TYPE: u8 = STREAM_TYPE_RV;
 
 /// A completed LoginEx plus secure PRUDP session.
 ///

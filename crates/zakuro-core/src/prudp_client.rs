@@ -8,13 +8,13 @@ use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use crate::nex_bootstrap::{
-    decode_prudp_v0, decode_rmc_response, encode_prudp_v0, encode_rmc_request, PrudpPacket, Rc4, RmcResponse, MK7_PRUDP_ACCESS_KEY,
+    STREAM_TYPE_RV_SECURE, decode_prudp_v0, decode_rmc_response, encode_prudp_v0, encode_rmc_request, PrudpPacket, Rc4, RmcResponse, MK7_PRUDP_ACCESS_KEY,
 };
 
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
-const SECURE_STREAM_TYPE: u8 = 10;
+const SECURE_STREAM_TYPE: u8 = STREAM_TYPE_RV_SECURE;
 
 const FLAG_ACK: u8 = 0x01;
 const FLAG_RELIABLE: u8 = 0x02;
