@@ -135,7 +135,8 @@ fn establish_session_inner(
         connection_signature: [0; 4],
         payload: Vec::new(),
     };
-    let syn_ack = send_and_receive(socket, server, &syn, TYPE_SYN, 0, &[])?;
+    let mut peer_session_id = None;
+    let syn_ack = send_and_receive(socket, server, &syn, TYPE_SYN, 0, &[], &mut peer_session_id)?;
 
     if syn_ack.flags & (FLAG_ACK | FLAG_HAS_SIZE) != (FLAG_ACK | FLAG_HAS_SIZE)
         || syn_ack.session_id != 0
@@ -169,6 +170,7 @@ fn establish_session_inner(
         TYPE_CONNECT,
         client_session_id,
         &[],
+        &mut peer_session_id,
     )?;
 
     if connect_ack.flags & (FLAG_ACK | FLAG_HAS_SIZE) != (FLAG_ACK | FLAG_HAS_SIZE)
@@ -182,7 +184,7 @@ fn establish_session_inner(
 
     Ok(PrudpSession {
         client_session_id,
-        server_session_id: connect_ack.session_id,
+        server_session_id: peer_session_id.unwrap_or(connect_ack.session_id),
         server_connection_signature: syn_ack.connection_signature,
         client_connection_signature,
         connect_response: connect_ack.payload,
@@ -354,6 +356,27 @@ impl PrudpSession {
                             break;
                         }
                     } else {
+                        let mut packet = packet;
+                        if packet.flags & FLAG_NEED_ACK != 0 {
+                            let acknowledgement = PrudpPacket {
+                                packet_type: TYPE_DATA,
+                                flags: FLAG_ACK,
+                                source_type: self.source_type,
+                                source_port: self.source_port,
+                                destination_type: self.destination_type,
+                                destination_port: self.destination_port,
+                                session_id: packet.session_id,
+                                packet_id: packet.packet_id,
+                                fragment_id: packet.fragment_id,
+                                signature: [0; 4],
+                                connection_signature: [0; 4],
+                                payload: Vec::new(),
+                            };
+                            socket
+                                .send_to(&encode_prudp_v0(&acknowledgement, MK7_PRUDP_ACCESS_KEY, session_key), server)
+                                .map_err(|error| format!("could not acknowledge simultaneous peer DATA: {error}"))?;
+                            packet.flags &= !FLAG_NEED_ACK;
+                        }
                         pending_response.push_back(packet);
                     }
                 }
@@ -399,7 +422,7 @@ impl PrudpSession {
                     source_port: self.source_port,
                     destination_type: self.destination_type,
                     destination_port: self.destination_port,
-                    session_id: self.client_session_id,
+                    session_id: packet.session_id,
                     packet_id: packet.packet_id,
                     fragment_id: packet.fragment_id,
                     signature: [0; 4],
@@ -485,6 +508,7 @@ fn send_and_receive(
     expected_type: u8,
     expected_session_id: u8,
     session_key: &[u8],
+    peer_session_id: &mut Option<u8>,
 ) -> Result<PrudpPacket, String> {
     let encoded = encode_prudp_v0(request, MK7_PRUDP_ACCESS_KEY, session_key);
     let expected_peer = SocketAddr::V4(server);
@@ -509,7 +533,66 @@ fn send_and_receive(
                     )
                     .map_err(|error| format!("could not decode PRUDP handshake response: {error}"))?;
 
-                    if packet.packet_type != expected_type
+                    // Two Game-stream peers may initiate simultaneously. Answer
+                    // the peer's SYN and CONNECT while progressing our own handshake.
+                    if request.source_type == STREAM_TYPE_GAME
+                        && packet.flags & FLAG_ACK == 0
+                        && packet.source_type == request.destination_type
+                        && packet.destination_type == request.source_type
+                        && packet.source_port == request.destination_port
+                        && packet.destination_port == request.source_port
+                    {
+                        match (expected_type, packet.packet_type) {
+                            (TYPE_SYN, TYPE_SYN) => {
+                                let peer_address = match peer {
+                                    SocketAddr::V4(address) => *address,
+                                    SocketAddr::V6(_) => return Err("Game peers must use IPv4".to_owned()),
+                                };
+                                let acknowledgement = PrudpPacket {
+                                    packet_type: TYPE_SYN,
+                                    flags: FLAG_ACK | FLAG_HAS_SIZE,
+                                    source_type: packet.destination_type,
+                                    source_port: packet.destination_port,
+                                    destination_type: packet.source_type,
+                                    destination_port: packet.source_port,
+                                    session_id: 0,
+                                    packet_id: packet.packet_id,
+                                    fragment_id: 0,
+                                    signature: [0; 4],
+                                    connection_signature: connection_signature(peer_address),
+                                    payload: Vec::new(),
+                                };
+                                socket
+                                    .send_to(&encode_prudp_v0(&acknowledgement, MK7_PRUDP_ACCESS_KEY, &[]), peer)
+                                    .map_err(|error| format!("could not answer peer PRUDP SYN: {error}"))?;
+                                continue;
+                            }
+                            (TYPE_CONNECT, TYPE_CONNECT) => {
+                                *peer_session_id = Some(packet.session_id);
+                                let acknowledgement = PrudpPacket {
+                                    packet_type: TYPE_CONNECT,
+                                    flags: FLAG_ACK | FLAG_HAS_SIZE,
+                                    source_type: packet.destination_type,
+                                    source_port: packet.destination_port,
+                                    destination_type: packet.source_type,
+                                    destination_port: packet.source_port,
+                                    session_id: packet.session_id,
+                                    packet_id: 1,
+                                    fragment_id: 0,
+                                    signature: packet.connection_signature,
+                                    connection_signature: [0; 4],
+                                    payload: Vec::new(),
+                                };
+                                socket
+                                    .send_to(&encode_prudp_v0(&acknowledgement, MK7_PRUDP_ACCESS_KEY, &[]), peer)
+                                    .map_err(|error| format!("could not answer peer PRUDP CONNECT: {error}"))?;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if packet.flags & FLAG_ACK == 0 || packet.packet_type != expected_type
                         || packet.session_id != expected_session_id
                         || packet.packet_id != request.packet_id
                         || packet.source_type != request.destination_type

@@ -57,6 +57,21 @@ pub fn connect_to_peer(
 
     let socket = UdpSocket::bind("0.0.0.0:0")
         .map_err(|error| format!("could not bind peer Game-stream UDP socket: {error}"))?;
+    connect_to_peer_with_socket(socket, station, server, session_key, timeout)
+}
+
+/// Connect using an already-bound UDP socket. Use this when the socket's public
+/// mapping has been advertised by NEX and both peers must punch simultaneously.
+pub fn connect_to_peer_with_socket(
+    socket: UdpSocket,
+    station: &Station,
+    server: SocketAddrV4,
+    session_key: &[u8],
+    timeout: Duration,
+) -> Result<GamePeerSession, String> {
+    if station.stream_type != STREAM_TYPE_GAME || session_key.is_empty() {
+        return Err("peer station or session key is invalid".to_owned());
+    }
     let session = establish_session(
         &socket,
         server,
@@ -108,7 +123,6 @@ impl GamePeerSession {
     /// Whether the local UDP socket and PRUDP session are established.
     pub fn is_connected(&self) -> bool {
         self.socket.local_addr().is_ok()
-            && self.session.server_session_id == self.session.client_session_id
     }
 }
 
