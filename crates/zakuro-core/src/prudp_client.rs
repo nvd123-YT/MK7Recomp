@@ -14,6 +14,7 @@ use crate::nex_bootstrap::{
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
+const SECURE_STREAM_TYPE: u8 = 10;
 
 const FLAG_ACK: u8 = 0x01;
 const FLAG_RELIABLE: u8 = 0x02;
@@ -39,6 +40,8 @@ pub struct PrudpSession {
     /// Ordinary authentication endpoints return an empty payload.
     pub connect_response: Vec<u8>,
     /// Local and remote virtual ports selected by the NEX station URLs.
+    pub source_type: u8,
+    pub destination_type: u8,
     pub source_port: u8,
     pub destination_port: u8,
     /// The CONNECT request consumes reliable sequence ID 1.
@@ -66,6 +69,7 @@ pub fn connection_signature(address: SocketAddrV4) -> [u8; 4] {
 pub fn establish_session(
     socket: &UdpSocket,
     server: SocketAddrV4,
+    stream_type: u8,
     source_port: u8,
     destination_port: u8,
     connect_payload: &[u8],
@@ -88,6 +92,7 @@ pub fn establish_session(
     let result = establish_session_inner(
         socket,
         server,
+        stream_type,
         source_port,
         destination_port,
         connect_payload,
@@ -106,6 +111,7 @@ pub fn establish_session(
 fn establish_session_inner(
     socket: &UdpSocket,
     server: SocketAddrV4,
+    stream_type: u8,
     source_port: u8,
     destination_port: u8,
     connect_payload: &[u8],
@@ -118,7 +124,9 @@ fn establish_session_inner(
     let syn = PrudpPacket {
         packet_type: TYPE_SYN,
         flags: FLAG_NEED_ACK,
+        source_type: stream_type,
         source_port,
+        destination_type: stream_type,
         destination_port,
         session_id: 0,
         packet_id: 0,
@@ -143,7 +151,9 @@ fn establish_session_inner(
     let connect = PrudpPacket {
         packet_type: TYPE_CONNECT,
         flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+        source_type: stream_type,
         source_port,
+        destination_type: stream_type,
         destination_port,
         session_id: client_session_id,
         packet_id: 1,
@@ -176,6 +186,8 @@ fn establish_session_inner(
         server_connection_signature: syn_ack.connection_signature,
         client_connection_signature,
         connect_response: connect_ack.payload,
+        source_type: stream_type,
+        destination_type: stream_type,
         source_port,
         destination_port,
         next_reliable_packet_id: 2,
@@ -302,7 +314,9 @@ impl PrudpSession {
             let request = PrudpPacket {
                 packet_type: TYPE_DATA,
                 flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+                source_type: self.source_type,
                 source_port: self.source_port,
+                destination_type: self.destination_type,
                 destination_port: self.destination_port,
                 session_id: self.client_session_id,
                 packet_id,
@@ -329,6 +343,7 @@ impl PrudpSession {
                     validate_session_packet(
                         &packet,
                         self.server_session_id,
+                        self.source_type,
                         self.source_port,
                         self.destination_port,
                     )?;
@@ -368,6 +383,7 @@ impl PrudpSession {
             validate_session_packet(
                 &packet,
                 self.server_session_id,
+                self.source_type,
                 self.source_port,
                 self.destination_port,
             )?;
@@ -379,7 +395,9 @@ impl PrudpSession {
                 let ack = PrudpPacket {
                     packet_type: TYPE_DATA,
                     flags: FLAG_ACK,
+                    source_type: self.source_type,
                     source_port: self.source_port,
+                    destination_type: self.destination_type,
                     destination_port: self.destination_port,
                     session_id: self.client_session_id,
                     packet_id: packet.packet_id,
@@ -407,10 +425,13 @@ impl PrudpSession {
 fn validate_session_packet(
     packet: &PrudpPacket,
     expected_session_id: u8,
+    expected_stream_type: u8,
     source_port: u8,
     destination_port: u8,
 ) -> Result<(), String> {
     if packet.session_id != expected_session_id
+        || packet.source_type != expected_stream_type
+        || packet.destination_type != expected_stream_type
         || packet.source_port != destination_port
         || packet.destination_port != source_port
     {
@@ -491,6 +512,8 @@ fn send_and_receive(
                     if packet.packet_type != expected_type
                         || packet.session_id != expected_session_id
                         || packet.packet_id != request.packet_id
+                        || packet.source_type != request.destination_type
+                        || packet.destination_type != request.source_type
                         || packet.source_port != request.destination_port
                         || packet.destination_port != request.source_port
                     {
@@ -552,8 +575,10 @@ mod tests {
             let syn_ack = PrudpPacket {
                 packet_type: TYPE_SYN,
                 flags: FLAG_ACK | FLAG_HAS_SIZE,
-                source_port: 1,
-                destination_port: 2,
+                source_type: syn.destination_type,
+                source_port: syn.destination_port,
+                destination_type: syn.source_type,
+                destination_port: syn.source_port,
                 session_id: 0,
                 packet_id: 0,
                 fragment_id: 0,
@@ -570,8 +595,10 @@ mod tests {
             let connect_ack = PrudpPacket {
                 packet_type: TYPE_CONNECT,
                 flags: FLAG_ACK | FLAG_HAS_SIZE,
-                source_port: 1,
-                destination_port: 2,
+                source_type: connect.destination_type,
+                source_port: connect.destination_port,
+                destination_type: connect.source_type,
+                destination_port: connect.source_port,
                 session_id: connect.session_id,
                 packet_id: 1,
                 fragment_id: 0,
@@ -602,8 +629,10 @@ mod tests {
             let request_ack = PrudpPacket {
                 packet_type: TYPE_DATA,
                 flags: FLAG_ACK,
-                source_port: 1,
-                destination_port: 2,
+                source_type: request.destination_type,
+                source_port: request.destination_port,
+                destination_type: request.source_type,
+                destination_port: request.source_port,
                 session_id: request.session_id,
                 packet_id: request.packet_id,
                 fragment_id: request.fragment_id,
@@ -627,8 +656,10 @@ mod tests {
             let response = PrudpPacket {
                 packet_type: TYPE_DATA,
                 flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
-                source_port: 1,
-                destination_port: 2,
+                source_type: request.destination_type,
+                source_port: request.destination_port,
+                destination_type: request.source_type,
+                destination_port: request.source_port,
                 session_id: request.session_id,
                 packet_id: 1,
                 fragment_id: 0,
@@ -652,6 +683,7 @@ mod tests {
         let mut session = establish_session(
             &client,
             server_address,
+            SECURE_STREAM_TYPE,
             2,
             1,
             &[],
@@ -723,8 +755,10 @@ mod tests {
             let syn_ack = PrudpPacket {
                 packet_type: TYPE_SYN,
                 flags: FLAG_ACK | FLAG_HAS_SIZE,
-                source_port: 1,
-                destination_port: 2,
+                source_type: syn.destination_type,
+                source_port: syn.destination_port,
+                destination_type: syn.source_type,
+                destination_port: syn.source_port,
                 session_id: 0,
                 packet_id: 0,
                 fragment_id: 0,
@@ -759,8 +793,10 @@ mod tests {
             let connect_ack = PrudpPacket {
                 packet_type: TYPE_CONNECT,
                 flags: FLAG_ACK | FLAG_HAS_SIZE,
-                source_port: 1,
-                destination_port: 2,
+                source_type: connect.destination_type,
+                source_port: connect.destination_port,
+                destination_type: connect.source_type,
+                destination_port: connect.source_port,
                 session_id: connect.session_id,
                 packet_id: 1,
                 fragment_id: 0,
@@ -780,6 +816,7 @@ mod tests {
         let session = establish_session(
             &client,
             server_address,
+            SECURE_STREAM_TYPE,
             2,
             1,
             b"ticket payload",
