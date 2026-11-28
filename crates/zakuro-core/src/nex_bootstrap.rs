@@ -6,6 +6,7 @@ use md5::{Digest, Md5};
 
 // Mario Kart 7 uses this key on both its NEX authentication and secure endpoints.
 const ACCESS_KEY: &[u8] = b"6181dff1";
+pub const MK7_PRUDP_ACCESS_KEY: &[u8] = ACCESS_KEY;
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;

@@ -22,6 +22,7 @@ pub mod nand_import;
 pub mod nand_crypto;
 pub mod nand_disa;
 pub mod nex_bootstrap;
+pub mod prudp_client;
 pub mod room;
 pub mod recompiled;
 pub mod services;
