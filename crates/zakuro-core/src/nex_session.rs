@@ -934,7 +934,7 @@ mod tests {
             encode_nex_string(
                 &format!(
                     "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=42;CID=99;RVCID=99;natm=0;natf=0;type=3",
-                    game_client_address.port()
+                    game_peer_address.port()
                 ),
                 &mut register_response,
             );
