@@ -230,7 +230,7 @@ impl NexOnlineSession {
         let mapping_type = if mappings.len() > 1 && mappings.iter().all(|mapping| *mapping == public_address) { 1u8 } else if mappings.len() > 1 { 2u8 } else { 0u8 };
         let local_address = SocketAddrV4::new(local_ip, local_port);
         let station = self.register_game_station_with_mapping(socket, local_address, public_address, mapping_type, 0, timeout)?;
-        self.report_nat_properties(mapping_type, 0, 0, timeout)?;
+        self.report_nat_properties(u32::from(mapping_type), 0, 0, timeout)?;
         Ok(station)
     }
 
