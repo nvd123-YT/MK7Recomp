@@ -533,6 +533,12 @@ impl NexOnlineSession {
                 return Err(format!("InitiateProbe came from PID {}, expected host PID {}", peer.principal_id, expected.principal_id));
             }
         }
+        // The peer that receives InitiateProbe must also ask NEX to notify
+        // the original caller. This is what makes both consoles send probes:
+        // the first caller receives our InitiateProbe while we receive theirs.
+        if result.host_pid == self.principal_id {
+            self.request_probe_initiation_ext(std::slice::from_ref(&peer), &own_station, timeout)?;
+        }
         let probe_result = {
             let game_socket = self.game_socket.as_ref()
                 .ok_or_else(|| "Game UDP socket is not registered".to_owned())?;
