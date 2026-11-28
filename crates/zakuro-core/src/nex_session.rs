@@ -974,10 +974,10 @@ mod tests {
             assert!(local_url.contains("natm="));
             assert!(local_url.contains("natf="));
             assert_eq!(decode_nex_string(&register_request, &mut register_cursor).unwrap(), "AccountExtraInfo");
-            let total_length = test_read_u32(&register_request, &mut register_cursor) as usize;
+            let structure_length = test_read_u32(&register_request, &mut register_cursor) as usize;
             let fields_length = test_read_u32(&register_request, &mut register_cursor) as usize;
             let fields = test_take_buffer(&register_request, &mut register_cursor);
-            assert_eq!(total_length, fields_length + 4);
+            assert_eq!(structure_length, fields_length + 4);
             assert_eq!(fields.len(), fields_length);
             let mut fields_cursor = 0usize;
             assert_ne!(u64::from_le_bytes(fields[fields_cursor..fields_cursor + 8].try_into().unwrap()), 0);
