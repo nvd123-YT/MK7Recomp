@@ -761,6 +761,34 @@ mod tests {
             let mut incoming_cipher = Rc4::new(&server_session_key).unwrap();
             let mut outgoing_cipher = Rc4::new(&server_session_key).unwrap();
 
+            // Register the Game UDP socket before entering a gathering.
+            let mut register_response = Vec::new();
+            register_response.extend_from_slice(&0u32.to_le_bytes()); // QResult success
+            register_response.extend_from_slice(&99u32.to_le_bytes()); // assigned secure connection ID
+            let register_request = test_serve_rmc_call(
+                &secure_server, client, session_id, 2, 1, 0x0B, 0x04, 1,
+                &server_session_key, &mut incoming_cipher, &mut outgoing_cipher, &register_response,
+            );
+            let mut register_cursor = 0usize;
+            assert_eq!(test_read_u32(&register_request, &mut register_cursor), 2);
+            let local_url = decode_nex_string(&register_request, &mut register_cursor).unwrap();
+            let public_url = decode_nex_string(&register_request, &mut register_cursor).unwrap();
+            assert!(local_url.contains("stream=9"));
+            assert!(local_url.contains("type=1"));
+            assert!(public_url.contains("type=3"));
+            assert!(local_url.contains("natm="));
+            assert!(local_url.contains("natf="));
+            assert_eq!(decode_nex_string(&register_request, &mut register_cursor).unwrap(), "AccountExtraInfo");
+            let total_length = test_read_u32(&register_request, &mut register_cursor) as usize;
+            let fields_length = test_read_u32(&register_request, &mut register_cursor) as usize;
+            let fields = test_take_buffer(&register_request, &mut register_cursor);
+            assert_eq!(total_length, fields_length + 4);
+            assert_eq!(fields.len(), fields_length);
+            let mut fields_cursor = 0usize;
+            assert_ne!(u64::from_le_bytes(fields[fields_cursor..fields_cursor + 8].try_into().unwrap()), 0);
+            fields_cursor += 12; // LocalFriendCode + MoveCount
+            assert_eq!(decode_nex_string(&fields, &mut fields_cursor).unwrap(), "nex-test-token");
+
             // MK7's automatic matchmaking method: one search criteria, one
             // empty GatheringHolder, then the in-game matchmaking message.
             let mut auto_response = Vec::new();
@@ -776,11 +804,11 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                3,
                 2,
-                1,
                 0x6D,
                 0x0F,
-                1,
+                2,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -811,11 +839,11 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                4,
                 3,
-                2,
                 0x6D,
                 0x2A,
-                2,
+                3,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -829,11 +857,11 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                5,
                 4,
-                3,
                 0x6D,
                 0x07,
-                3,
+                4,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -845,7 +873,7 @@ mod tests {
             urls_response.extend_from_slice(&1u32.to_le_bytes());
             encode_nex_string(
                 &format!(
-                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;type=1",
+                    "prudp:/address=127.0.0.1;port={};sid=1;stream=9;PID=77;CID=77;RVCID=77;natm=0;natf=0;type=1",
                     game_peer_address.port()
                 ),
                 &mut urls_response,
@@ -854,11 +882,11 @@ mod tests {
                 &secure_server,
                 client,
                 session_id,
+                6,
                 5,
-                4,
                 0x15,
                 0x29,
-                4,
+                5,
                 &server_session_key,
                 &mut incoming_cipher,
                 &mut outgoing_cipher,
@@ -882,7 +910,7 @@ mod tests {
             assert_eq!(peer_request.session_id, peer_session_id);
             assert_eq!(peer_request.source_type, STREAM_TYPE_GAME);
             assert_eq!(peer_request.destination_type, STREAM_TYPE_GAME);
-            let mut game_decrypt = Rc4::new(b"").unwrap();
+            let mut game_decrypt = Rc4::new(b"CD&ML").unwrap();
             assert_eq!(game_decrypt.apply(&peer_request.payload), b"race frame from client");
 
             let peer_ack = PrudpPacket {
@@ -906,7 +934,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let mut game_encrypt = Rc4::new(b"").unwrap();
+            let mut game_encrypt = Rc4::new(b"CD&ML").unwrap();
             let peer_response = PrudpPacket {
                 packet_type: TEST_TYPE_DATA,
                 flags: TEST_FLAG_RELIABLE | TEST_FLAG_NEED_ACK | TEST_FLAG_HAS_SIZE,
@@ -954,6 +982,19 @@ mod tests {
 
         assert_eq!(online.principal_id(), principal_id);
         assert!(online.is_connected());
+        let game_client_socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let game_client_address = match game_client_socket.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            _ => panic!("Game client mock did not bind IPv4"),
+        };
+        online.register_game_station_with_mapping(
+            game_client_socket,
+            game_client_address,
+            game_client_address,
+            0,
+            0,
+            Duration::from_secs(2),
+        ).unwrap();
         let auto_result = online
             .auto_matchmake(
                 &MatchmakeSearchCriteria::public(),
