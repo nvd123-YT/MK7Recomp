@@ -7,12 +7,15 @@ use crate::nex_bootstrap::{
     build_secure_connect_payload, decode_client_kerberos_ticket,
     decode_ticket_granting_login_ex_response, encode_ticket_granting_login_ex_body,
     verify_secure_connect_response, ClientKerberosTicket, RmcResponse,
-    Station, STREAM_TYPE_RV,
+    Station, STREAM_TYPE_RV, MK7_PRUDP_ACCESS_KEY, encode_prudp_v0, decode_rmc_request,
+    encode_rmc_success_response, decode_nex_string,
 };
-use crate::nex_bootstrap::Rc4;
+use crate::nex_bootstrap::{Rc4, parse_station_url};
 use crate::prudp_client::{
-    establish_session, new_payload_ciphers, PrudpSession,
+    establish_session, make_data_ack, new_payload_ciphers, receive_from_server,
+    validate_session_packet, PrudpSession,
 };
+use crate::game_peer::{punch_through_nat, connect_to_peer_with_socket, GamePeerSession};
 
 const TICKET_GRANTING_PROTOCOL: u8 = 0x0A;
 const TICKET_GRANTING_LOGIN_EX: u32 = 0x02;
@@ -226,7 +229,9 @@ impl NexOnlineSession {
         let public_address = mappings[0];
         let mapping_type = if mappings.len() > 1 && mappings.iter().all(|mapping| *mapping == public_address) { 1u8 } else if mappings.len() > 1 { 2u8 } else { 0u8 };
         let local_address = SocketAddrV4::new(local_ip, local_port);
-        self.register_game_station_with_mapping(socket, local_address, public_address, mapping_type, 0, timeout)
+        let station = self.register_game_station_with_mapping(socket, local_address, public_address, mapping_type, 0, timeout)?;
+        self.report_nat_properties(mapping_type, 0, 0, timeout)?;
+        Ok(station)
     }
 
     /// Register a caller-supplied local/public mapping. The normal application
@@ -265,6 +270,133 @@ impl NexOnlineSession {
         Ok(public_station)
     }
     pub fn registered_game_station(&self) -> Option<&Station> { self.public_game_station.as_ref() }
+
+    /// Report the NAT mapping/filtering information to the secure NEX server.
+    pub fn report_nat_properties(
+        &mut self,
+        mapping: u32,
+        filtering: u32,
+        rtt_ms: u32,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut body = Vec::with_capacity(12);
+        body.extend_from_slice(&mapping.to_le_bytes());
+        body.extend_from_slice(&filtering.to_le_bytes());
+        body.extend_from_slice(&rtt_ms.to_le_bytes());
+        let response = self.request(0x03, 0x05, &body, timeout)?;
+        if !response.body.is_empty() {
+            return Err("NATTraversal::ReportNATProperties returned an unexpected body".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Wait for the server-pushed NATTraversal::InitiateProbe request, acknowledge
+    /// its RMC call, and return the peer's StationURL.
+    pub fn wait_for_initiate_probe(&mut self, timeout: Duration) -> Result<Station, String> {
+        if timeout.is_zero() {
+            return Err("waiting for a NAT InitiateProbe requires a positive timeout".to_owned());
+        }
+        let previous_timeout = self.socket.read_timeout().map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + timeout;
+        let result = (|| {
+            let push = loop {
+                if let Some(queued) = self.session.take_server_push() {
+                    break queued;
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("timed out waiting for server-pushed InitiateProbe".to_owned());
+                }
+                self.socket.set_read_timeout(Some(remaining))
+                    .map_err(|e| format!("could not set NEX push timeout: {e}"))?;
+                let Some(packet) = receive_from_server(&self.socket, self.server, &self.ticket.session_key)? else {
+                    return Err("timed out waiting for server-pushed InitiateProbe".to_owned());
+                };
+                if packet.packet_type != 2 || packet.flags & 0x01 != 0 {
+                    continue;
+                }
+                validate_session_packet(
+                    &packet,
+                    self.session.server_session_id,
+                    self.session.source_type,
+                    self.session.source_port,
+                    self.session.destination_port,
+                )?;
+                if packet.flags & 0x04 != 0 {
+                    let ack = make_data_ack(
+                        &packet,
+                        self.session.source_type,
+                        self.session.source_port,
+                        self.session.destination_type,
+                        self.session.destination_port,
+                    );
+                    self.socket.send_to(
+                        &encode_prudp_v0(&ack, MK7_PRUDP_ACCESS_KEY, &self.ticket.session_key),
+                        self.server,
+                    ).map_err(|e| format!("could not acknowledge NEX server push: {e}"))?;
+                }
+                if packet.flags & 0x02 == 0 {
+                    continue;
+                }
+                let clear = self.incoming_cipher.apply(&packet.payload);
+                if crate::prudp_client::is_rmc_request_message(&clear) {
+                    break clear;
+                }
+            };
+            let request = decode_rmc_request(&push)?;
+            if request.protocol != 0x03 || request.method != 0x02 {
+                return Err(format!(
+                    "received unsupported NEX server push protocol 0x{:02X}, method 0x{:X}",
+                    request.protocol, request.method
+                ));
+            }
+            let mut cursor = 0usize;
+            let station_url = decode_nex_string(&request.body, &mut cursor)?;
+            if cursor != request.body.len() {
+                return Err("InitiateProbe contained unexpected trailing data".to_owned());
+            }
+            let peer = parse_station_url(&station_url)?;
+            if peer.rv_connection_id == 0 {
+                return Err("InitiateProbe StationURL omitted RVCID".to_owned());
+            }
+            let response = encode_rmc_success_response(&request, &[]);
+            self.session.send_reliable_oneway(
+                &self.socket,
+                self.server,
+                &response,
+                &self.ticket.session_key,
+                &mut self.outgoing_cipher,
+                &mut self.incoming_cipher,
+                timeout,
+            )?;
+            Ok(peer)
+        })();
+        let restore = self.socket.set_read_timeout(previous_timeout);
+        match (result, restore) {
+            (Ok(peer), Ok(())) => Ok(peer),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(format!("NEX probe was processed but socket timeout restore failed: {error}")),
+        }
+    }
+
+    /// Report the per-peer probe result to the secure server. The MK7 3DS
+    /// NEX 2.4.3 signature has CID and Bool only (no newer RTT field).
+    pub fn report_nat_traversal_result(
+        &mut self,
+        peer_rvcid: u32,
+        succeeded: bool,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut body = Vec::with_capacity(5);
+        body.extend_from_slice(&peer_rvcid.to_le_bytes());
+        body.push(u8::from(succeeded));
+        let response = self.request(0x03, 0x04, &body, timeout)?;
+        if !response.body.is_empty() {
+            return Err("NATTraversal::ReportNATTraversalResult returned an unexpected body".to_owned());
+        }
+        Ok(())
+    }
+
     /// Browse MK7's Matchmake Extension for sessions matching the supplied
     /// game-specific search fields.
     pub fn browse_matchmake_sessions(
@@ -274,6 +406,7 @@ impl NexOnlineSession {
         range_size: u32,
         timeout: Duration,
     ) -> Result<Vec<crate::nex_bootstrap::MatchmakeSessionSummary>, String> {
+        self.register_game_station(timeout)?;
         let body = crate::nex_bootstrap::encode_matchmake_browse_request(
             criteria,
             range_offset,
@@ -293,6 +426,7 @@ impl NexOnlineSession {
         message: &str,
         timeout: Duration,
     ) -> Result<crate::nex_bootstrap::MatchmakeAutoResult, String> {
+        self.register_game_station(timeout)?;
         let body = crate::nex_bootstrap::encode_matchmake_auto_request(criteria, message)?;
         let response = self.request(0x6D, 0x0F, &body, timeout)?;
         crate::nex_bootstrap::decode_matchmake_auto_response(&response.body)
@@ -352,37 +486,69 @@ impl NexOnlineSession {
         Ok(())
     }
 
-    /// Join a gathering and establish its host's Game-stream PRUDP session.
-    ///
-    /// The host peer is selected by the PID returned in the auto-match result;
-    /// the per-gathering key returned by JoinMatchmakeSession is used for
-    /// subsequent PRUDP DATA signatures and RC4 payload encryption.
+    /// Establish the direct Game-stream peer connection after AutoMatchmake.
+    /// The auto-match call already joins the caller to the gathering.
     pub fn connect_to_matchmake_host(
         &mut self,
         result: &crate::nex_bootstrap::MatchmakeAutoResult,
-        message: &str,
         timeout: Duration,
-    ) -> Result<crate::game_peer::GamePeerSession, String> {
-        if result.host_pid == 0 {
-            return Err("automatic matchmaking returned a zero host PID".to_owned());
-        }
+    ) -> Result<GamePeerSession, String> {
+        self.connect_to_matchmake_host_with_pia_format(result, timeout, false)
+    }
+
+    /// Same as connect_to_matchmake_host, with an explicit PIA 5.11+
+    /// variable-ID switch. Use true only when the title's PIA probe protocol
+    /// appends CID to its NatProbeData.
+    pub fn connect_to_matchmake_host_with_pia_format(
+        &mut self,
+        result: &crate::nex_bootstrap::MatchmakeAutoResult,
+        timeout: Duration,
+        include_variable_id: bool,
+    ) -> Result<GamePeerSession, String> {
+        if result.host_pid == 0 { return Err("automatic matchmaking returned a zero host PID".to_owned()); }
         self.register_game_station(timeout)?;
-        self.join_matchmake_session(result.gathering_id, message, timeout)?;
-        let stations = self.get_matchmake_session_urls(result.gathering_id, timeout)?;
-        let host = stations
-            .iter()
-            .find(|station| {
-                station.principal_id == result.host_pid
-                    && station.stream_type == crate::nex_bootstrap::STREAM_TYPE_GAME
-            })
-            .ok_or_else(|| format!(
-                "GetSessionURLs did not return a Game-stream StationURL for host PID {}",
-                result.host_pid
-            ))?;
-        let peer_address = resolve_station(host)?;
+        let own_station = self.public_game_station.clone()
+            .ok_or_else(|| "Game station registration did not produce a public StationURL".to_owned())?;
+        let peer_from_gathering = if result.host_pid == self.principal_id {
+            None
+        } else {
+            let stations = self.get_matchmake_session_urls(result.gathering_id, timeout)?;
+            let mut candidates = stations.into_iter().filter(|station|
+                station.principal_id == result.host_pid && station.stream_type == crate::nex_bootstrap::STREAM_TYPE_GAME
+            ).collect::<Vec<_>>();
+            let selected = candidates.iter().position(|station| station.is_public()).unwrap_or(0);
+            if candidates.is_empty() {
+                return Err(format!("GetSessionURLs did not return a Game-stream StationURL for host PID {}", result.host_pid));
+            }
+            Some(candidates.swap_remove(selected))
+        };
+        if let Some(peer) = &peer_from_gathering {
+            self.request_probe_initiation_ext(std::slice::from_ref(peer), &own_station, timeout)?;
+        }
+        // The host gets the joining client's StationURL through InitiateProbe;
+        // the joiner gets the host's reciprocal StationURL the same way.
+        let peer = self.wait_for_initiate_probe(timeout)?;
+        if let Some(expected) = &peer_from_gathering {
+            if peer.principal_id != expected.principal_id {
+                return Err(format!("InitiateProbe came from PID {}, expected host PID {}", peer.principal_id, expected.principal_id));
+            }
+        }
+        let probe_result = {
+            let game_socket = self.game_socket.as_ref()
+                .ok_or_else(|| "Game UDP socket is not registered".to_owned())?;
+            punch_through_nat(game_socket, &own_station, &peer, timeout, include_variable_id)
+        };
+        match probe_result {
+            Ok(_) => self.report_nat_traversal_result(peer.rv_connection_id, true, timeout)?,
+            Err(error) => {
+                let _ = self.report_nat_traversal_result(peer.rv_connection_id, false, timeout);
+                return Err(error);
+            }
+        }
+        let peer_address = resolve_station(&peer)?;
         let game_socket = self.game_socket.take()
             .ok_or_else(|| "Game-stream station was registered without a retained UDP socket".to_owned())?;
-        crate::game_peer::connect_to_peer_with_socket(game_socket, host, peer_address, timeout)
+        connect_to_peer_with_socket(game_socket, &peer, peer_address, timeout)
     }
 
     /// The principal ID authenticated by the NEX TicketGranting server.
