@@ -929,7 +929,7 @@ mod tests {
                 session_id: 7,
                 packet_id: 2,
                 fragment_id: 0,
-                signature: [0; 4],
+                signature: data_signature(b"stream-type", 2, 0, ACCESS_KEY, b"session"),
                 connection_signature: [0; 4],
                 payload: b"stream-type".to_vec(),
             };
