@@ -9,7 +9,7 @@ const ACCESS_KEY: &[u8] = b"6181dff1";
 const TYPE_SYN: u8 = 0;
 const TYPE_CONNECT: u8 = 1;
 const TYPE_DATA: u8 = 2;
-const TYPE_ACK: u8 = 3;
+const TYPE_DISCONNECT: u8 = 3;
 const LEGACY_ACCESS_KEY: &[u8] = b"ridfebb9";
 const FLAG_ACK: u8 = 1;
 const FLAG_RELIABLE: u8 = 2;
@@ -42,6 +42,8 @@ pub struct PrudpPacket {
     pub session_id: u8,
     pub packet_id: u16,
     pub fragment_id: u8,
+    /// Four-byte header signature, separate from the SYN/CONNECT connection signature.
+    pub signature: [u8; 4],
     pub connection_signature: [u8; 4],
     pub payload: Vec<u8>,
 }
@@ -150,7 +152,6 @@ pub fn encode_prudp_v0(
     output.push(packet.session_id);
     let signature = match packet.packet_type {
         TYPE_SYN => [0; 4],
-        TYPE_CONNECT => packet.connection_signature,
         TYPE_DATA => data_signature(
             &packet.payload,
             packet.packet_id,
@@ -158,7 +159,14 @@ pub fn encode_prudp_v0(
             access_key,
             session_key,
         ),
-        _ => [0; 4],
+        TYPE_DISCONNECT if access_key != LEGACY_ACCESS_KEY => data_signature(
+            &packet.payload,
+            packet.packet_id,
+            packet.fragment_id,
+            access_key,
+            session_key,
+        ),
+        _ => packet.signature,
     };
     output.extend_from_slice(&signature);
     output.extend_from_slice(&packet.packet_id.to_le_bytes());
@@ -242,8 +250,11 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
     if checksum_v0(&bytes[..end], access_key) != bytes[end] {
         return Err("PRUDP packet checksum mismatch".to_owned());
     }
-    if packet_type == TYPE_DATA && signature != data_signature(&bytes[cursor..end], packet_id, fragment_id, access_key, session_key) {
-        return Err("PRUDP data signature mismatch".to_owned());
+    if (packet_type == TYPE_DATA
+        || (packet_type == TYPE_DISCONNECT && access_key != LEGACY_ACCESS_KEY))
+        && signature != data_signature(&bytes[cursor..end], packet_id, fragment_id, access_key, session_key)
+    {
+        return Err("PRUDP packet data signature mismatch".to_owned());
     }
 
     Ok(PrudpPacket {
@@ -254,6 +265,7 @@ pub fn decode_prudp_v0(bytes: &[u8], access_key: &[u8], session_key: &[u8]) -> R
         session_id,
         packet_id,
         fragment_id,
+        signature,
         connection_signature,
         payload: bytes[cursor..end].to_vec(),
     })
@@ -427,6 +439,7 @@ mod tests {
             session_id: 7,
             packet_id: 42,
             fragment_id: 0,
+            signature: data_signature(b"test payload", 42, 0, ACCESS_KEY, b"mk7 test session key"),
             connection_signature: [0; 4],
             payload: b"test payload".to_vec(),
         };
@@ -460,21 +473,43 @@ mod tests {
     }
 
     #[test]
-    fn prudp_v0_ack_without_optional_fields_is_a_valid_12_byte_packet() {
+    fn prudp_v0_disconnect_ack_without_optional_fields_is_a_valid_12_byte_packet() {
         let packet = PrudpPacket {
-            packet_type: TYPE_ACK,
-            flags: 0,
+            packet_type: TYPE_DISCONNECT,
+            flags: FLAG_ACK,
             source_port: 1,
             destination_port: 2,
             session_id: 3,
             packet_id: 4,
             fragment_id: 0,
+            signature: data_signature(&[], 4, 0, ACCESS_KEY, b""),
             connection_signature: [0; 4],
             payload: Vec::new(),
         };
         let encoded = encode_prudp_v0(&packet, ACCESS_KEY, b"");
         assert_eq!(encoded.len(), 12);
         assert_eq!(decode_prudp_v0(&encoded, ACCESS_KEY, b"").unwrap(), packet);
+    }
+
+    #[test]
+    fn prudp_connect_header_signature_is_separate_from_connection_signature() {
+        let packet = PrudpPacket {
+            packet_type: TYPE_CONNECT,
+            flags: FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE,
+            source_port: 1,
+            destination_port: 1,
+            session_id: 7,
+            packet_id: 1,
+            fragment_id: 0,
+            signature: [1, 2, 3, 4],
+            connection_signature: [5, 6, 7, 8],
+            payload: Vec::new(),
+        };
+        let encoded = encode_prudp_v0(&packet, ACCESS_KEY, b"");
+        let decoded = decode_prudp_v0(&encoded, ACCESS_KEY, b"").unwrap();
+        assert_eq!(decoded.signature, [1, 2, 3, 4]);
+        assert_eq!(decoded.connection_signature, [5, 6, 7, 8]);
+        assert_eq!(decoded, packet);
     }
 
     #[test]
